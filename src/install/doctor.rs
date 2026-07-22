@@ -45,31 +45,37 @@ fn cona_on_path() -> Option<PathBuf> {
 /// see exactly why Claude Code may or may not be picking cona up.
 pub fn cmd_doctor(project_root: &Path) -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
-    let tag_ok = ui::green("ok  ");
-    let tag_miss = ui::red("MISS");
-    let tag_warn = ui::yellow("warn");
-    let ok = |b: bool| {
-        if b {
-            tag_ok.as_str()
-        } else {
-            tag_miss.as_str()
-        }
-    };
+    let mut issues = 0usize;
 
     println!("{}\n", ui::bold("cona doctor"));
 
     // --- binary ---
     println!("{}", ui::heading("binary"));
     match db::meta_get("install_path").ok().flatten() {
-        Some(p) if Path::new(&p).exists() => println!("  [{tag_ok}] installed: {p}"),
-        Some(p) => println!("  [{tag_miss}] recorded but missing: {p}  → run `cona install`"),
-        None => println!(
-            "  [{tag_warn}] no recorded install  → run `cona install` from the source checkout"
-        ),
+        Some(p) if Path::new(&p).exists() => println!("  {}", ui::ok(&format!("installed: {p}"))),
+        Some(p) => {
+            issues += 1;
+            println!(
+                "  {}",
+                ui::warn(&format!("recorded but missing: {p}  → run `cona install`"))
+            );
+        }
+        None => {
+            issues += 1;
+            println!(
+                "  {}",
+                ui::warn("no recorded install  → run `cona install` from the source checkout")
+            );
+        }
     }
     match cona_on_path() {
-        Some(p) => println!("  [{tag_ok}] on PATH: {}", p.display()),
-        None => println!("  [{tag_warn}] `cona` is not on PATH (agents use an absolute path, so this is only cosmetic)"),
+        Some(p) => println!("  {}", ui::ok(&format!("on PATH: {}", p.display()))),
+        None => println!(
+            "  {}",
+            ui::warn(
+                "`cona` is not on PATH (agents use an absolute path, so this is only cosmetic)"
+            )
+        ),
     }
 
     // --- agent integration (global + project) ---
@@ -82,23 +88,47 @@ pub fn cmd_doctor(project_root: &Path) -> Result<()> {
         let settings = dir.join("settings.json");
         let skill = dir.join("skills/cona/SKILL.md");
         let (idx, read) = settings_cona_hooks(&settings);
+        let mut tag = |b: bool, s: &str| {
+            if b {
+                ui::ok(s)
+            } else {
+                issues += 1;
+                ui::warn(s)
+            }
+        };
         println!("\n{}", ui::heading(&format!("claude {label}")));
-        println!("  [{}] index hook (PostToolUse/SessionStart)", ok(idx));
-        println!("  [{}] read-guard hook (PreToolUse Read|Grep)", ok(read));
-        println!("  [{}] skill: {}", ok(skill.exists()), skill.display());
+        println!("  {}", tag(idx, "index hook (PostToolUse/SessionStart)"));
+        println!("  {}", tag(read, "read-guard hook (PreToolUse Read|Grep)"));
+        println!(
+            "  {}",
+            tag(skill.exists(), &format!("skill: {}", skill.display()))
+        );
         // freshness: does the config here match the running binary's baked
         // SKILL/guide/hooks? (recorded by the auto-refresh / `upgrade` paths)
         if skill.exists() {
-            match db::meta_get(&super::upgrade::config_ver_key(&root)).ok().flatten() {
+            match db::meta_get(&super::upgrade::config_ver_key(&root))
+                .ok()
+                .flatten()
+            {
                 Some(v) if v == current_ver => {
-                    println!("  [{tag_ok}] config current (v{v})")
+                    println!("  {}", ui::ok(&format!("config current (v{v})")))
                 }
-                Some(v) => println!(
-                    "  [{tag_warn}] config written by v{v}, binary is v{current_ver}  → run `cona upgrade`"
-                ),
-                None => println!(
-                    "  [{tag_warn}] config version unknown  → run `cona upgrade` to re-sync"
-                ),
+                Some(v) => {
+                    issues += 1;
+                    println!(
+                        "  {}",
+                        ui::warn(&format!(
+                            "config written by v{v}, binary is v{current_ver}  → run `cona upgrade`"
+                        ))
+                    );
+                }
+                None => {
+                    issues += 1;
+                    println!(
+                        "  {}",
+                        ui::warn("config version unknown  → run `cona upgrade` to re-sync")
+                    );
+                }
             }
         }
     }
@@ -121,11 +151,15 @@ pub fn cmd_doctor(project_root: &Path) -> Result<()> {
         ui::heading(&format!("index ({})", project_root.display()))
     );
     if files == 0 {
-        println!("  [{tag_warn}] empty — run `cona index`");
+        issues += 1;
+        println!("  {}", ui::warn("empty — run `cona index`"));
     } else {
         println!(
-            "  [{tag_ok}] {files} files, {symbols} symbols · db {}",
-            db::human_bytes(db::project_db_size(project_root))
+            "  {}",
+            ui::ok(&format!(
+                "{files} files, {symbols} symbols · db {}",
+                db::human_bytes(db::project_db_size(project_root))
+            ))
         );
     }
 
@@ -156,7 +190,8 @@ pub fn cmd_doctor(project_root: &Path) -> Result<()> {
     );
     if s.over_limit {
         println!(
-            "  [warn] ~/.cona is over 100 MB — run `cona tidy --orphans` to reclaim space"
+            "  {}",
+            ui::warn("~/.cona is over 100 MB — run `cona tidy --orphans` to reclaim space")
         );
     }
 
@@ -164,7 +199,10 @@ pub fn cmd_doctor(project_root: &Path) -> Result<()> {
     println!("\n{}", ui::heading("semantic resolve helper (optional)"));
     match resolve::helper_status() {
         Some((path, how)) => {
-            println!("  [{tag_ok}] found via {how}: {}", path.display());
+            println!(
+                "  {}",
+                ui::ok(&format!("found via {how}: {}", path.display()))
+            );
             println!(
                 "  resolves same-file & cross-file same-arity ambiguity for {}",
                 resolve::SUPPORTED_LANGS
@@ -172,7 +210,8 @@ pub fn cmd_doctor(project_root: &Path) -> Result<()> {
         }
         None => {
             println!(
-                "  [{tag_warn}] not installed — cona uses its name-based + arity heuristics only"
+                "  {}",
+                ui::warn("not installed — cona uses its name-based + arity heuristics only")
             );
             println!(
                 "  ships in the release tarball beside cona; `cargo install` users get it\n  \
@@ -182,9 +221,21 @@ pub fn cmd_doctor(project_root: &Path) -> Result<()> {
     }
 
     println!(
-        "\nIf Claude Code isn't using cona: it snapshots hooks + skills at startup,\n\
-         so RESTART Claude Code (or run /hooks) after installing. Verify with /hooks\n\
-         (should list cona index + hook PreToolUse) and by asking it to use the cona skill."
+        "\n{}",
+        ui::summary(
+            issues,
+            "thing",
+            "need attention — see above",
+            "all checks passed"
+        )
+    );
+    println!(
+        "{}",
+        ui::dim(
+            "if Claude Code isn't using cona: it snapshots hooks + skills at startup, so \
+             RESTART Claude Code (or run /hooks) after installing — verify with /hooks \
+             (should list cona index + hook PreToolUse) and by asking it to use the cona skill"
+        )
     );
     Ok(())
 }

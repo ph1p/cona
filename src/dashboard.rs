@@ -9,14 +9,11 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Sparkline, Table,
+    Block, BorderType, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Table,
 };
 use ratatui::Frame;
 use std::path::Path;
 use std::time::{Duration, Instant};
-
-const SPARK_BUCKETS: usize = 60;
-const SPARK_SECS: i64 = 60; // one minute per bucket → last hour
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -59,7 +56,6 @@ struct Snapshot {
     per_cmd: Vec<(String, i64, f64, i64, i64)>,
     top: Vec<(String, i64, i64)>,
     recent: Vec<(i64, String, String, i64, i64)>,
-    series: Vec<u64>,
 }
 
 pub fn run(root: &Path) -> Result<()> {
@@ -153,7 +149,6 @@ fn gather(root: &Path, project_scope: bool) -> Result<Snapshot> {
         // live activity shows real queries only — index/edit/hook:* maintenance
         // carries no savings and is just noise in the feed
         recent: db::recent(&g, scope_ref, 40, true)?,
-        series: db::savings_series(&g, scope_ref, SPARK_BUCKETS, SPARK_SECS)?,
     })
 }
 
@@ -163,8 +158,7 @@ fn draw(f: &mut Frame, s: &Snapshot, project_scope: bool) {
         .constraints([
             Constraint::Length(4), // header
             Constraint::Length(3), // savings gauge
-            Constraint::Min(6),    // middle
-            Constraint::Length(7), // sparkline
+            Constraint::Min(6),    // middle (queries, top targets, live activity)
             Constraint::Length(1), // footer
         ])
         .split(f.area());
@@ -172,8 +166,7 @@ fn draw(f: &mut Frame, s: &Snapshot, project_scope: bool) {
     draw_header(f, root[0], s);
     draw_gauge(f, root[1], s);
     draw_middle(f, root[2], s);
-    draw_sparkline(f, root[3], s, project_scope);
-    draw_footer(f, root[4], project_scope);
+    draw_footer(f, root[3], project_scope);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, s: &Snapshot) {
@@ -216,8 +209,7 @@ fn draw_header(f: &mut Frame, area: Rect, s: &Snapshot) {
             Span::styled(format!(" · indexed {last}"), Style::default().fg(MUTED)),
         ]),
     ];
-    let block =
-        panel(&format!("cona v{VERSION} · live")).border_style(Style::default().fg(ACCENT));
+    let block = panel(&format!("cona v{VERSION} · live")).border_style(Style::default().fg(ACCENT));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -354,51 +346,15 @@ fn draw_middle(f: &mut Frame, area: Rect, s: &Snapshot) {
     f.render_widget(List::new(feed).block(panel("live activity")), cols[1]);
 }
 
-fn draw_sparkline(f: &mut Frame, area: Rect, s: &Snapshot, project_scope: bool) {
-    let total: u64 = s.series.iter().sum();
-    let peak = s.series.iter().copied().max().unwrap_or(0);
-    let scope = if project_scope {
-        "this project"
-    } else {
-        "all projects"
-    };
-    let title = format!(
-        " tokens saved per minute · {scope} · peak {}/min · total {} in last hour ",
-        fmt_k(peak as i64),
-        fmt_k(total as i64),
-    );
-    let block = panel(title.trim())
-        .title_bottom(
-            Line::from(Span::styled(" ◀ 60 min ago ", Style::default().fg(MUTED))).left_aligned(),
-        )
-        .title_bottom(
-            Line::from(Span::styled(" now ▶ ", Style::default().fg(MUTED))).right_aligned(),
-        );
-    if total == 0 {
-        f.render_widget(
-            Paragraph::new("no tokens saved in the last hour — each bar is one minute of savings")
-                .style(Style::default().fg(MUTED))
-                .block(block),
-            area,
-        );
-        return;
-    }
-    let spark = Sparkline::default()
-        .block(block)
-        .data(&s.series)
-        .style(Style::default().fg(SAVED));
-    f.render_widget(spark, area);
-}
-
 fn draw_footer(f: &mut Frame, area: Rect, project_scope: bool) {
     let scope = if project_scope { "project" } else { "global" };
     let key = Style::default().fg(Color::Black).bg(ACCENT);
     let line = Line::from(vec![
         Span::styled(" q ", key),
         Span::styled(" quit  ", Style::default().fg(MUTED)),
-        Span::styled(" p ", key),
+        Span::styled(" p/tab ", key),
         Span::styled(format!(" scope: {scope}  "), Style::default().fg(MUTED)),
-        Span::styled("· refreshing every 1s", Style::default().fg(MUTED)),
+        Span::styled("· live, refreshing every 1s", Style::default().fg(MUTED)),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }

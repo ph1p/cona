@@ -1192,6 +1192,7 @@ fn session_start_context(
 
 fn cmd_setup(root: &Path, scope: Option<SetupScope>) -> Result<()> {
     use std::io::IsTerminal;
+    println!("{}", ui::banner("cona setup"));
     let scope = match scope {
         Some(s) => s,
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
@@ -1227,6 +1228,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>) -> Result<()> {
         }
     }
 
+    println!("{}", ui::heading("index"));
     let conn = db::open_project_db(root)?;
     let r = indexer::index_project(root, &conn)?;
     println!(
@@ -1237,6 +1239,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>) -> Result<()> {
         ))
     );
 
+    let mut agents_configured = 0usize;
     if do_project {
         println!(
             "\n{}",
@@ -1252,6 +1255,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>) -> Result<()> {
         }
         match pick_agents(root, false)? {
             Some(agents) if !agents.is_empty() => {
+                agents_configured += agents.len();
                 install::cmd_agents(root, "install", &agents, false, false)?;
             }
             Some(_) => println!("{}", ui::dim("no agents selected")),
@@ -1265,13 +1269,24 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>) -> Result<()> {
         );
         match pick_agents(root, true)? {
             Some(agents) if !agents.is_empty() => {
+                agents_configured += agents.len();
                 install::cmd_agents(root, "install", &agents, false, true)?;
             }
             Some(_) => println!("{}", ui::dim("no agents selected")),
             None => {}
         }
     }
-    println!("\n{}", ui::ok(&ui::bold("setup complete")));
+    println!(
+        "\n{}",
+        ui::ok(&ui::bold(&format!(
+            "setup complete — {agents_configured} agent{} configured",
+            if agents_configured == 1 { "" } else { "s" }
+        )))
+    );
+    println!(
+        "{}",
+        ui::dim("run `cona doctor` any time to verify the installation")
+    );
     Ok(())
 }
 
