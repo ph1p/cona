@@ -1,0 +1,36 @@
+# Standalone crate — deliberately NOT a member of cona's workspace.
+#
+# stack-graphs pulls tree-sitter 0.24 (a crate with `links = "tree-sitter"`),
+# while cona's 32 grammars run on tree-sitter 0.26. Cargo enforces the
+# `links` uniqueness across a whole workspace dependency graph, so the two
+# runtimes cannot coexist in one workspace at all — this crate must be its own
+# workspace root and build independently. cona spawns the resulting binary
+# as a subprocess (process isolation); see docs/spike-semantic-resolution.md.
+[workspace]
+
+[package]
+name = "cona-resolve-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Out-of-process stack-graphs name resolver for cona (semantic disambiguation)"
+license = "MIT"
+
+[[bin]]
+name = "cona-resolve-helper"
+path = "src/main.rs"
+
+[dependencies]
+stack-graphs = "0.14"
+tree-sitter-stack-graphs = "0.10"
+tree-sitter-stack-graphs-typescript = "0.4"
+tree-sitter-stack-graphs-javascript = "0.3"
+tree-sitter-stack-graphs-python = "0.3"
+tree-sitter-graph = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tree-sitter-rust = "0.23"
+
+[profile.release]
+lto = true
+strip = true

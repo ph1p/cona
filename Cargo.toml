@@ -1,0 +1,82 @@
+[package]
+name = "cona"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.95"
+description = "Fast, token-efficient code navigation & editing CLI for AI agents"
+license = "MIT"
+repository = "https://github.com/ph1p/codenav"
+homepage = "https://github.com/ph1p/codenav"
+readme = "README.md"
+keywords = ["cli", "tree-sitter", "code-navigation", "ai", "agents"]
+categories = ["command-line-utilities", "development-tools"]
+# SKILL.md is include_str!'d into the binary — it must ship in the package.
+# .github/ excluded so ci:-only commits are no package change → no release.
+# src/resolve-helper is a standalone crate (own tree-sitter 0.24 runtime,
+# spawned as a subprocess) nested under src/ for tidiness but NOT part of this
+# crate's build — it must NOT ship inside the cona crate tarball.
+exclude = [".claude/", ".github/", "AGENTS.md", "CLAUDE.md", "src/resolve-helper/"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+# preserve_order: settings.json round-trips keep the user's key order intact
+# (stock Map = BTreeMap would alphabetize their whole file on every write)
+serde_json = { version = "1", features = ["preserve_order"] }
+dirs = "6"
+anyhow = "1"
+ratatui = "0.30"
+notify = "8"
+tree-sitter-css = "0.25.0"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-php = "0.24.2"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-swift = "0.7.1"
+tree-sitter-bash = "0.25.0"
+tree-sitter-lua = "0.4.0"
+tree-sitter-scala = "0.24.0"
+tree-sitter-elixir = "0.3.4"
+tree-sitter-dart = "0.0.4"
+tree-sitter-json = "0.24.8"
+tree-sitter-yaml = "0.7.1"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-html = "0.23.2"
+tree-sitter-md = "0.5.1"
+tree-sitter-zig = "1.1.2"
+tree-sitter-nix = "0.3.0"
+tree-sitter-haskell = "0.23.1"
+tree-sitter-ocaml = "0.25.0"
+tree-sitter-svelte-ng = "1.0.2"
+tree-sitter-perl = "1.1.2"
+tree-sitter-r = "1.3.0"
+tree-sitter-julia = "0.23.1"
+tree-sitter-powershell = "0.26.4"
+tree-sitter-objc = "3.0.2"
+tree-sitter-xml = "0.7.0"
+tree-sitter-graphql = "0.1.0"
+tree-sitter-proto = "0.4.0"
+tree-sitter-make = "1.1.1"
+tree-sitter-sequel = "0.3.11"
+tree-sitter-hcl = "1.1.0"
+# vue + dockerfile: the crates.io grammar crates pin an old tree-sitter runtime
+# (symbol collision), so we vendor their grammar C (vendor/*) and compile it in
+# build.rs against our own 0.26 runtime. See build.rs + lang.rs `extern "C"`.
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+lto = true
+strip = true

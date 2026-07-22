@@ -1,0 +1,17 @@
+pub mod commands;
+pub mod dashboard;
+pub mod db;
+pub mod deps;
+pub mod diffmap;
+pub mod editing;
+pub mod entries;
+pub mod fuzzy;
+pub mod gitmap;
+pub mod graph;
+pub mod hook;
+pub mod indexer;
+pub mod install;
+pub mod lang;
+pub mod mcp;
+pub mod resolve;
+pub mod ui;

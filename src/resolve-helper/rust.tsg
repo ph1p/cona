@@ -1,0 +1,371 @@
+;; -----------------------------------------------------------------------------
+;; Hand-authored stack-graphs name-binding rules for Rust.
+;;
+;; There is NO published tree-sitter-stack-graphs crate for Rust; these rules are
+;; written from scratch for cona's out-of-process resolve helper. They target
+;; the disambiguation classes cona actually needs -- NOT full Rust semantics:
+;;
+;;   * free functions vs. inherent methods of the same name/arity
+;;   * same-named methods on different types (via `impl Type { .. }` scoping)
+;;   * module-scoped items (`mod`)
+;;   * `use` imports (best-effort last path segment binding)
+;;
+;; NOT modelled: traits fully, generics, macro expansion, associated-type
+;; inference, method resolution through references/derefs beyond the direct
+;; `let x = Type { .. }` / `let x = Type::ctor()` cases. Anything the rules
+;; can't bind resolves to nothing -- the caller is fail-open and keeps its
+;; name-based result.
+;;
+;; Modelling approach (a lexical-scope graph with a member dimension):
+;;   - @node.lexical_scope : points "up" toward the enclosing scope; references
+;;                           resolve by walking it.
+;;   - @node.lexical_defs  : holds the definitions a statement/item introduces;
+;;                           the enclosing scope connects to it (hoisting).
+;;   - a type name (`impl Budget`) exposes a MEMBER scope reached by popping a
+;;     guard symbol "." ; each inherent method is a definition inside it. A
+;;     receiver typed as `Budget` (`let b = Budget { .. }`) pushes "." to reach
+;;     those members, so `b.finish()` binds to `Budget::finish` while a bare
+;;     `finish()` only ever sees the free function.
+;; -----------------------------------------------------------------------------
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Global Variables
+
+global FILE_PATH
+global ROOT_NODE
+global JUMP_TO_SCOPE_NODE
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Attribute Shorthands
+
+attribute node_definition = node => type = "pop_symbol", node_symbol = node, is_definition
+attribute node_reference = node  => type = "push_symbol", node_symbol = node, is_reference
+attribute pop_symbol = symbol    => type = "pop_symbol", symbol = symbol
+attribute push_symbol = symbol   => type = "push_symbol", symbol = symbol
+attribute node_symbol = node     => symbol = (source-text node), source_node = node
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Universal node scaffolding
+;;
+;; Every node we might touch gets its scope/def nodes defined up front so later
+;; stanzas never reference an undefined node.
+
+(source_file)@root {
+  node @root.lexical_scope
+}
+
+[
+  (function_item)
+  (struct_item)
+  (enum_item)
+  (union_item)
+  (trait_item)
+  (impl_item)
+  (mod_item)
+  (const_item)
+  (static_item)
+  (type_item)
+  (use_declaration)
+  (let_declaration)
+  (expression_statement)
+  (macro_invocation)
+  (block)
+  (empty_statement)
+]@stmt {
+  node @stmt.lexical_scope
+  node @stmt.lexical_defs
+}
+
+[
+  (identifier)
+  (type_identifier)
+  (field_identifier)
+]@name {
+  node @name.def
+  node @name.ref
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Source file / module bodies (hoisting: any item sees any sibling item)
+
+(source_file (_)@stmt)@root {
+  edge @stmt.lexical_scope -> @root.lexical_scope
+  edge @root.lexical_scope -> @stmt.lexical_defs
+}
+
+;; A block chains to its enclosing scope and hoists its own local definitions.
+;; Only statement-like children carry `lexical_defs`; the trailing tail
+;; expression (an implicit return, e.g. `a + b + c`) does NOT, so it is wired
+;; scope-only in a separate stanza below to avoid touching an undefined node.
+[
+  (block (function_item)@stmt)
+  (block (struct_item)@stmt)
+  (block (enum_item)@stmt)
+  (block (union_item)@stmt)
+  (block (trait_item)@stmt)
+  (block (impl_item)@stmt)
+  (block (mod_item)@stmt)
+  (block (const_item)@stmt)
+  (block (static_item)@stmt)
+  (block (type_item)@stmt)
+  (block (use_declaration)@stmt)
+  (block (let_declaration)@stmt)
+  (block (expression_statement)@stmt)
+  (block (macro_invocation)@stmt)
+  (block (empty_statement)@stmt)
+  (block (block)@stmt)
+]@blk {
+  edge @stmt.lexical_scope -> @blk.lexical_scope
+  edge @blk.lexical_scope -> @stmt.lexical_defs
+  attr (@blk.lexical_scope -> @stmt.lexical_defs) precedence = 1
+}
+
+;; module: `mod m { .. }` -- the body is a nested lexical scope; the module name
+;; itself becomes a definition in the enclosing scope.
+(mod_item name:(identifier)@name body:(declaration_list)@body)@mod {
+  node def
+  attr (def) node_definition = @name
+  edge @mod.lexical_defs -> def
+  edge @body.lexical_scope -> @mod.lexical_scope
+}
+
+(declaration_list)@dl {
+  node @dl.lexical_scope
+}
+(declaration_list (_)@stmt)@dl {
+  edge @stmt.lexical_scope -> @dl.lexical_scope
+  edge @dl.lexical_scope -> @stmt.lexical_defs
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Free functions
+
+(function_item name:(identifier)@name body:(block)@body)@fun {
+  node def
+  attr (def) node_definition = @name
+  edge @fun.lexical_defs -> def
+  edge @body.lexical_scope -> @fun.lexical_scope
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Types (struct/enum/union): the name is a definition, AND it exposes a member
+;; scope reached by popping the "." guard symbol. `impl` blocks add methods into
+;; that member scope.
+
+[
+  (struct_item name:(type_identifier)@name)
+  (enum_item name:(type_identifier)@name)
+  (union_item name:(type_identifier)@name)
+]@ty {
+  node def
+  attr (def) node_definition = @name
+  edge @ty.lexical_defs -> def
+
+  node @ty.members
+  node dot_pop
+  attr (dot_pop) pop_symbol = "."
+  edge def -> dot_pop
+  edge dot_pop -> @ty.members
+}
+
+(const_item name:(identifier)@name)@c {
+  node def
+  attr (def) node_definition = @name
+  edge @c.lexical_defs -> def
+}
+
+(static_item name:(identifier)@name)@s {
+  node def
+  attr (def) node_definition = @name
+  edge @s.lexical_defs -> def
+}
+
+(type_item name:(type_identifier)@name)@t {
+  node def
+  attr (def) node_definition = @name
+  edge @t.lexical_defs -> def
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; impl blocks: methods become definitions inside the target type's member scope,
+;; reached by referencing the type and popping the "." guard -- the same guard
+;; the type stanza uses -- so `receiver_of_type.method()` and `Type::method()`
+;; reach them, while a bare `method()` in lexical scope never does.
+
+(impl_item type:(type_identifier)@tyname body:(declaration_list)@body)@impl {
+  ;; Expose the impl's methods under the type name, exactly like the struct
+  ;; stanza: resolving `Budget` yields THIS pop too, whose "." guard leads into
+  ;; the impl's member scope. A receiver typed `Budget` therefore reaches the
+  ;; methods even though the struct's own member scope is empty.
+  node tydef
+  attr (tydef) node_definition = @tyname
+  edge @impl.lexical_defs -> tydef
+
+  node @impl.members
+  node dot_pop
+  attr (dot_pop) pop_symbol = "."
+  edge tydef -> dot_pop
+  edge dot_pop -> @impl.members
+
+  edge @body.lexical_scope -> @impl.lexical_scope
+}
+
+;; A method / assoc-fn declared inside an impl's declaration_list becomes a
+;; definition in that impl's member scope (NOT the lexical scope).
+(impl_item body:(declaration_list (function_item name:(identifier)@mname body:(block)@mbody)@fn)@_body)@impl {
+  node mdef
+  attr (mdef) node_definition = @mname
+  edge @impl.members -> mdef
+  edge @mbody.lexical_scope -> @fn.lexical_scope
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; let bindings -- the pattern name is a definition; if the initializer is a
+;; struct-literal or `Type::ctor(..)` of a known type, the binding carries that
+;; type so member access on it resolves into the type's members.
+
+(let_declaration pattern:(identifier)@name)@let {
+  node def
+  attr (def) node_definition = @name
+  edge @let.lexical_defs -> def
+  edge @name.def -> def
+}
+
+;; `let b = Budget { .. };` : b's type is Budget. Referencing `b` then pushing
+;; "." reaches Budget's members.
+(let_declaration
+  pattern:(identifier)@name
+  value:(struct_expression name:(type_identifier)@tyname))@let {
+  node def
+  attr (def) node_definition = @name
+  edge @let.lexical_defs -> def
+
+  node tyref
+  attr (tyref) node_reference = @tyname
+  edge def -> tyref
+  edge tyref -> @let.lexical_scope
+}
+
+;; `let b = Budget::new(..);`
+(let_declaration
+  pattern:(identifier)@name
+  value:(call_expression function:(scoped_identifier path:(identifier)@tyname)))@let {
+  node def
+  attr (def) node_definition = @name
+  edge @let.lexical_defs -> def
+
+  node tyref
+  attr (tyref) node_reference = @tyname
+  edge def -> tyref
+  edge tyref -> @let.lexical_scope
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; use declarations -- best-effort: bind the last segment so a later reference
+;; resolves to the import site.
+(use_declaration argument:(scoped_identifier name:(identifier)@name)@_arg)@use {
+  node def
+  attr (def) node_definition = @name
+  edge @use.lexical_defs -> def
+}
+(use_declaration argument:(identifier)@name)@use {
+  node def
+  attr (def) node_definition = @name
+  edge @use.lexical_defs -> def
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; expression statements + let initializers chain their expressions to scope.
+(expression_statement (_)@expr)@es {
+  edge @expr.lexical_scope -> @es.lexical_scope
+}
+(let_declaration value:(_)@val)@let {
+  edge @val.lexical_scope -> @let.lexical_scope
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Expressions: give the kinds we traverse a lexical_scope node.
+
+[
+  (call_expression)
+  (field_expression)
+  (binary_expression)
+  (unary_expression)
+  (reference_expression)
+  (parenthesized_expression)
+  (struct_expression)
+  (macro_invocation)
+  (arguments)
+]@expr {
+  node @expr.lexical_scope
+}
+
+(call_expression arguments:(arguments)@args)@call {
+  edge @args.lexical_scope -> @call.lexical_scope
+}
+[
+  (arguments (call_expression)@a)
+  (arguments (field_expression)@a)
+  (arguments (macro_invocation)@a)
+  (arguments (binary_expression)@a)
+  (arguments (unary_expression)@a)
+  (arguments (reference_expression)@a)
+  (arguments (parenthesized_expression)@a)
+  (arguments (struct_expression)@a)
+]@args {
+  edge @a.lexical_scope -> @args.lexical_scope
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Bare function call:  finish(1, 2, 3)
+;; Resolved in the enclosing lexical scope -- sees free fns / imports / bindings,
+;; never impl methods.
+(call_expression function:(identifier)@name)@call {
+  node ref
+  attr (ref) node_reference = @name
+  edge ref -> @call.lexical_scope
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Method call:  b.finish(1)
+;; Push "finish", push ".", resolve receiver `b` in scope. Via let-typing the
+;; receiver leads to the type's member scope, where "." is popped and the method
+;; is found.
+(call_expression
+  function:(field_expression value:(identifier)@recv field:(field_identifier)@name))@mcall {
+  node fref
+  attr (fref) node_reference = @name
+  node dot_push
+  attr (dot_push) push_symbol = "."
+  node rref
+  attr (rref) node_reference = @recv
+  edge fref -> dot_push
+  edge dot_push -> rref
+  edge rref -> @mcall.lexical_scope
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Type::method(..) associated-function call via scoped_identifier.
+(call_expression function:(scoped_identifier path:(identifier)@ty name:(identifier)@m))@call {
+  node mref
+  attr (mref) node_reference = @m
+  node dot_push
+  attr (dot_push) push_symbol = "."
+  node tyref
+  attr (tyref) node_reference = @ty
+  edge mref -> dot_push
+  edge dot_push -> tyref
+  edge tyref -> @call.lexical_scope
+}
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Comments / attributes appear anywhere; give them null scope nodes.
+[
+  (line_comment)
+  (block_comment)
+  (attribute_item)
+  (inner_attribute_item)
+]@c {
+  node @c.lexical_scope
+  node @c.lexical_defs
+}

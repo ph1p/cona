@@ -1,0 +1,68 @@
+name: Release-plz
+
+on:
+  # gated on CI: runs only after the CI workflow finished for a main push,
+  # and the job below requires conclusion == success — a red main never
+  # releases. The version-bump commit is GITHUB_TOKEN-pushed and fires no
+  # workflows (no CI run → no workflow_run → no loop).
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+  # release-plz release looks up PRs associated with each commit (release notes)
+  pull-requests: read
+  actions: write
+
+# Semantic release, no release PR: every green CI on main with releasable
+# conventional commits (feat/fix/refactor/…) bumps the version + CHANGELOG
+# directly on main, tags vX.Y.Z and creates the GitHub release. Runs on the
+# default GITHUB_TOKEN: its pushes/tags fire no other workflows (no loop),
+# so the release job dispatches release.yml explicitly (workflow_dispatch is
+# exempt). Optional RELEASE_PLZ_TOKEN PAT overrides if branch protection
+# requires it — the version-bump commit is a no-op on re-trigger, still no loop.
+
+jobs:
+  release:
+    name: version bump + tag + github release
+    if: github.repository_owner == 'ph1p' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN || github.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: release-plz
+      - name: Bump version + changelog on main
+        run: |
+          release-plz update
+          if ! git diff --quiet; then
+            version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "chore: release v$version"
+            git push
+          fi
+      - uses: MarcoIeni/release-plz-action@v0.5
+        id: release-plz
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || github.token }}
+      - name: Dispatch binary build + publish
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          tag=$(echo "$RELEASES" | jq -r '.[0].tag')
+          gh workflow run release.yml --ref "$tag"
