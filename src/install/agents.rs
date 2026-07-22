@@ -1,5 +1,5 @@
 //! Agent integration: inject the usage guide + skill + hooks into agent
-//! configs (Claude Code, AGENTS.md, Cursor, Gemini) —
+//! configs (Claude Code, AGENTS.md, Cursor, Gemini, pi.dev) —
 //! idempotent, marker-based, uninstallable.
 
 use super::{mark, remove_block_file, upsert_block_file, write_if_changed, SKILL_MD};
@@ -69,15 +69,17 @@ pub enum AgentName {
     Agents,
     Cursor,
     Gemini,
+    Pi,
 }
 
 impl AgentName {
     /// Every agent, in menu/priority order. The one place the full set lives.
-    pub const ALL: [AgentName; 4] = [
+    pub const ALL: [AgentName; 5] = [
         AgentName::Claude,
         AgentName::Agents,
         AgentName::Cursor,
         AgentName::Gemini,
+        AgentName::Pi,
     ];
 
     /// CLI spelling (matches the ValueEnum variant name lower-cased).
@@ -87,6 +89,7 @@ impl AgentName {
             AgentName::Agents => "agents",
             AgentName::Cursor => "cursor",
             AgentName::Gemini => "gemini",
+            AgentName::Pi => "pi",
         }
     }
 
@@ -97,6 +100,7 @@ impl AgentName {
             AgentName::Agents => "AGENTS.md — Codex / OpenCode / Amp / Jules",
             AgentName::Cursor => "Cursor — .cursor/rules",
             AgentName::Gemini => "Gemini CLI — GEMINI.md",
+            AgentName::Pi => "pi.dev — AGENTS.md",
         }
     }
 
@@ -124,6 +128,10 @@ impl AgentName {
                     project_root.join("GEMINI.md").exists() || project_root.join(".gemini").exists()
                 }
             }
+            // project scope is a no-op (project AGENTS.md is already covered
+            // by the Agents bucket above) — never detected there, so it's
+            // never offered/selected for a project-scope install.
+            AgentName::Pi => global && home.join(".pi").exists(),
         }
     }
 }
@@ -350,6 +358,25 @@ pub fn cmd_agents_q(
             mark(&mut done, "gemini memory", ch.verb(), &gemini);
         } else if remove_block_file(&gemini)? {
             mark(&mut done, "gemini memory", "removed", &gemini);
+        }
+    }
+
+    // --- pi.dev --------------------------------------------------------------
+    // Project scope reads the project's own AGENTS.md, already handled by the
+    // generic Agents bucket above — only global has a path of its own
+    // (~/.pi/agent/AGENTS.md, distinct from Codex's ~/.codex/AGENTS.md).
+    if global
+        && sel.want(
+            AgentName::Pi,
+            AgentName::Pi.detected(project_root, &home, global),
+        )
+    {
+        let pi_agents = home.join(".pi/agent/AGENTS.md");
+        if install {
+            let ch = upsert_block_file(&pi_agents, GUIDE_MD)?;
+            mark(&mut done, "pi memory", ch.verb(), &pi_agents);
+        } else if remove_block_file(&pi_agents)? {
+            mark(&mut done, "pi memory", "removed", &pi_agents);
         }
     }
 

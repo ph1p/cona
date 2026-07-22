@@ -255,6 +255,7 @@ without residue via `agents uninstall`:
 | Codex / OpenCode / Amp / Jules | `AGENTS.md` (marker block)                                                                            | `~/.codex/AGENTS.md` (if `~/.codex` exists) |
 | Cursor                 | `.cursor/rules/cona.mdc` (if `.cursor/` exists)                                                            | `~/.cursor/rules/cona.mdc`               |
 | Gemini CLI             | `GEMINI.md` (if `.gemini/`/`GEMINI.md` exists)                                                                | `~/.gemini/GEMINI.md`                       |
+| pi.dev                 | `AGENTS.md` (marker block, shared with the Codex row above)                                                    | `~/.pi/agent/AGENTS.md` (if `~/.pi` exists) |
 
 The hooks keep the index fresh after every agent edit; the skill/memory blocks
 instruct the agent to never read whole files and to use find/show/edit with
