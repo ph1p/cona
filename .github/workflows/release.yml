@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # dispatched by release-plz.yml after tagging (GITHUB_TOKEN-pushed tags
+  # don't fire tag-push triggers; dispatch events are exempt)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # The semantic-resolve helper is a SEPARATE crate (own tree-sitter 0.24
+      # runtime via stack-graphs — it cannot share cona's build; see
+      # docs/spike-semantic-resolution.md). Build it best-effort per target and
+      # bundle it beside cona so sibling-path discovery finds it. A target
+      # where it fails to build simply ships without it — cona degrades to
+      # its name-based + arity heuristics, and cargo-install users auto-fetch it.
+      - name: Build resolve helper (best-effort)
+        id: helper
+        shell: bash
+        continue-on-error: true
+        working-directory: src/resolve-helper
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          bin=cona
+          helper=cona-resolve-helper
+          if [[ "${{ matrix.target }}" == *windows* ]]; then bin=cona.exe; helper=cona-resolve-helper.exe; fi
+          mkdir dist
+          cp "target/${{ matrix.target }}/release/$bin" dist/
+          helper_src="src/resolve-helper/target/${{ matrix.target }}/release/$helper"
+          if [[ -f "$helper_src" ]]; then
+            cp "$helper_src" dist/
+            echo "bundled resolve helper for ${{ matrix.target }}"
+          else
+            echo "no resolve helper for ${{ matrix.target }} (build skipped/failed) — cona ships without it"
+          fi
+          cp README.md LICENSE dist/
+          cd dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            7z a "../cona-${{ github.ref_name }}-${{ matrix.target }}.zip" .
+          else
+            tar czf "../cona-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cona-${{ matrix.target }}
+          path: |
+            cona-*.tar.gz
+            cona-*.zip
+          if-no-files-found: error
+
+  release:
+    name: github release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      # release + notes already created by release-plz; only attach binaries
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cona-*.tar.gz
+            cona-*.zip
+
+  publish:
+    name: cargo publish
+    needs: build
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,0 +1,6 @@
+/target
+/src/resolve-helper/target
+AGENTS.md
+/docs/
+/.claude/
+.DS_Store

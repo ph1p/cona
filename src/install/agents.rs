@@ -1,0 +1,655 @@
+//! Agent integration: inject the usage guide + skill + hooks into agent
+//! configs (Claude Code, AGENTS.md, Cursor, Gemini) —
+//! idempotent, marker-based, uninstallable.
+
+use super::{mark, remove_block_file, upsert_block_file, write_if_changed, SKILL_MD};
+use crate::{db, ui};
+use anyhow::{anyhow, bail, Result};
+use std::path::Path;
+
+/// Compact variant for CLAUDE.md / AGENTS.md / rule files.
+pub const GUIDE_MD: &str = r#"## cona — token-efficient code navigation
+
+**The rule, before you Read a code file or Grep:** this project is cona-indexed.
+Default to `cona outline <file>` → `cona show <Sym>` to pull ONE symbol, not the
+whole file. Reach for Read only with an explicit offset/limit, or on a file cona
+doesn't index. For finding a name, `cona grep`/`refs` beat Grep (code-only, semantic).
+If a repo isn't indexed yet, `cona index` (~1s) first — then the above applies.
+
+Coarse → fine: `cona tree --rank` → `cona outline <file>` → `cona show <Sym>` → `cona edit <Sym>`.
+
+### Commands
+
+- `cona find <Name> [--kind fn] [--json]` — locate a symbol (file:start-end + signature)
+- `cona show <Sym> [<Sym2> …] [--context 3] [--sig]` — print only those symbols' source (several names in one call); `--sig` = signature line only, the leanest peek; `<Sym>` = `Name`, `Parent.Name` or `file.rs:Name`
+- `cona refs <Name>` — usage sites as file:line (semantic — string/comment mentions don't match)
+- `cona tree --rank [--budget 2000]` — symbols ranked by reference fan-in — fastest orientation in an unknown codebase
+- `cona grep <pattern> [-i]` — code-only substring search, hits labeled with their enclosing symbol
+- `cona diff [ref]` — changed symbols vs a git ref (incl. uncommitted/untracked) — start code reviews here
+- `cona context <Sym>` — one pack: symbol source + callee signatures + call sites (instead of show+refs+shows)
+- `cona edit <Sym> --file new.txt` (or stdin) — replace symbol body, syntax-verified, rollback on error
+- `cona edit <file> --range S-E` — replace just lines S-E of a file (patch without resending a whole symbol)
+- `cona insert <Sym> --after|--before` (or `--at <file> <line>`) — add code without touching a body; `--at` works on a new/empty file; syntax re-verified
+- `cona check [<file>]` — syntax-only parse diagnostics (not a compiler); no file = all changed vs HEAD — confirm a file still parses after editing without a full build
+- `cona impact <Sym>` — blast radius before an edit: refs + callers + tests + recent history in one pack
+- `cona entries` — entry points (mains, public API, tests) — first command in an unknown repo
+- `cona deps [path]` — file-level import graph + most-imported + cycles — the architecture view
+- `cona callers/callees <Sym> [--depth 2]`, `cona path <A> <B>` — transitive call trees and shortest call chain
+- `cona tests <Sym>` — which tests exercise a symbol (loud when none do)
+- `cona blame <Sym>` / `hot` / `coupling <file>` — symbol-level git history, churn hotspots, co-change coupling
+- `cona shape <Sym>` — symbol source + referenced types expanded one level
+- `cona note <Sym> <text…>` — persistent notes on symbols, auto-surfaced in show/context (`note` lists, `--rm <id>` deletes)
+- `cona rename <Sym> <new>` — semantic project-wide rename, collision-guarded, syntax-verified, all-or-nothing
+- `cona stats [--json]` — savings per project + global; `cona ui` — live dashboard.
+- Index is incremental and auto-refreshes (git hooks / agent hooks); `cona index` if in doubt.
+- NEVER read a whole file just to find one function — `outline`/`show` get you there for a fraction of the tokens.
+"#;
+
+/// The `cona` invocation agents should use — absolute if we know it.
+pub(crate) fn agent_exe() -> String {
+    db::meta_get("install_path")
+        .ok()
+        .flatten()
+        .filter(|p| Path::new(p).exists())
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "cona".to_string())
+}
+
+/// The agents `cmd_agents` knows how to configure. A `clap::ValueEnum`, so the
+/// CLI validates names at parse time (typo → clap error + possible-values in
+/// `--help`) and `--all` / `want()` derive from the SAME variant set — no
+/// hand-kept string list to drift against the per-agent blocks below.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum AgentName {
+    Claude,
+    Agents,
+    Cursor,
+    Gemini,
+}
+
+impl AgentName {
+    /// Every agent, in menu/priority order. The one place the full set lives.
+    pub const ALL: [AgentName; 4] = [
+        AgentName::Claude,
+        AgentName::Agents,
+        AgentName::Cursor,
+        AgentName::Gemini,
+    ];
+
+    /// CLI spelling (matches the ValueEnum variant name lower-cased).
+    pub fn slug(self) -> &'static str {
+        match self {
+            AgentName::Claude => "claude",
+            AgentName::Agents => "agents",
+            AgentName::Cursor => "cursor",
+            AgentName::Gemini => "gemini",
+        }
+    }
+
+    /// One-line description for the interactive picker.
+    pub fn desc(self) -> &'static str {
+        match self {
+            AgentName::Claude => "Claude Code — skill + hooks + CLAUDE.md",
+            AgentName::Agents => "AGENTS.md — Codex / OpenCode / Amp / Jules",
+            AgentName::Cursor => "Cursor — .cursor/rules",
+            AgentName::Gemini => "Gemini CLI — GEMINI.md",
+        }
+    }
+
+    /// Is this agent's config present on disk? Claude Code + (project) AGENTS.md
+    /// are always considered present — they are the unconditional core. THE one
+    /// detection source, shared by cmd_agents' gating and the setup picker.
+    pub fn detected(self, project_root: &Path, home: &Path, global: bool) -> bool {
+        match self {
+            AgentName::Claude => true,
+            AgentName::Agents => {
+                if global {
+                    home.join(".codex").exists()
+                } else {
+                    true
+                }
+            }
+            AgentName::Cursor => {
+                let base = if global { home } else { project_root };
+                base.join(".cursor").exists()
+            }
+            AgentName::Gemini => {
+                if global {
+                    home.join(".gemini").exists()
+                } else {
+                    project_root.join("GEMINI.md").exists() || project_root.join(".gemini").exists()
+                }
+            }
+        }
+    }
+}
+
+/// The agents whose config is detected on disk (used to pre-check the picker
+/// and as the non-interactive autodetect set).
+pub fn detected_agents(project_root: &Path, home: &Path, global: bool) -> Vec<AgentName> {
+    AgentName::ALL
+        .into_iter()
+        .filter(|a| a.detected(project_root, home, global))
+        .collect()
+}
+
+/// Which agents a given invocation targets. Encodes the selection rule in ONE
+/// place: explicit names (or `--all`) override detection; with neither, an
+/// agent is configured only when its config is detected on disk. Uninstall
+/// runs every requested agent regardless of detection (so a leftover config
+/// is always removable).
+struct AgentSel {
+    names: Vec<AgentName>,
+    all: bool,
+    install: bool,
+}
+
+impl AgentSel {
+    /// Should this agent be acted on? `detected` = its config dir/file exists.
+    fn want(&self, name: AgentName, detected: bool) -> bool {
+        if self.all {
+            return true;
+        }
+        if !self.names.is_empty() {
+            return self.names.contains(&name);
+        }
+        // no explicit selection: autodetect on install; on uninstall a bare
+        // call means "clean whatever is there", so detection doesn't gate it.
+        !self.install || detected
+    }
+}
+
+/// `cona agents install|uninstall [names…] [--all] [--global]`
+/// Injects/removes cona into the selected agent configs. With no names and
+/// no `--all`, installs into every detected agent (Claude Code + AGENTS.md are
+/// always configured; the rest are gated on detection).
+pub fn cmd_agents(
+    project_root: &Path,
+    action: &str,
+    names: &[AgentName],
+    all: bool,
+    global: bool,
+) -> Result<bool> {
+    cmd_agents_q(project_root, action, names, all, global, false)
+}
+
+/// `quiet` suppresses the per-file/summary output and prints nothing when every
+/// target is already current — used by the auto-refresh paths that run without
+/// the user explicitly asking. A real change still emits a one-line restart note.
+pub fn cmd_agents_q(
+    project_root: &Path,
+    action: &str,
+    names: &[AgentName],
+    all: bool,
+    global: bool,
+    quiet: bool,
+) -> Result<bool> {
+    let install = action == "install";
+    let mut done: Vec<super::Mark> = Vec::new();
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
+
+    let sel = AgentSel {
+        names: names.to_vec(),
+        all,
+        install,
+    };
+
+    // --- Claude Code -------------------------------------------------------
+    // (labeled block so the guard doesn't reindent the whole section)
+    'claude: {
+        if !sel.want(AgentName::Claude, true) {
+            break 'claude;
+        }
+        let claude_dir = if global {
+            home.join(".claude")
+        } else {
+            project_root.join(".claude")
+        };
+        // skill
+        let skill = claude_dir.join("skills/cona/SKILL.md");
+        if install {
+            let ch = write_if_changed(&skill, SKILL_MD)?;
+            mark(&mut done, "claude skill", ch.verb(), &skill);
+        } else if skill.exists() {
+            std::fs::remove_file(&skill)?;
+            let _ = std::fs::remove_dir(skill.parent().unwrap());
+            mark(&mut done, "claude skill", "removed", &skill);
+        }
+        // CLAUDE.md — global installs keep the guide in its own CONA.md
+        // (RTK-style) and only reference it; project installs stay inline so the
+        // checked-in CLAUDE.md is self-contained.
+        let claude_md = if global {
+            home.join(".claude/CLAUDE.md")
+        } else {
+            project_root.join("CLAUDE.md")
+        };
+        if global {
+            let cona_md = home.join(".claude/CONA.md");
+            if install {
+                let g = write_if_changed(&cona_md, GUIDE_MD)?;
+                mark(&mut done, "claude guide", g.verb(), &cona_md);
+                let m = upsert_block_file(&claude_md, "@CONA.md")?;
+                mark(&mut done, "claude memory", m.verb(), &claude_md);
+            } else {
+                if cona_md.exists() {
+                    std::fs::remove_file(&cona_md)?;
+                    mark(&mut done, "claude guide", "removed", &cona_md);
+                }
+                if remove_block_file(&claude_md)? {
+                    mark(&mut done, "claude memory", "removed", &claude_md);
+                }
+            }
+        } else if install {
+            let m = upsert_block_file(&claude_md, GUIDE_MD)?;
+            mark(&mut done, "claude memory", m.verb(), &claude_md);
+        } else if remove_block_file(&claude_md)? {
+            mark(&mut done, "claude memory", "removed", &claude_md);
+        }
+        // hooks in settings.json — keep the index fresh after agent edits
+        let settings = claude_dir.join("settings.json");
+        match claude_hooks(&settings, install) {
+            Ok(changed) => {
+                if install {
+                    mark(
+                        &mut done,
+                        "claude hooks",
+                        if changed { "updated" } else { "unchanged" },
+                        &settings,
+                    );
+                } else if changed {
+                    mark(&mut done, "claude hooks", "removed", &settings);
+                }
+            }
+            Err(e) => println!("warning: could not edit {}: {e}", settings.display()),
+        }
+        // subagents (.claude/agents/*.md) — custom agents run on their own system
+        // prompt and don't reliably see CLAUDE.md, so each existing definition
+        // gets the guide as a marker block (never creates agent files).
+        let agents_dir = claude_dir.join("agents");
+        if agents_dir.is_dir() {
+            for entry in std::fs::read_dir(&agents_dir)?.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                if install {
+                    // only real agent definitions (YAML frontmatter), not stray
+                    // docs like README.md living in the same directory
+                    let is_agent_def = std::fs::read_to_string(&path)
+                        .is_ok_and(|c| c.starts_with("---\n") || c.starts_with("---\r\n"));
+                    if !is_agent_def {
+                        continue;
+                    }
+                    let ch = upsert_block_file(&path, GUIDE_MD)?;
+                    mark(&mut done, "claude subagent", ch.verb(), &path);
+                } else if remove_block_file(&path)? {
+                    // uninstall cleans ANY .md carrying the marker block
+                    mark(&mut done, "claude subagent", "removed", &path);
+                }
+            }
+        }
+    } // 'claude
+
+    // --- generic AGENTS.md (Codex, OpenCode, Amp, Jules, …) ----------------
+    if sel.want(
+        AgentName::Agents,
+        AgentName::Agents.detected(project_root, &home, global),
+    ) {
+        let agents_md = if global {
+            home.join(".codex/AGENTS.md")
+        } else {
+            project_root.join("AGENTS.md")
+        };
+        let label = if global { "codex memory" } else { "AGENTS.md" };
+        if install {
+            let ch = upsert_block_file(&agents_md, GUIDE_MD)?;
+            mark(&mut done, label, ch.verb(), &agents_md);
+        } else if remove_block_file(&agents_md)? {
+            mark(&mut done, label, "removed", &agents_md);
+        }
+    }
+
+    // --- Cursor ------------------------------------------------------------
+    let cursor = if global {
+        home.join(".cursor/rules/cona.mdc")
+    } else {
+        project_root.join(".cursor/rules/cona.mdc")
+    };
+    if sel.want(
+        AgentName::Cursor,
+        AgentName::Cursor.detected(project_root, &home, global),
+    ) {
+        if install {
+            let content = format!(
+                "---\ndescription: cona — token-efficient code navigation\nalwaysApply: true\n---\n\n{GUIDE_MD}"
+            );
+            let ch = write_if_changed(&cursor, &content)?;
+            mark(&mut done, "cursor rule", ch.verb(), &cursor);
+        } else if cursor.exists() {
+            std::fs::remove_file(&cursor)?;
+            mark(&mut done, "cursor rule", "removed", &cursor);
+        }
+    }
+
+    // --- Gemini CLI ----------------------------------------------------------
+    let gemini = if global {
+        home.join(".gemini/GEMINI.md")
+    } else {
+        project_root.join("GEMINI.md")
+    };
+    if sel.want(
+        AgentName::Gemini,
+        AgentName::Gemini.detected(project_root, &home, global),
+    ) {
+        if install {
+            let ch = upsert_block_file(&gemini, GUIDE_MD)?;
+            mark(&mut done, "gemini memory", ch.verb(), &gemini);
+        } else if remove_block_file(&gemini)? {
+            mark(&mut done, "gemini memory", "removed", &gemini);
+        }
+    }
+
+    if done.is_empty() {
+        if !quiet {
+            println!("{}", ui::dim("nothing to do"));
+        }
+        return Ok(false);
+    }
+    // Did anything actually move? Read the per-mark flag — no text scanning.
+    let changed = done.iter().any(|d| d.changed);
+    // Quiet auto-refresh stays fully silent unless (and even when) something
+    // moved: it runs on the query hot path, so it must never print.
+    if quiet {
+        return Ok(changed);
+    }
+    for d in &done {
+        println!("{}", d.line);
+    }
+    println!(
+        "{}",
+        ui::ok(&format!(
+            "agents {} ({})",
+            if install { "installed" } else { "uninstalled" },
+            if global { "global" } else { "project" }
+        ))
+    );
+    if install && changed {
+        // Claude Code snapshots hooks + skills at startup for security, so a
+        // running session won't see fresh changes until it reloads them.
+        println!(
+            "{}",
+            ui::dim(
+                "note: restart Claude Code (or run /hooks) so the new hooks + skill are \
+                 picked up — they are snapshotted at session start"
+            )
+        );
+    }
+    Ok(true)
+}
+
+/// Cheap read-only probe: does this project carry ANY cona agent
+/// integration? Used by uninstall to skip registered-but-clean projects
+/// (which would otherwise each print an empty heading + "nothing to do").
+/// Mirrors the project-scoped removal targets in `cmd_agents`.
+pub fn project_has_cona(project_root: &Path) -> bool {
+    let has_marker =
+        |p: &Path| std::fs::read_to_string(p).is_ok_and(|c| c.contains(super::BLOCK_BEGIN));
+    // skill + marker-block files
+    if project_root
+        .join(".claude/skills/cona/SKILL.md")
+        .exists()
+        || project_root.join(".cursor/rules/cona.mdc").exists()
+        || has_marker(&project_root.join("CLAUDE.md"))
+        || has_marker(&project_root.join("AGENTS.md"))
+        || has_marker(&project_root.join("GEMINI.md"))
+    {
+        return true;
+    }
+    // subagent definitions carrying the marker block
+    if let Ok(rd) = std::fs::read_dir(project_root.join(".claude/agents")) {
+        if rd.flatten().any(|e| has_marker(&e.path())) {
+            return true;
+        }
+    }
+    // cona hooks in settings.json
+    let settings = project_root.join(".claude/settings.json");
+    std::fs::read_to_string(&settings)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("hooks").cloned())
+        .is_some_and(|h| h.to_string().contains("cona"))
+}
+
+/// Add/remove cona hooks in a Claude Code settings.json.
+/// Returns Ok(true) if the file was changed.
+fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
+    let existing = std::fs::read_to_string(settings_path).unwrap_or_else(|_| "{}".into());
+    let mut root: serde_json::Value = serde_json::from_str(&existing).map_err(|e| {
+        anyhow!("existing settings.json is not valid JSON ({e}) — fix it or add the hook manually")
+    })?;
+    if !root.is_object() {
+        bail!("settings.json top level is not an object");
+    }
+    let exe = agent_exe();
+    let index_cmd = format!("{exe} index --quiet");
+    // SessionStart also emits a repo-orientation context block (see
+    // main.rs session_start_context). Distinct command, but its marker stays
+    // the shared "index --quiet" substring so reconcile/uninstall still match
+    // it (and self-heal an older plain `index --quiet` SessionStart entry to
+    // this one on reinstall).
+    let session_cmd = format!("{exe} index --quiet --session-start");
+    let pretool_cmd = format!("{exe} hook PreToolUse");
+    // (event, matcher, command, marker that identifies our entry)
+    let specs: [(&str, Option<&str>, &str, &str); 3] = [
+        (
+            "PostToolUse",
+            Some("Edit|Write|MultiEdit|NotebookEdit"),
+            &index_cmd,
+            "index --quiet",
+        ),
+        ("SessionStart", None, &session_cmd, "index --quiet"),
+        // navigation accelerator: redirect wasteful full reads + broad
+        // identifier greps toward cona
+        (
+            "PreToolUse",
+            Some("Read|Grep"),
+            &pretool_cmd,
+            "hook PreToolUse",
+        ),
+    ];
+    let mut changed = false;
+    let hooks = root
+        .as_object_mut()
+        .unwrap()
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        bail!("settings.json 'hooks' is not an object");
+    }
+    for (event, matcher, cmd, marker) in specs {
+        let is_ours = |v: &serde_json::Value| -> bool {
+            v["hooks"]
+                .as_array()
+                .map(|hs| {
+                    hs.iter().any(|h| {
+                        h["command"]
+                            .as_str()
+                            .map(|c| c.contains("cona") && c.contains(marker))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        };
+        let arr = hooks
+            .as_object_mut()
+            .unwrap()
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(list) = arr.as_array_mut() else {
+            continue;
+        };
+        let present = list.iter().position(is_ours);
+        if install && present.is_none() {
+            let mut entry = serde_json::json!({
+                "hooks": [{"type": "command", "command": cmd}]
+            });
+            if let Some(m) = matcher {
+                entry["matcher"] = serde_json::json!(m);
+            }
+            list.push(entry);
+            changed = true;
+        } else if install {
+            // ours is present — reconcile it to the current spec so any drift
+            // (matcher widened, command renamed/moved) self-heals on reinstall
+            let i = present.unwrap();
+            if list[i]["matcher"].as_str() != matcher {
+                match matcher {
+                    Some(m) => list[i]["matcher"] = serde_json::json!(m),
+                    None => {
+                        list[i].as_object_mut().map(|o| o.remove("matcher"));
+                    }
+                }
+                changed = true;
+            }
+            if let Some(hs) = list[i]["hooks"].as_array_mut() {
+                for h in hs.iter_mut().filter(|h| {
+                    h["command"]
+                        .as_str()
+                        .map(|c| c.contains("cona") && c.contains(marker))
+                        .unwrap_or(false)
+                }) {
+                    if h["command"].as_str() != Some(cmd) {
+                        h["command"] = serde_json::json!(cmd);
+                        changed = true;
+                    }
+                }
+            }
+        } else if let Some(i) = present {
+            // uninstall
+            list.remove(i);
+            changed = true;
+        }
+    }
+    if changed {
+        if let Some(dir) = settings_path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(
+            settings_path,
+            format!("{}\n", serde_json::to_string_pretty(&root)?),
+        )?;
+    }
+    Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sel(names: &[AgentName], all: bool, install: bool) -> AgentSel {
+        AgentSel {
+            names: names.to_vec(),
+            all,
+            install,
+        }
+    }
+
+    #[test]
+    fn project_has_cona_detects_markers_and_ignores_clean() {
+        let dir = std::env::temp_dir().join("cona-hascn-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // empty project → nothing
+        assert!(!project_has_cona(&dir));
+        // foreign CLAUDE.md without the marker → still nothing
+        std::fs::write(dir.join("CLAUDE.md"), "# my project\n").unwrap();
+        assert!(!project_has_cona(&dir));
+        // marker block present → detected
+        std::fs::write(
+            dir.join("CLAUDE.md"),
+            format!("# my project\n{}\nguide\n", super::super::BLOCK_BEGIN),
+        )
+        .unwrap();
+        assert!(project_has_cona(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quiet_reinstall_is_a_noop_when_already_current() {
+        let dir = std::env::temp_dir().join("cona-quiet-reinstall-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // seed a Claude project so the install has a target
+        std::fs::write(dir.join("CLAUDE.md"), "# my project\n").unwrap();
+        // first install writes the guide block → changed
+        let first =
+            cmd_agents_q(&dir, "install", &[AgentName::Claude], false, false, true).unwrap();
+        assert!(first, "first install must report a change");
+        // second install with identical baked content → no change, quiet returns false
+        let second =
+            cmd_agents_q(&dir, "install", &[AgentName::Claude], false, false, true).unwrap();
+        assert!(!second, "re-install of current config must be a no-op");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_no_selection_autodetects() {
+        let s = sel(&[], false, true);
+        assert!(s.want(AgentName::Cursor, true)); // detected → yes
+        assert!(!s.want(AgentName::Cursor, false)); // undetected → no
+    }
+
+    #[test]
+    fn install_explicit_name_overrides_detection() {
+        let s = sel(&[AgentName::Gemini], false, true);
+        assert!(s.want(AgentName::Gemini, false)); // named, undetected → still yes
+        assert!(!s.want(AgentName::Cursor, true)); // not named → no, even if detected
+    }
+
+    #[test]
+    fn all_targets_everything_regardless_of_detection() {
+        let s = sel(&[], true, true);
+        assert!(s.want(AgentName::Cursor, false));
+        assert!(s.want(AgentName::Gemini, false));
+    }
+
+    #[test]
+    fn uninstall_no_selection_cleans_regardless_of_detection() {
+        let s = sel(&[], false, false);
+        assert!(s.want(AgentName::Cursor, false)); // bare uninstall → clean whatever is there
+    }
+
+    #[test]
+    fn uninstall_explicit_name_still_scoped() {
+        let s = sel(&[AgentName::Cursor], false, false);
+        assert!(s.want(AgentName::Cursor, false));
+        assert!(!s.want(AgentName::Gemini, false));
+    }
+
+    #[test]
+    fn detected_agents_project_core_plus_present_dirs() {
+        let tmp = std::env::temp_dir().join(format!("cona-detect-{}", std::process::id()));
+        let proj = tmp.join("proj");
+        let home = tmp.join("home");
+        std::fs::create_dir_all(proj.join(".cursor")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+
+        // project scope: Claude + AGENTS always; Cursor detected (.cursor exists);
+        // Gemini not (no GEMINI.md / .gemini).
+        let got = detected_agents(&proj, &home, false);
+        assert!(got.contains(&AgentName::Claude));
+        assert!(got.contains(&AgentName::Agents));
+        assert!(got.contains(&AgentName::Cursor));
+        assert!(!got.contains(&AgentName::Gemini));
+
+        // global scope: only Claude is unconditional; nothing else present in home.
+        let got_global = detected_agents(&proj, &home, true);
+        assert_eq!(got_global, vec![AgentName::Claude]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

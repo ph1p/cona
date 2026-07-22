@@ -1,0 +1,14 @@
+# release-plz: semantic release from conventional commits, no release PR.
+# Flow: push to main → `release-plz update` bumps version + CHANGELOG.md
+# directly on main (chore: release commit) → `release-plz release` tags vX.Y.Z
+# and creates the GitHub release; release-plz.yml then dispatches release.yml
+# (binaries + cargo publish under the crates-io environment gate).
+
+[workspace]
+changelog_update = true
+git_tag_enable = true
+git_release_enable = true
+# cargo publish stays in release.yml (crates-io environment protection)
+publish = false
+dependencies_update = false
+semver_check = true
