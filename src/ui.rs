@@ -55,6 +55,27 @@ pub fn cyan(s: &str) -> String {
 pub fn heading(s: &str) -> String {
     format!("{} {}", cyan("▸"), bold(s))
 }
+/// Top-level command banner, e.g. `cona install`. One per command, printed
+/// once at the very top — gives every setup/install/upgrade/uninstall run the
+/// same unmistakable start-of-output marker. Deliberately plainer than
+/// `heading` (no `▸`) so the very first line of output reads as a title, not
+/// a section.
+pub fn banner(s: &str) -> String {
+    format!("{}\n", bold(&cyan(s)))
+}
+
+/// Closing status line for a command that tracked a `count` of
+/// warnings/issues: `✓ <ok_msg>` when zero, else `! <n> <noun>(s) <tail>`.
+/// Centralizes the ok/warn tone pick + singular/plural noun so
+/// install/upgrade/uninstall/setup/doctor don't each hand-roll it.
+pub fn summary(count: usize, noun: &str, tail: &str, ok_msg: &str) -> String {
+    if count == 0 {
+        ok(ok_msg)
+    } else {
+        let plural = if count == 1 { "" } else { "s" };
+        warn(&format!("{count} {noun}{plural} {tail}"))
+    }
+}
 /// Green check bullet
 pub fn ok(s: &str) -> String {
     format!("{} {}", green("✓"), s)

@@ -537,37 +537,6 @@ pub fn recent(
     Ok(rows)
 }
 
-/// `tokens_saved` bucketed into the last `buckets` slots of `secs_per` seconds
-/// each (oldest first) — for the dashboard sparkline.
-pub fn savings_series(
-    g: &Connection,
-    project: Option<&str>,
-    buckets: usize,
-    secs_per: i64,
-) -> Result<Vec<u64>> {
-    let now = now();
-    let start = now - (buckets as i64 * secs_per);
-    let (mut where_, params) = scope_clause(project);
-    if where_.is_empty() {
-        where_ = format!(" WHERE ts >= {start}");
-    } else {
-        where_.push_str(&format!(" AND ts >= {start}"));
-    }
-    let sql = format!("SELECT ts, tokens_saved FROM usage{where_}");
-    let mut stmt = g.prepare(&sql)?;
-    let p = rusqlite::params_from_iter(params.iter());
-    let mut series = vec![0u64; buckets];
-    let rows: Vec<(i64, i64)> = stmt
-        .query_map(p, |r| Ok((r.get(0)?, r.get(1)?)))?
-        .flatten()
-        .collect();
-    for (ts, saved) in rows {
-        let idx = ((ts - start) / secs_per).clamp(0, buckets as i64 - 1) as usize;
-        series[idx] += saved.max(0) as u64;
-    }
-    Ok(series)
-}
-
 /// Human-friendly relative time, e.g. "3m ago", "just now".
 pub fn ago(ts: i64) -> String {
     let d = (now() - ts).max(0);

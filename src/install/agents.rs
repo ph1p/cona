@@ -399,9 +399,7 @@ pub fn project_has_cona(project_root: &Path) -> bool {
     let has_marker =
         |p: &Path| std::fs::read_to_string(p).is_ok_and(|c| c.contains(super::BLOCK_BEGIN));
     // skill + marker-block files
-    if project_root
-        .join(".claude/skills/cona/SKILL.md")
-        .exists()
+    if project_root.join(".claude/skills/cona/SKILL.md").exists()
         || project_root.join(".cursor/rules/cona.mdc").exists()
         || has_marker(&project_root.join("CLAUDE.md"))
         || has_marker(&project_root.join("AGENTS.md"))

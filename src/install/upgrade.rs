@@ -164,6 +164,8 @@ fn replace_binary(src: &Path, dst: &Path) -> Result<Change> {
 /// binary, records source/install paths, and wires git hooks in the source
 /// repo so every commit/merge rebuilds the installed binary.
 pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
+    println!("{}", ui::banner("cona install"));
+
     let cwd = std::env::current_dir()?;
     let src_root = {
         let mut d = cwd.as_path();
@@ -186,49 +188,60 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
         None => default_bin_dir()?,
     };
     let dst = bin_dir.join("cona");
+    let mut warnings = 0usize;
 
+    println!("{}", ui::heading("binary"));
     let built = src_root.join("target/release/cona");
     if !built.exists() || mtime_secs(&built) < source_mtime(&src_root) {
-        println!("building release binary …");
+        println!("  {}", ui::dim("building release binary …"));
         cargo_build(&src_root)?;
     }
     let verb = match replace_binary(&built, &dst)? {
-        Change::Unchanged => "binary already current",
-        Change::Created => "installed binary",
-        Change::Updated => "updated binary",
+        Change::Unchanged => "already current",
+        Change::Created => "installed",
+        Change::Updated => "updated",
     };
-    println!("{}", ui::ok(&format!("{verb:<25} {}", dst.display())));
+    println!("  {}", ui::ok(&format!("{verb} → {}", dst.display())));
 
     // Optional semantic-resolve helper: a separate crate (own tree-sitter 0.24
     // runtime — can't share cona's build). Build + install it beside cona
     // best-effort; failure is non-fatal (cona degrades to its heuristics).
     match install_resolve_helper(&src_root, &bin_dir) {
-        Ok(Some(p)) => println!(
-            "{}",
-            ui::ok(&format!("{:<25} {}", "resolve helper", p.display()))
-        ),
+        Ok(Some(p)) => println!("  {}", ui::ok(&format!("resolve helper → {}", p.display()))),
         Ok(None) => {}
-        Err(e) => println!(
-            "{}",
-            ui::warn(&format!(
-                "resolve helper not built ({e}) — cona will use name-based + arity heuristics"
-            ))
-        ),
+        Err(e) => {
+            warnings += 1;
+            println!(
+                "  {}",
+                ui::warn(&format!(
+                    "resolve helper not built ({e}) — cona will use name-based + arity heuristics"
+                ))
+            );
+        }
     }
 
     db::meta_set("source_dir", &src_root.to_string_lossy())?;
     db::meta_set("install_path", &dst.to_string_lossy())?;
 
     // git hooks in the SOURCE repo: rebuild+reinstall on every code change
+    println!("\n{}", ui::heading("auto-rebuild"));
     if refresh_upgrade_hooks(&src_root, &dst)? {
-        println!("upgrade git hooks installed (post-commit/-merge/-checkout in source repo)");
+        println!(
+            "  {}",
+            ui::ok("git hooks installed (post-commit/-merge/-checkout) — every commit rebuilds")
+        );
     } else {
-        println!("source repo has no .git — run `cona upgrade` manually after changes");
+        warnings += 1;
+        println!(
+            "  {}",
+            ui::warn("source repo has no .git — run `cona upgrade` manually after changes")
+        );
     }
 
     if !on_path(&bin_dir) {
+        warnings += 1;
         println!(
-            "{}",
+            "  {}",
             ui::warn(&format!(
                 "{} is not on your PATH — add it, e.g. `export PATH=\"{}:$PATH\"`",
                 bin_dir.display(),
@@ -237,6 +250,10 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
         );
     }
 
+    println!(
+        "\n{}",
+        ui::summary(warnings, "thing", "need attention", "install complete")
+    );
     print_next_steps();
     Ok(())
 }
@@ -244,22 +261,28 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
 /// Post-install guidance: what to run next and what it does.
 fn print_next_steps() {
     println!("\n{}", ui::heading("next steps"));
-    println!(
-        "  {}            interactive setup — index this project + wire agent integration",
-        ui::cmd("cona setup")
-    );
-    println!(
-        "  {}    project only (git hooks, .claude/, CLAUDE.md, AGENTS.md, …)",
-        ui::cmd("cona setup project")
-    );
-    println!(
-        "  {}     global only (~/.claude, ~/.codex, … home configs)",
-        ui::cmd("cona setup global")
-    );
-    println!(
-        "  {}           verify the installation (binary, PATH, hooks, skill, index)",
-        ui::cmd("cona doctor")
-    );
+    let rows: [(&str, &str); 4] = [
+        (
+            "cona setup",
+            "interactive setup — index this project + wire agent integration",
+        ),
+        (
+            "cona setup project",
+            "project only (git hooks, .claude/, CLAUDE.md, AGENTS.md, …)",
+        ),
+        (
+            "cona setup global",
+            "global only (~/.claude, ~/.codex, … home configs)",
+        ),
+        (
+            "cona doctor",
+            "verify the installation (binary, PATH, hooks, skill, index)",
+        ),
+    ];
+    let width = rows.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+    for (c, desc) in rows {
+        println!("  {}  {desc}", ui::cmd(&format!("{c:<width$}")));
+    }
     println!(
         "\n{}",
         ui::dim(
@@ -272,6 +295,10 @@ fn print_next_steps() {
 /// checkout if it is newer than the installed binary, otherwise check
 /// crates.io for a newer release and install the prebuilt binary.
 pub fn cmd_upgrade(quiet: bool) -> Result<()> {
+    if !quiet {
+        println!("{}", ui::banner("cona upgrade"));
+    }
+
     // Prefer the recorded install path, but only if it still exists. A stale
     // meta row (e.g. a temp extraction dir from a `curl|sh` install that ran
     // the binary out of `/var/folders/…tmp…/`) would otherwise make every
@@ -305,16 +332,17 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
     if let Some(src) = db::meta_get("source_dir")?.map(PathBuf::from) {
         if is_source_dir(&src) && source_mtime(&src) > mtime_secs(&dst) {
             if !quiet {
-                println!("sources changed — rebuilding …");
+                println!("{}", ui::dim("sources changed — rebuilding …"));
             }
             cargo_build(&src)?;
             let ch = replace_binary(&src.join("target/release/cona"), &dst)?;
             if !quiet {
                 match ch {
-                    Change::Unchanged => {
-                        println!("rebuilt — binary unchanged ({})", dst.display())
-                    }
-                    _ => println!("updated {}", dst.display()),
+                    Change::Unchanged => println!(
+                        "{}",
+                        ui::ok(&format!("rebuilt — binary unchanged ({})", dst.display()))
+                    ),
+                    _ => println!("{}", ui::ok(&format!("updated → {}", dst.display()))),
                 }
             }
             // keep the sibling resolve helper in step (best-effort, optional)
@@ -328,6 +356,9 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
             if ch != Change::Unchanged {
                 refresh_config(quiet);
             }
+            if !quiet {
+                println!("\n{}", ui::ok(&ui::bold("up to date")));
+            }
             return Ok(());
         }
     }
@@ -339,34 +370,52 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
     match latest_remote_version() {
         Some(remote) if remote_is_newer(&remote, current) => {
             if !quiet {
-                println!("new release v{remote} (installed v{current})");
+                println!(
+                    "{}",
+                    ui::heading(&format!("new release v{remote} (installed v{current})"))
+                );
             }
             let src = db::meta_get("source_dir")?
                 .map(PathBuf::from)
                 .filter(|s| is_source_dir(s));
             if let Some(src) = src {
                 if !quiet {
-                    println!("updating source checkout {} …", src.display());
+                    println!(
+                        "  {}",
+                        ui::dim(&format!("updating source checkout {} …", src.display()))
+                    );
                 }
                 update_source_checkout(&src, &remote, &dst, quiet)?;
             } else {
                 install_release_binary(&remote, &dst)?;
             }
             if !quiet {
-                println!("updated {} to v{remote}", dst.display());
+                println!("  {}", ui::ok(&format!("{} → v{remote}", dst.display())));
             }
             refresh_config(quiet);
+            if !quiet {
+                println!("\n{}", ui::ok(&ui::bold("upgrade complete")));
+            }
         }
         Some(_) => {
             if !quiet {
-                println!("up to date (v{current}, {})", dst.display());
+                println!(
+                    "{}",
+                    ui::ok(&format!(
+                        "already up to date — v{current} ({})",
+                        dst.display()
+                    ))
+                );
             }
         }
         None => {
             if !quiet {
                 println!(
-                    "v{current} ({}) — remote version check unavailable",
-                    dst.display()
+                    "{}",
+                    ui::warn(&format!(
+                        "v{current} ({}) — remote version check unavailable",
+                        dst.display()
+                    ))
                 );
             }
         }
@@ -551,13 +600,7 @@ fn update_source_checkout(src: &Path, remote: &str, dst: &Path, quiet: bool) -> 
     let stashed = tree_dirty(src)
         && git_ok(
             src,
-            &[
-                "stash",
-                "push",
-                "--quiet",
-                "-m",
-                "cona-upgrade autostash",
-            ],
+            &["stash", "push", "--quiet", "-m", "cona-upgrade autostash"],
         );
 
     let pulled = git_ok(src, &["pull", "--ff-only", "--quiet"]);
@@ -599,11 +642,7 @@ fn download_release_binary(ver: &str, dst: &Path) -> Result<Change> {
     let target = release_target().ok_or_else(|| anyhow!("no prebuilt binary for this platform"))?;
     let tmp = std::env::temp_dir().join(format!("cona-update-{ver}"));
     fetch_release_archive(ver, target, &tmp)?;
-    let bin = tmp.join(if cfg!(windows) {
-        "cona.exe"
-    } else {
-        "cona"
-    });
+    let bin = tmp.join(if cfg!(windows) { "cona.exe" } else { "cona" });
     let ch = replace_binary(&bin, dst)?;
     // the tarball bundles the optional resolve helper on targets where it
     // builds — install it beside cona too (best-effort, absence is fine)
@@ -664,7 +703,7 @@ pub fn cmd_uninstall(purge: bool) -> Result<()> {
         }
     }
 
-    println!("{}\n", ui::bold("cona uninstall"));
+    println!("{}", ui::banner("cona uninstall"));
     let mut removed = 0usize;
 
     // upgrade hooks in the source repo (incl. legacy `self-update` lines)
