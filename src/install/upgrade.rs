@@ -922,18 +922,32 @@ pub fn maybe_auto_update(project_root: &Path) {
 /// on the rare version mismatch. Fully silent — auto-refresh never speaks on the
 /// query path.
 fn maybe_refresh_project_config(project_root: &Path) {
-    let key = config_ver_key(project_root);
-    let recorded = db::meta_get(&key).ok().flatten();
+    // Heal the current project AND the global (~/.claude) scope. A binary swapped
+    // outside `cona upgrade` (cargo-install, manual copy) never runs refresh_config,
+    // so without a passive global heal ~/.claude stays pinned to the old version
+    // until the user manually re-runs setup/upgrade.
+    maybe_refresh_scope(project_root, false);
+    if let Some(home) = dirs::home_dir() {
+        if home != project_root {
+            maybe_refresh_scope(&home, true);
+        }
+    }
+}
+
+/// Version-gated passive re-sync of ONE scope's config to the running binary.
+/// Cheap sqlite read + string compare on the hot path; fs scan + write only on
+/// the rare version mismatch. Fully silent (query path never speaks).
+fn maybe_refresh_scope(root: &Path, global: bool) {
+    let recorded = db::meta_get(&config_ver_key(root)).ok().flatten();
     if recorded.as_deref() == Some(env!("CARGO_PKG_VERSION")) {
         return; // already in sync with this binary — one sqlite read, done
     }
-    // Version differs (or never recorded): only touch a project the user opted
+    // Version differs (or never recorded): only touch a scope the user opted
     // into. project_has_cona's fs scan runs at most once per version change.
-    if !crate::install::agents::project_has_cona(project_root) {
+    if !crate::install::agents::project_has_cona(root) {
         return;
     }
-    let _ = crate::install::agents::cmd_agents_q(project_root, "install", &[], false, false, true);
-    let _ = db::meta_set(&key, env!("CARGO_PKG_VERSION"));
+    let _ = sync_scope_config(root, global, true);
 }
 
 fn remote_check_due() -> bool {
