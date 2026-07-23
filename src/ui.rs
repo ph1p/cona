@@ -174,23 +174,40 @@ pub fn select(title: &str, items: &[(&str, &str)]) -> anyhow::Result<Option<usiz
     }
 }
 
-/// Raw-mode multi-select checklist. `items` is (name, desc, preselected);
-/// returns the indices of the checked rows, or `None` on cancel (esc/ctrl-c).
-/// Space toggles the cursor row, enter confirms. Same drop-guard + redraw
-/// discipline as `select` — never re-roll the raw-mode handling.
-pub fn multiselect(
-    title: &str,
-    items: &[(&str, &str, bool)],
-) -> anyhow::Result<Option<Vec<usize>>> {
+/// One row of a `multiselect`: either a non-selectable section header, or a
+/// checkable item `(name, desc, preselected)`.
+pub enum Row<'a> {
+    /// A group heading — skipped by the cursor, rendered bold. Blank name = a
+    /// spacer line.
+    Header(&'a str),
+    /// A toggleable choice: display name, dim description, initial checked state.
+    Item(&'a str, &'a str, bool),
+}
+
+/// Raw-mode multi-select checklist over mixed header/item `rows`. Returns the
+/// **item ordinals** (0-based over `Item` rows only, headers skipped) that ended
+/// up checked, or `None` on cancel (esc/ctrl-c). Callers keep a parallel vector
+/// of item payloads and index it by ordinal — no header offset to reconcile.
+/// Space toggles the cursor row, `a` toggles every item at once, enter confirms.
+/// Same drop-guard + redraw discipline as `select` — never re-roll the raw-mode
+/// handling.
+pub fn multiselect(title: &str, rows: &[Row<'_>]) -> anyhow::Result<Option<Vec<usize>>> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use ratatui::crossterm::terminal;
     use std::io::Write;
 
+    let is_item = |i: usize| matches!(rows[i], Row::Item(..));
+    let item_idxs: Vec<usize> = (0..rows.len()).filter(|&i| is_item(i)).collect();
+    if item_idxs.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    println!("{}", heading(title));
     println!(
-        "{}  {}",
-        heading(title),
-        dim("(↑/↓ move, space toggle, enter confirm, esc cancel)")
+        "{}",
+        dim("  ↑/↓ move · space toggle · a all/none · enter confirm · esc cancel")
     );
+    println!();
 
     struct Raw;
     impl Drop for Raw {
@@ -201,24 +218,62 @@ pub fn multiselect(
     terminal::enable_raw_mode()?;
     let _raw = Raw;
 
-    let mut checked: Vec<bool> = items.iter().map(|(_, _, on)| *on).collect();
-    let mut sel = 0usize;
+    let mut checked: Vec<bool> = rows
+        .iter()
+        .map(|r| matches!(r, Row::Item(_, _, true)))
+        .collect();
+    // name column = widest item name, so descriptions align and never collide
+    let name_w = rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Item(name, ..) => Some(name.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    // cursor starts on the first selectable row
+    let mut sel = item_idxs[0];
+    let lines = rows.len() + 1; // rows + trailing summary line
     let mut first = true;
+    // move the cursor to the next/prev selectable row, skipping headers
+    let step = |from: usize, dir: isize| -> usize {
+        let n = rows.len() as isize;
+        let mut i = from as isize;
+        loop {
+            i = (i + dir).rem_euclid(n);
+            if is_item(i as usize) {
+                return i as usize;
+            }
+        }
+    };
     loop {
+        let checked_n = item_idxs.iter().filter(|&&i| checked[i]).count();
         let mut out = String::new();
         if !first {
-            out.push_str(&format!("\x1b[{}A", items.len()));
+            out.push_str(&format!("\x1b[{lines}A"));
         }
         first = false;
-        for (i, (name, desc, _)) in items.iter().enumerate() {
-            let box_ = if checked[i] { "[x]" } else { "[ ]" };
-            let line = if i == sel {
-                format!("{} {}  {}", box_, heading(name), dim(desc))
-            } else {
-                format!("{box_}   {name}  {}", dim(desc))
+        for (i, row) in rows.iter().enumerate() {
+            let line = match row {
+                Row::Header(h) if h.is_empty() => String::new(),
+                Row::Header(h) => bold(h),
+                Row::Item(name, desc, _) => {
+                    let box_ = if checked[i] { green("◉") } else { dim("○") };
+                    let cursor = if i == sel { cyan("›") } else { " ".into() };
+                    // pad the RAW name to the column width first — styling it
+                    // before padding would make the fill count the ANSI escape
+                    // bytes and eat the gap, colliding name with description.
+                    let name = format!("{name:<name_w$}");
+                    let name = if i == sel { bold(&name) } else { name };
+                    format!("  {cursor} {box_}  {name}  {}", dim(desc))
+                }
             };
             out.push_str(&format!("\r\x1b[2K{line}\r\n"));
         }
+        out.push_str(&format!(
+            "\r\x1b[2K{}\r\n",
+            dim(&format!("  {checked_n} of {} selected", item_idxs.len()))
+        ));
         let mut stdout = std::io::stdout();
         stdout.write_all(out.as_bytes())?;
         stdout.flush()?;
@@ -228,17 +283,25 @@ pub fn multiselect(
                 continue;
             }
             match k.code {
-                KeyCode::Up | KeyCode::Char('k') => sel = (sel + items.len() - 1) % items.len(),
-                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => sel = (sel + 1) % items.len(),
+                KeyCode::Up | KeyCode::Char('k') => sel = step(sel, -1),
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => sel = step(sel, 1),
                 KeyCode::Char(' ') => checked[sel] = !checked[sel],
+                // `a` = select all, or clear all when everything is already on
+                KeyCode::Char('a') => {
+                    let all_on = checked_n == item_idxs.len();
+                    for &i in &item_idxs {
+                        checked[i] = !all_on;
+                    }
+                }
                 KeyCode::Enter => {
-                    return Ok(Some(
-                        checked
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, &on)| on.then_some(i))
-                            .collect(),
-                    ));
+                    // map the row-indexed `checked` back to item ordinals
+                    let picked = item_idxs
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &row)| checked[row])
+                        .map(|(ord, _)| ord)
+                        .collect();
+                    return Ok(Some(picked));
                 }
                 KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
                 KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
