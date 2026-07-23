@@ -5,7 +5,44 @@ use crate::{db, editing, indexer, lang};
 use anyhow::{anyhow, bail, Result};
 use rusqlite::Connection;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+
+/// Resolve a mutation target and prove it remains inside the project root.
+/// Existing files are canonicalized to catch symlinks; for insertion, the
+/// nearest existing parent is canonicalized instead.
+fn project_path(root: &Path, supplied: &str) -> Result<PathBuf> {
+    let rel = Path::new(supplied);
+    if supplied.is_empty() || rel.is_absolute() {
+        bail!("mutation path must be a non-empty project-relative path: {supplied}");
+    }
+    if rel.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        bail!("mutation path escapes project root: {supplied}");
+    }
+    let root = root.canonicalize()?;
+    let candidate = root.join(rel);
+    let checked = if candidate.exists() {
+        candidate.canonicalize()?
+    } else {
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| anyhow!("mutation path has no parent: {supplied}"))?
+            .canonicalize()?;
+        parent.join(
+            candidate
+                .file_name()
+                .ok_or_else(|| anyhow!("invalid mutation path: {supplied}"))?,
+        )
+    };
+    if !checked.starts_with(&root) {
+        bail!("mutation path escapes project root: {supplied}");
+    }
+    Ok(checked)
+}
 
 pub fn cmd_edit(
     root: &Path,
@@ -43,7 +80,7 @@ pub(crate) fn cmd_edit_code(
     let (path0, _, _, _) = locate_symbol(conn, symbol)?;
     indexer::reindex_file(root, conn, &path0)?;
     let (path, s, e, q) = locate_symbol(conn, symbol)?;
-    let abs = root.join(&path);
+    let abs = project_path(root, &path)?;
     let original = std::fs::read_to_string(&abs)?;
     let new_src = editing::splice_lines(&original, s as usize, e as usize, replacement);
     write_verified(root, conn, &path, &new_src, force)?;
@@ -63,6 +100,7 @@ fn write_verified(
     new_src: &str,
     force: bool,
 ) -> Result<()> {
+    let abs = project_path(root, path)?;
     if !force {
         let language = lang::detect_lang(path).ok_or_else(|| anyhow!("unknown language"))?;
         let errors = lang::syntax_errors(language, new_src)?;
@@ -73,7 +111,7 @@ fn write_verified(
             );
         }
     }
-    std::fs::write(root.join(path), new_src)?;
+    std::fs::write(abs, new_src)?;
     Ok(())
 }
 
@@ -94,7 +132,7 @@ pub fn cmd_edit_range(
     }
     // reindex first so the file on disk and the index agree afterward
     indexer::reindex_file(root, conn, file)?;
-    let abs = root.join(file);
+    let abs = project_path(root, file)?;
     let original = std::fs::read_to_string(&abs)?;
     let new_src = editing::splice_lines(&original, start, end, replacement);
     write_verified(root, conn, file, &new_src, force)?;
@@ -141,7 +179,7 @@ pub fn cmd_insert(
         (None, None) => bail!("insert needs a symbol anchor or --at <file> <line>"),
     };
     // read what exists (empty string if the --at file is new)
-    let abs = root.join(&path);
+    let abs = project_path(root, &path)?;
     let original = std::fs::read_to_string(&abs).unwrap_or_default();
     let new_src = editing::splice_insert(&original, at_line, code);
     write_verified(root, conn, &path, &new_src, force)?;
@@ -243,7 +281,10 @@ pub fn cmd_rename(
     let mut plans: Vec<(String, String, String, usize)> = Vec::new(); // rel, orig, new_src, hits
     let mut fallback_files: Vec<String> = Vec::new();
     for rel in &files {
-        let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+        let Ok(abs) = project_path(root, rel) else {
+            bail!("indexed mutation path escapes project root: {rel}");
+        };
+        let Ok(src) = std::fs::read_to_string(abs) else {
             continue;
         };
         let flang = lang::detect_lang(rel);
@@ -279,9 +320,12 @@ pub fn cmd_rename(
     let mut written: Vec<&(String, String, String, usize)> = Vec::new();
     for plan in &plans {
         let (rel, _, new_src, _) = plan;
-        if let Err(e) = std::fs::write(root.join(rel), new_src) {
+        let abs = project_path(root, rel)?;
+        if let Err(e) = std::fs::write(abs, new_src) {
             for (wrel, worig, ..) in written.iter().copied() {
-                let _ = std::fs::write(root.join(wrel), worig);
+                if let Ok(wabs) = project_path(root, wrel) {
+                    let _ = std::fs::write(wabs, worig);
+                }
             }
             bail!(
                 "write failed on {rel} ({e}) — rolled back {} file(s)",
@@ -293,7 +337,9 @@ pub fn cmd_rename(
     let mut total = 0usize;
     let mut out = format!("renamed '{name}' → '{new_name}':\n");
     for (rel, _, _, hits) in &plans {
-        let _ = indexer::reindex_file(root, conn, rel);
+        indexer::reindex_file(root, conn, rel).map_err(|e| {
+            anyhow!("rename wrote source files, but index refresh failed for {rel}: {e}")
+        })?;
         out.push_str(&format!("  {rel}: {hits}\n"));
         total += hits;
     }
@@ -308,4 +354,43 @@ pub fn cmd_rename(
         ));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_path;
+    use std::path::Path;
+
+    fn fixture() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("cona-mutation-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("nested/file.rs"), "fn f() {}\n").unwrap();
+        root
+    }
+
+    #[test]
+    fn mutation_paths_stay_under_root() {
+        let root = fixture();
+        assert!(project_path(&root, "nested/file.rs").is_ok());
+        assert!(project_path(&root, "../outside.rs").is_err());
+        assert!(project_path(&root, Path::new("/tmp/outside.rs").to_str().unwrap()).is_err());
+        assert!(project_path(&root, "nested/new.rs").is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_paths_reject_symlink_escape() {
+        let root = fixture();
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("cona-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("nested/link")).unwrap();
+        assert!(project_path(&root, "nested/link/created.rs").is_err());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
 }

@@ -272,6 +272,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",

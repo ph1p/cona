@@ -670,11 +670,9 @@ fn install_via_cargo(ver: &str, dst: &Path) -> Result<Change> {
     if !ok {
         bail!("cargo install cona@{ver} failed");
     }
-    let bin = root.join("bin").join(if cfg!(windows) {
-        "cona.exe"
-    } else {
-        "cona"
-    });
+    let bin = root
+        .join("bin")
+        .join(if cfg!(windows) { "cona.exe" } else { "cona" });
     let ch = replace_binary(&bin, dst)?;
     let _ = std::fs::remove_dir_all(&root);
     Ok(ch)

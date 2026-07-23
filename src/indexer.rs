@@ -166,16 +166,17 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
     });
     let parsed = results.len();
 
-    // phase 3: single write transaction
-    conn.execute_batch("BEGIN")?;
+    // phase 3: single write transaction. The guard rolls back automatically
+    // if any upsert, symbol insert, or cleanup operation fails.
+    let tx = conn.unchecked_transaction()?;
     {
-        let mut upsert = conn.prepare(
+        let mut upsert = tx.prepare(
             "INSERT INTO files(path, mtime, size, lang) VALUES(?1,?2,?3,?4)
              ON CONFLICT(path) DO UPDATE SET mtime=?2, size=?3, lang=?4",
         )?;
-        let mut get_id = conn.prepare("SELECT id FROM files WHERE path=?1")?;
-        let mut del = conn.prepare("DELETE FROM symbols WHERE file_id=?1")?;
-        let mut ins = conn.prepare(
+        let mut get_id = tx.prepare("SELECT id FROM files WHERE path=?1")?;
+        let mut del = tx.prepare("DELETE FROM symbols WHERE file_id=?1")?;
+        let mut ins = tx.prepare(
             "INSERT INTO symbols(file_id,name,qualified,kind,parent,start_line,end_line,signature)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         )?;
@@ -201,12 +202,12 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
     let mut removed = 0usize;
     for (path, (id, _, _)) in &existing {
         if !seen.contains(path) {
-            conn.execute("DELETE FROM symbols WHERE file_id=?1", [id])?;
-            conn.execute("DELETE FROM files WHERE id=?1", [id])?;
+            tx.execute("DELETE FROM symbols WHERE file_id=?1", [id])?;
+            tx.execute("DELETE FROM files WHERE id=?1", [id])?;
             removed += 1;
         }
     }
-    conn.execute_batch("COMMIT")?;
+    tx.commit()?;
 
     let total_files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
     let total_symbols: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
