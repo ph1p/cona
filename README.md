@@ -4,327 +4,123 @@
 [![crates.io](https://img.shields.io/crates/v/cona.svg)](https://crates.io/crates/cona)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Token-efficient code navigation and editing CLI for AI agents.
-Rust + tree-sitter + SQLite. Works globally across all your projects, keeps its
-index fresh via git hooks, and tracks how many tokens it saves you.
+**Your AI agent reads whole files to find one function. cona lets it read the function.**
 
-## Quick start
+cona is a code-navigation CLI built for AI coding agents. It indexes your project
+into a symbol tree, so an agent can pull a single function, class, or method —
+instead of dumping the entire file into its context. Fewer tokens, faster answers,
+lower cost.
+
+Rust + tree-sitter + SQLite. One binary. Works across all your projects.
 
 ```sh
-cargo install cona       # or prebuilt binary / from source, see Installation
+cargo install cona   # or: curl -fsSL https://raw.githubusercontent.com/ph1p/cona/main/install.sh | sh
 cd your/project
-cona setup               # index + git hooks + agent integration — that's it
+cona setup           # index + git hooks + agent integration — done
 ```
 
-`setup` asks once whether to wire the current project, your global agent
-configs, or both — after that everything is automatic: the index refreshes on
-every commit and agent edit, and your agents (Claude Code, Cursor, Codex,
-Gemini, …) navigate by symbol instead of reading whole files.
-`cona doctor` verifies the installation, `cona stats` shows tokens saved.
+That's the whole setup. From here your agents (Claude Code, Cursor, Codex,
+Gemini, …) navigate by symbol automatically, and the index stays fresh on every
+commit and edit.
+
+## Why it helps
+
+- **Reads a symbol, not a file.** `cona show UserService.login` returns ~30 tokens.
+  Reading the file it lives in might cost 6,000.
+- **Zero babysitting.** The index is incremental and self-refreshing via git hooks.
+  Set up once, forget it.
+- **It proves the savings.** Every lookup logs what it returned vs. what a naive
+  grep-then-read would have cost. `cona stats` shows the running total.
+- **Broad language support.** 30+ languages with full symbol extraction; more with
+  search-only support.
+- **Plays with your agents.** Auto-wires Claude Code, Cursor, Codex, Gemini, and
+  more — or runs as an MCP server.
 
 ## How it works
 
-1. **Index** — `cona setup` parses the project with tree-sitter into a
-   symbol tree (functions, classes, methods … with exact line ranges), stored
-   in one SQLite file under `~/.cona/`. Incremental: only changed files are
-   reparsed; git hooks and agent hooks keep it fresh without manual reindexing.
+1. **Index** — tree-sitter parses your code into a symbol tree (functions,
+   classes, methods, with exact line ranges), stored in one SQLite file under
+   `~/.cona/`. Incremental: only changed files are reparsed.
 2. **Navigate** — instead of reading files, the agent asks for symbols:
-   `tree → outline → show → edit`; `context` packs a symbol's source + callees +
-   callers in one call, `impact` shows its blast radius before an edit. A lookup
-   costs tens of tokens instead of a whole file.
-3. **Redirect** — an optional PreToolUse hook (installed by `setup`) catches
-   full reads of large indexed files and broad identifier greps, and points the
-   agent at the cheaper query (`outline`/`show`, or `context`/`impact` for a
-   whole-symbol pack). Always fails open — small files, partial reads, and
-   non-code pass through.
-4. **Measure** — every query logs what it returned vs. the grep-then-Read cost
-   of the same lookup without cona. `cona stats` / `cona ui` show the
-   savings.
+   `tree → outline → show → edit`. A lookup costs tens of tokens, not thousands.
+3. **Redirect** — an optional hook catches an agent about to read a whole large
+   file and points it at the cheap query instead. Always fails open.
+4. **Measure** — `cona stats` and `cona ui` show the tokens saved over time.
+
+## Everyday commands
+
+Coarse to fine — the usual path through an unfamiliar codebase:
+
+```sh
+cona tree --rank            # ranked overview of the whole codebase
+cona outline src/db.rs      # every symbol in one file
+cona show open_project_db   # print just that symbol's source
+cona context open_project_db  # the symbol + what it calls + who calls it
+cona edit open_project_db --file new.rs   # replace its body (syntax-verified)
+```
+
+A few more you'll reach for often:
+
+| Command                   | Does                                                          |
+| ------------------------- | ------------------------------------------------------------- |
+| `cona find <Name>`        | Locate a symbol (file, line range, signature)                 |
+| `cona grep <pattern>`     | Code-only search, hits labeled with their symbol              |
+| `cona refs <Name>`        | Every usage site (semantic — skips strings/comments)          |
+| `cona diff [ref]`         | Changed _symbols_ vs a git ref — start code reviews here      |
+| `cona impact <Sym>`       | Blast radius before an edit: refs + callers + tests + history |
+| `cona rename <Sym> <new>` | Project-wide rename: collision-guarded, all-or-nothing        |
+| `cona stats`              | Tokens saved, per project and global                          |
+| `cona ui`                 | Live TUI: index status + savings                              |
+| `cona doctor`             | Check the installation                                        |
+
+**Full reference:** `cona --help`, or a group at a time —
+`cona nav|inspect|code|history|project|maint --help`. Every command also works
+flat (`cona show Foo` ≡ `cona nav show Foo`).
 
 ## Installation
 
-Any one of these — then `cona setup` inside a project:
+Pick one, then run `cona setup` in a project:
 
-| Method          | Command                                                                                                                                        |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Install script  | `curl -fsSL https://raw.githubusercontent.com/ph1p/cona/main/install.sh \| sh` (no Rust — grabs the prebuilt binary; `wget -qO-` works too) |
-| crates.io       | `cargo install cona`                                                                                                                        |
-| Prebuilt binary | download from [releases](https://github.com/ph1p/cona/releases) (Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64), put on `PATH` |
-| From source     | `git clone https://github.com/ph1p/cona && cd cona && ./install.sh`                                                                      |
+| Method          | Command                                                                                               |
+| --------------- | ----------------------------------------------------------------------------------------------------- |
+| Install script  | `curl -fsSL https://raw.githubusercontent.com/ph1p/cona/main/install.sh \| sh`                        |
+| crates.io       | `cargo install cona`                                                                                  |
+| Prebuilt binary | grab it from [releases](https://github.com/ph1p/cona/releases) (Linux, macOS, Windows), put on `PATH` |
+| From source     | `git clone https://github.com/ph1p/cona && cd cona && ./install.sh`                                   |
 
-One `install.sh`, two modes: piped through `curl`/`wget` it downloads the
-prebuilt release binary to `~/.local/bin` (override `BIN_DIR=`, pin
-`CONA_VERSION=`); run from a source checkout (`./install.sh`, or
-`--bin-dir DIR`) it builds with cargo and wires upgrade git hooks. Building
-needs Rust ≥ 1.95.
+The install script downloads a prebuilt binary — no Rust needed. Running
+`./install.sh` from a source checkout builds with cargo (needs Rust ≥ 1.95) and
+wires upgrade hooks.
 
-### Set up a project
+**Staying current is automatic:** every command cheaply checks (at most once a
+day) for a newer release and updates itself. Force it with `cona upgrade`.
 
-```sh
-cd your/project
-cona setup               # index + git hooks, then a checklist of agents to wire up
-```
-
-On a terminal, `cona setup` indexes the project, installs git hooks, then shows
-**one checklist** of every agent in both scopes (this project + your home
-configs), pre-checked with the ones detected on disk — toggle any, press enter
-(`a` toggles all). Non-interactive:
+## Setting up a project
 
 ```sh
-cona setup -y            # install every detected agent, no prompt
-cona setup project       # this project only (no prompt)
-cona setup global        # home configs only (~/.claude, ~/.codex, …)
-cona setup all           # both scopes, no prompt
+cona setup          # interactive: index + hooks, then a checklist of agents to wire
+cona setup -y       # non-interactive: wire every detected agent
 ```
 
-Piped/CI runs skip the prompt automatically. That's it — the index refreshes
-automatically from then on.
-
-### Managing individual agents
-
-`setup` wires up everything at once; to add, remove, or check a single agent
-afterwards, use `cona agents`:
+`setup` asks once whether to wire this project, your global agent configs, or
+both. After that it's automatic. To adjust a single agent later:
 
 ```sh
-cona agents                    # interactive checklist — check = configured, toggle any
-cona agents status             # what's configured, per agent and scope, + how to change it
-cona agents add cursor         # configure one agent for this project
-cona agents add gemini --global   # configure one agent in your home configs
-cona agents remove cursor      # remove one agent (no residue — only cona markers go)
+cona agents            # interactive checklist
+cona agents status     # what's wired, per agent and scope
+cona agents add cursor # wire one agent (add/remove alias install/uninstall)
 ```
 
-`cona agents status` prints an at-a-glance table (`✓ on` / `– off` / `n/a`) for
-every known agent in both scopes, so you always know where cona is wired.
-`add`/`remove` are friendly aliases for `install`/`uninstall`; name any subset of
-agents (`cona agents add cursor gemini`) or use `--all` for every known one. All
-changes are idempotent and marker-based (`<!-- cona:begin/end -->`) — foreign
-content is never touched. Known agents: `claude`, `agents` (AGENTS.md — Codex /
-OpenCode / Amp / Jules), `cursor`, `gemini`, `pi`.
+Known agents: `claude`, `agents` (Codex / OpenCode / Amp / Jules via AGENTS.md),
+`cursor`, `gemini`, `pi`. Every change is idempotent and marker-based
+(`<!-- cona:begin/end -->`) — your own config is never touched.
 
-### Staying up to date
+**Uninstall** mirrors setup: `cona uninstall` (interactive checklist),
+`cona uninstall -y` (agents + binary), `--purge` also deletes `~/.cona`.
 
-Automatic — no action needed. Every command cheaply checks in the background:
+## MCP server
 
-- **Source install:** git hooks in the checkout (post-commit/-merge/-checkout)
-  and an mtime check rebuild whenever the sources are newer than the binary.
-- **All installs:** at most once a day cona checks crates.io for a newer
-  release. Source checkouts are updated via `git pull --ff-only` + rebuild
-  (local changes are never overwritten); binary installs get the prebuilt
-  release binary, falling back to `cargo install`.
-
-Manual trigger: `cona upgrade`.
-
-### Uninstall
-
-Remove just one agent, or everything:
-
-```sh
-cona agents remove cursor    # drop a single agent (see "Managing individual agents")
-cona uninstall               # interactive: checklist of what to remove
-cona uninstall -y            # non-interactive: remove agents + binary
-cona uninstall -y --purge    # …and also delete ~/.cona (indexes + stats)
-./uninstall.sh [--purge]     # same as `cona uninstall`, from a source checkout
-```
-
-On a terminal, `cona uninstall` shows a **checklist** — untick anything you want
-to keep:
-
-- **agents** — cona's agent files + git hooks, both globally and in **every
-  registered project**
-- **binary** — the installed `cona` executable
-- **data** — delete `~/.cona` (indexes + stats, irreversible; confirmed
-  separately)
-
-Piped/CI runs, or `-y`, remove agents + binary without prompting (`--purge` also
-deletes `~/.cona`). Foreign file content is never touched — only cona marker
-blocks and hook entries are removed, so your own config survives intact.
-
-## Commands
-
-Commands are organized into six groups for discoverability — run `cona <group> --help`:
-
-| Group      | Covers                                                    |
-| ---------- | --------------------------------------------------------- |
-| `nav`      | `tree` `outline` `find` `show` `refs` `grep`              |
-| `inspect`  | `context` `diff` `impact` `shape` `deps` `entries` `tests` `callers` `callees` `path` |
-| `code`     | `edit` `insert` `rename` `note` `check`                   |
-| `history`  | `blame` `hot` `coupling`                                  |
-| `project`  | `index` `stats` `projects` `reset` `forget` `tidy` `ui`   |
-| `maint`    | `doctor` `setup` `install` `upgrade` `uninstall` `agents` `hooks` `skill` `mcp` |
-
-Every command also works **flat** (`cona show Foo` ≡ `cona nav show Foo`) — the short form is the canonical one for agents (fewer tokens); the grouped form is for humans browsing `--help`.
-
-| Command                                        | Purpose                                                                                                                            |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `cona index [--watch]`                      | Index the project (incremental) — runs automatically on first use; `--watch` stays alive and reindexes on file changes (debounced) |
-| `cona tree [--rank] [--budget 2000]`        | Compact codebase overview within a token budget; `--rank` orders symbols by reference fan-in                                       |
-| `cona outline <file>`                       | All symbols of one file with line ranges and signatures                                                                            |
-| `cona find <Name> [--kind fn] [--json]`     | Locate a symbol (exact → LIKE → fuzzy fallback)                                                                                    |
-| `cona show <Sym> [<Sym2> …] [--context 3] [--kind struct] [--sig]` | Print only those symbols' source — several names read in one call; `--context` adds surrounding lines; `--kind` disambiguates struct/impl name clashes; `--sig` prints just the signature (no body, reads nothing off disk) |
-| `cona refs <Name>`                          | All usage sites as `file:line` (semantic — strings/comments never match)                                                           |
-| `cona grep <pattern> [-i] [--limit 50]`     | Substring search over code files only; hits labeled with their enclosing symbol                                                    |
-| `cona diff [ref]`                           | Changed **symbols** instead of lines (default: vs `HEAD`, incl. uncommitted + untracked) — start code reviews here                 |
-| `cona context <Sym> [--budget 3000]`        | One context pack: symbol source + callee signatures + call sites (instead of show+refs+shows)                                      |
-| `cona edit <Sym> --file new.txt`            | Replace a symbol's body — syntax-verified, rollback on error                                                                       |
-| `cona edit <file> --range S-E`              | Replace absolute lines S-E of a file — patch a few lines without resending a symbol; same verify + rollback                        |
-| `cona insert <Sym> --after\|--before`       | Insert new code next to a symbol without touching its body — whole-file syntax re-verified                                         |
-| `cona insert --at <file> <line>`            | Insert at an absolute position (0 = prepend, past EOF = append) — works on a new/empty file with no indexed symbol                 |
-| `cona check [<file>]`                       | tree-sitter parse diagnostics (syntax only, **not** a compiler); no file = all changed vs `HEAD`                                   |
-| `cona impact <Sym>`                         | Pre-edit blast radius: references + immediate callers + tests + recent history, in one pack                                        |
-| `cona entries [--path p]`                   | Entry points: main fns, exported/public API, test overview — first orientation                                                     |
-| `cona deps [path]`                          | File-level import graph + most-imported + cycles — the architecture view                                                           |
-| `cona callers <Sym> [--depth 2]`            | Transitive caller tree: who reaches this symbol                                                                                    |
-| `cona callees <Sym> [--depth 2]`            | Transitive callee tree: what this symbol reaches                                                                                   |
-| `cona path <A> <B>`                         | Shortest call chain from A to B                                                                                                    |
-| `cona tests <Sym>`                          | Which tests exercise a symbol — loud when none do                                                                                  |
-| `cona blame <Sym> [--limit 10]`             | git history of exactly this symbol's lines                                                                                         |
-| `cona hot [--since '6 months ago']`         | Churn hotspots among indexed files                                                                                                 |
-| `cona coupling <file>`                      | Files that historically change together with this one                                                                              |
-| `cona shape <Sym> [--budget 2000]`          | Symbol source + referenced types expanded one level                                                                                |
-| `cona note <Sym> <text…>`                   | Persistent note on a symbol — auto-surfaced in show/context (`note` lists, `--rm <id>` deletes)                                    |
-| `cona rename <Sym> <new> [--force]`         | Project-wide semantic rename: collision guard, syntax verify, all-or-nothing                                                       |
-| `cona stats [--project] [--json]`           | Stats per project + global: tokens saved, top targets, recent activity                                                             |
-| `cona ui`                                   | Live TUI: index status + token savings in real time                                                                                |
-| `cona doctor`                               | Diagnosis: binary, agent hooks/skill (global + project), index + storage                                                           |
-| `cona tidy [--orphans]` (alias `gc`)        | DB housekeeping: prune old usage rows, drop orphaned indexes, reclaim space                                                        |
-| `cona forget [path]`                        | Delete a project's index + stats (default: current project)                                                                        |
-| `cona reset [--keep-stats]`                 | Reset the current project: wipe index, notes + stats, reindex fresh                                                                |
-| `cona projects`                             | List all registered projects                                                                                                       |
-| `cona hooks install`                        | git hooks (post-commit/-merge/-checkout) for auto-reindex                                                                          |
-| `cona skill`                                | Print the agent SKILL.md                                                                                                           |
-| `cona mcp`                                  | MCP server over stdio — full tool parity: find/show/refs/outline/tree/grep/context/diff/edit/batch_edit/insert/check/impact/callers/callees/path/deps/shape/entries/tests/note |
-| `cona setup [project\|global\|all] [-y]`    | Everything at once: index + git hooks + agents — bare shows a checklist of agents to wire up; `-y`/scope/CI skip the prompt        |
-| `cona install [--bin-dir DIR]`              | Install the binary + upgrade hooks in the source repo                                                                              |
-| `cona upgrade [--quiet]`                    | Rebuild from a newer source checkout, else update to the newest release                                                            |
-| `cona agents [status\|add\|remove\|install\|uninstall] [names…] [--all] [--global]` | Manage agent integration. Bare = interactive checklist; `status` = what's configured where; `add`/`remove` (aliases for `install`/`uninstall`) target named agents (none = autodetect; `--all` = every known agent) |
-| `cona uninstall [--purge] [-y]`             | Remove cona — bare shows a checklist (agents / binary / data); `-y`/CI remove agents + binary; `--purge` also deletes ~/.cona      |
-
-## Architecture
-
-- **Languages:** 30+ with symbol extraction — Rust, Python, JavaScript, TypeScript/TSX,
-  Go, Java, C, C++, C#, Ruby, PHP, Kotlin, Swift, Scala, Elixir, Dart, Lua, Bash, CSS,
-  TOML, YAML, Markdown, Zig, Haskell, OCaml, Julia, PowerShell, Objective-C, Protobuf,
-  SQL, Perl, HCL/Terraform, Makefile, Dockerfile — plus parse-only refs/grep for
-  JSON, HTML, Nix, Svelte, Vue, R, XML, GraphQL (tree-sitter grammars; adding a
-  language is a few lines in `src/lang.rs`)
-- **Storage:** global under `~/.cona/` (override: `CONA_DATA_DIR`; paths +
-  sizes via `cona doctor`/`stats`)
-  - `projects/<hash>.db` — one SQLite index per project (files + symbols + notes)
-  - `global.db` — project registry + usage stats (command, duration, tokens out,
-    estimated tokens saved) + `meta` (source_dir/install_path/last_tidy)
-- **Automatic maintenance:** once a day (`auto_tidy`) the usage log is pruned
-  (default: ≤90 days / ≤200k rows, via `CONA_USAGE_RETENTION_DAYS` /
-  `CONA_MAX_USAGE_ROWS`), registry entries whose path lived under a temp
-  root and is gone are dropped (test repos, scratchpads), and space is
-  reclaimed via `VACUUM`. Manual: `cona tidy [--orphans]` also purges
-  orphans outside temp roots. `cona forget [path]` deletes an index entirely.
-- **Project detection:** nearest `.git` upwards, else cwd — cona works from
-  any subdirectory. The home directory / fs root is **never** auto-indexed.
-- **Incremental:** files are reparsed only on changed mtime/size; deleted files
-  drop out of the index; `.gitignore` is respected. Heavy directories
-  (`node_modules`, `target`, `dist`, `.venv`, `vendor`, …) are **always**
-  skipped — even without git — as are files > 512 KB, keeping `~/.cona` small.
-- **Symbol addressing:** qualified names (`UserService.login`) instead of
-  fragile line numbers — the index supplies line ranges as extra info.
-- **Safe editing:** `edit` splices exactly the symbol's line range, reparses the
-  result, and refuses to write on syntax errors (`--force` overrides), then
-  reindexes the file. CRLF sources stay CRLF.
-- **Semantic, name-based:** `refs`/`context`/`rename`/callgraph work on
-  tree-sitter identifier nodes (strings/comments never match) but without
-  type/scope resolution — same-named symbols are marked `·ambiguous`.
-  Unsupported languages fall back to a textual word-boundary scan (fail-open).
-- **Optional semantic tier:** an out-of-process stack-graphs helper
-  (`cona-resolve-helper`, fail-open) resolves same-arity ambiguity that the
-  name-based heuristics can't, both same-file and cross-file, for
-  typescript/tsx/javascript/python/rust. `context` and `callers`/`callees`
-  consult it only when a name stays ambiguous; `doctor` reports its status.
-
-## Token accounting
-
-`tokens_saved` = the **grep-then-Read baseline** minus the actual output
-(4 chars ≈ 1 token; clamped ≥ 0). The baseline models what the same lookup
-costs an agent WITHOUT cona: a grep pass (≈free, returns only line numbers)
-plus a targeted `Read offset/limit` window (±40 lines) around each hit — NOT
-the whole file. Overlapping windows merge; the total is capped at the whole
-file. So a query can never claim to have saved more than a naive whole-file
-read, and a symbol buried in a large file credits only the realistic window an
-agent would actually have opened, not the entire file (`db::baseline_tokens`).
-The PreToolUse hook counts its intercepts (`hook:read-block`, `hook:grep-block`)
-but credits itself no tokens — the follow-up query earns them, otherwise the
-same avoided read would be counted twice. Deliberately coarse — a trend metric
-across time and projects, not an accountant.
-
-`cona stats` shows both current project **and** global, each with index
-status, saved vs. used tokens (incl. % savings), redirected full reads,
-per-command breakdown, top targets, and recent activity. The command table
-contains **only real queries**; maintenance rows (`index`, `edit`, `hook:*`)
-save nothing by definition and appear as a compact `maintenance` line below.
-
-`cona ui` renders the same data as a live dashboard (poll ~1s, read-only):
-savings gauge, query table, live feed, and a "tokens saved per minute"
-sparkline. `p` toggles project/global, `q` quits.
-
-Reset stats: `cona reset` (per project, wipes + reindexes; `--keep-stats` to
-keep the numbers); `cona tidy` prunes old rows globally.
-
-### PreToolUse hook — accelerator, not gatekeeper
-
-cona does not want to defeat the agent's own optimizations (prompt caching
-etc.) — it wants to get it there faster. The hook always fails open and
-redirects only two things, both in an **indexed** project:
-
-- a _complete_ `Read` of a _large_ code file (default > 300 lines, via
-  `CONA_READ_MAX_LINES`) → `outline`/`show`, or `context`/`impact` for a
-  whole-symbol pack;
-- a _broad identifier_ `Grep` (no glob/type/path/`head_limit` filter) →
-  `grep`/`refs`.
-
-Everything else passes untouched: partial reads (offset/limit), small files,
-non-code, regex greps, already-narrowed greps. In a git repo that simply isn't
-indexed yet, the same calls are _nudged_ (allowed, one-time hint that
-`cona index` unlocks the fast path) instead of redirected.
-`CONA_HOOK_DISABLE=1` turns it off entirely.
-
-## Agent integration
-
-`cona setup` wires cona into every detected agent in one shot. To manage agents
-afterwards, use `cona agents`:
-
-- `cona agents` — interactive checklist (check = configured); toggle any agent on
-  or off and confirm
-- `cona agents status` — an at-a-glance table of what's configured, per agent and
-  scope, with the exact command to change each
-- `cona agents add <name…>` / `remove <name…>` — configure or remove specific
-  agents (aliases for `install`/`uninstall`); `--global` targets home configs
-  (`~/.claude`, `~/.codex`, …) instead of the project; no names = autodetect
-  installed; `--all` = every known agent regardless of detection
-
-Every change is idempotent and marker-based (`<!-- cona:begin/end -->`), so it
-never clobbers your own content and `remove` leaves no residue. The targets:
-
-| Agent                  | Project                                                                                                       | Global                                      |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| Claude Code skill      | `.claude/skills/cona/SKILL.md`                                                                             | `~/.claude/skills/cona/SKILL.md`         |
-| Claude Code memory     | `CLAUDE.md` (marker block)                                                                                    | `~/.claude/CLAUDE.md`                       |
-| Claude Code hooks      | `.claude/settings.json` — PostToolUse/SessionStart → `index --quiet`, **PreToolUse Read\|Grep → `hook PreToolUse`** | `~/.claude/settings.json`                   |
-| Claude Code subagents  | `.claude/agents/*.md` (marker block in every **existing** definition; never creates new agent files)          | `~/.claude/agents/*.md`                     |
-| Codex / OpenCode / Amp / Jules | `AGENTS.md` (marker block)                                                                            | `~/.codex/AGENTS.md` (if `~/.codex` exists) |
-| Cursor                 | `.cursor/rules/cona.mdc` (if `.cursor/` exists)                                                            | `~/.cursor/rules/cona.mdc`               |
-| Gemini CLI             | `GEMINI.md` (if `.gemini/`/`GEMINI.md` exists)                                                                | `~/.gemini/GEMINI.md`                       |
-| pi.dev                 | `AGENTS.md` (marker block, shared with the Codex row above)                                                    | `~/.pi/agent/AGENTS.md` (if `~/.pi` exists) |
-
-The hooks keep the index fresh after every agent edit; the skill/memory blocks
-instruct the agent to never read whole files and to use find/show/edit with
-`--json` for machine-readable output.
-
-**Note — Claude Code may pick up hooks/skills only after a restart:** hooks and
-skills are read as a snapshot at session start (security model). `cona doctor`
-shows what is actually installed globally and per project.
-
-## MCP server mode
-
-`cona mcp` serves the core queries as MCP tools over stdio (hand-rolled
-JSON-RPC, no extra deps). Register it e.g. in a project `.mcp.json`:
+For hosts without hook support, cona speaks MCP over stdio:
 
 ```json
 {
@@ -337,8 +133,41 @@ JSON-RPC, no extra deps). Register it e.g. in a project `.mcp.json`:
 }
 ```
 
-Full tool parity with the CLI: `find` `show` `refs` `outline` `tree` `grep`
-`context` `diff` `edit` `batch_edit` `insert` `check` `impact` `callers`
-`callees` `path` `deps` `shape` `entries` `tests` `note`. The CLI + PreToolUse
-hook remains the recommended integration (zero context overhead); MCP is for
-hosts without hook support.
+Full tool parity with the CLI. The CLI + hook integration is still recommended
+(zero context overhead); MCP is the fallback.
+
+## Under the hood
+
+- **Languages (full symbols):** Rust, Python, JavaScript, TypeScript/TSX, Go,
+  Java, C, C++, C#, Ruby, PHP, Kotlin, Swift, Scala, Elixir, Dart, Lua, Bash,
+  CSS, TOML, YAML, Markdown, Zig, Haskell, OCaml, Julia, PowerShell, Objective-C,
+  Protobuf, SQL, Perl, HCL/Terraform, Makefile, Dockerfile. **Search-only:** JSON,
+  HTML, Nix, Svelte, Vue, R, XML, GraphQL.
+- **Storage:** everything under `~/.cona/` (override with `CONA_DATA_DIR`) — one
+  SQLite index per project plus a global registry + usage stats. Housekeeping
+  runs itself daily; `cona doctor` shows sizes and paths.
+- **Incremental & scoped:** only changed files are reparsed, `.gitignore` is
+  respected, heavy dirs (`node_modules`, `target`, …) and files > 512 KB are
+  always skipped. Your home directory is never auto-indexed.
+- **Safe editing:** `edit` re-parses the result and refuses to write on syntax
+  errors (`--force` overrides). CRLF stays CRLF.
+- **Semantic, name-based:** refs / rename / call graph work on tree-sitter
+  identifier nodes (never strings or comments) but without full type resolution —
+  ambiguous same-named symbols are marked `·ambiguous`. An optional out-of-process
+  stack-graphs helper resolves the hard cases for TS/JS/Python/Rust.
+
+**Token accounting.** `tokens_saved` = a grep-then-read baseline minus the actual
+output (4 chars ≈ 1 token, clamped ≥ 0). The baseline models what the _same_
+lookup would cost without cona — a targeted read window (±40 lines) around each
+hit, capped at the whole file — so a query can never claim to save more than a
+naive read. It's a deliberately coarse trend metric, not an accountant.
+
+**The redirect hook** is an accelerator, not a gatekeeper. In an indexed project
+it redirects exactly two things — a complete read of a large code file, and a
+broad identifier grep — to the cheaper query. Everything else (partial reads,
+small files, non-code, regex greps) passes untouched. It always fails open;
+`CONA_HOOK_DISABLE=1` turns it off.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
