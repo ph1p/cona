@@ -72,12 +72,15 @@ jobs:
           else
             tar czf "../cona-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" .
           fi
+          cd ..
+          openssl dgst -sha256 -r "cona-${{ github.ref_name }}-${{ matrix.target }}".* > "cona-${{ github.ref_name }}-${{ matrix.target }}".sha256
       - uses: actions/upload-artifact@v4
         with:
           name: cona-${{ matrix.target }}
           path: |
             cona-*.tar.gz
             cona-*.zip
+            cona-*.sha256
           if-no-files-found: error
 
   release:
@@ -94,6 +97,7 @@ jobs:
           files: |
             cona-*.tar.gz
             cona-*.zip
+            cona-*.sha256
 
   publish:
     name: cargo publish

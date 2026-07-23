@@ -255,7 +255,7 @@ pub fn multiselect(title: &str, rows: &[Row<'_>]) -> anyhow::Result<Option<Vec<u
         first = false;
         for (i, row) in rows.iter().enumerate() {
             let line = match row {
-                Row::Header(h) if h.is_empty() => String::new(),
+                Row::Header("") => String::new(),
                 Row::Header(h) => bold(h),
                 Row::Item(name, desc, _) => {
                     let box_ = if checked[i] { green("◉") } else { dim("○") };
