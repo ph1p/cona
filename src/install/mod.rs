@@ -13,8 +13,9 @@
 //!             idempotent, marker-based, uninstallable.
 
 use crate::ui;
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{anyhow, bail, Result};
+use sha2::{Digest, Sha256};
+use std::path::{Component, Path};
 
 pub const BLOCK_BEGIN: &str = "<!-- cona:begin -->";
 pub const BLOCK_END: &str = "<!-- cona:end -->";
@@ -66,35 +67,94 @@ pub fn release_ext() -> &'static str {
 /// self-upgrade and the resolve helper auto-fetch; callers pick files out of
 /// `tmp` and clean it up themselves.
 pub fn fetch_release_archive(ver: &str, target: &str, tmp: &Path) -> Result<()> {
-    use anyhow::bail;
     let ext = release_ext();
     let url = format!(
         "https://github.com/{GITHUB_REPO}/releases/download/v{ver}/cona-v{ver}-{target}.{ext}"
     );
+    let checksum_url = format!("{url}.sha256");
     std::fs::create_dir_all(tmp)?;
     let archive = tmp.join(format!("cona.{ext}"));
+    let checksum = tmp.join("cona.sha256");
+    let result = (|| {
+        download_to(&url, &archive)?;
+        download_to(&checksum_url, &checksum)?;
+        verify_sha256(&archive, &checksum)?;
+        validate_archive_paths(&archive)?;
+        // bsdtar (macOS, Windows 10+) and GNU tar both handle .tar.gz; bsdtar
+        // also extracts the Windows .zip.
+        let ok = std::process::Command::new("tar")
+            .arg("-xf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(tmp)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            bail!("extract failed: {}", archive.display());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        // `tmp` is a caller-created, version-specific staging directory.
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+    result
+}
+
+fn download_to(url: &str, destination: &Path) -> Result<()> {
     let ok = std::process::Command::new("curl")
         .args(["-fsSL", "--max-time", "120", "-A", USER_AGENT, "-o"])
-        .arg(&archive)
-        .arg(&url)
+        .arg(destination)
+        .arg(url)
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if !ok {
+    if ok {
+        Ok(())
+    } else {
         bail!("download failed: {url}");
     }
-    // bsdtar (macOS, Windows 10+) and GNU tar both handle .tar.gz; bsdtar
-    // also extracts the Windows .zip.
-    let ok = std::process::Command::new("tar")
-        .arg("-xf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(tmp)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
-        bail!("extract failed: {}", archive.display());
+}
+
+fn verify_sha256(archive: &Path, checksum_file: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(checksum_file)?;
+    let expected = text
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| anyhow!("checksum metadata is empty"))?;
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("checksum metadata is malformed");
+    }
+    let bytes = std::fs::read(archive)?;
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    if !actual.eq_ignore_ascii_case(expected) {
+        bail!("release archive checksum mismatch");
+    }
+    Ok(())
+}
+
+fn validate_archive_paths(archive: &Path) -> Result<()> {
+    let output = std::process::Command::new("tar")
+        .arg("-tf")
+        .arg(archive)
+        .output()?;
+    if !output.status.success() {
+        bail!("could not inspect archive: {}", archive.display());
+    }
+    for raw in String::from_utf8_lossy(&output.stdout).lines() {
+        let normalized = raw.replace('\\', "/");
+        let path = Path::new(&normalized);
+        if path.is_absolute()
+            || path.components().any(|c| {
+                matches!(
+                    c,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            bail!("archive contains unsafe path: {raw}");
+        }
     }
     Ok(())
 }
@@ -291,5 +351,21 @@ mod tests {
         let v = upsert_block("", "guide");
         assert!(v.starts_with(BLOCK_BEGIN));
         assert!(v.ends_with(&format!("{BLOCK_END}\n")));
+    }
+
+    #[test]
+    fn checksum_verification_rejects_tampering() {
+        let dir = std::env::temp_dir().join(format!("cona-checksum-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("archive");
+        let checksum = dir.join("archive.sha256");
+        std::fs::write(&archive, b"release bytes").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"release bytes"));
+        std::fs::write(&checksum, format!("{digest}  archive\n")).unwrap();
+        assert!(verify_sha256(&archive, &checksum).is_ok());
+        std::fs::write(&archive, b"tampered").unwrap();
+        assert!(verify_sha256(&archive, &checksum).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
