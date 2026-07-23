@@ -34,6 +34,7 @@ serde = { version = "1", features = ["derive"] }
 # preserve_order: settings.json round-trips keep the user's key order intact
 # (stock Map = BTreeMap would alphabetize their whole file on every write)
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
 dirs = "6"
 anyhow = "1"
 ratatui = "0.30"
