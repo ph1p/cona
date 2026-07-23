@@ -677,8 +677,9 @@ fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
     // this one on reinstall).
     let session_cmd = format!("{exe} index --quiet --session-start");
     let pretool_cmd = format!("{exe} hook PreToolUse");
+    let posttool_cmd = format!("{exe} hook PostToolUse");
     // (event, matcher, command, marker that identifies our entry)
-    let specs: [(&str, Option<&str>, &str, &str); 3] = [
+    let specs: [(&str, Option<&str>, &str, &str); 4] = [
         (
             "PostToolUse",
             Some("Edit|Write|MultiEdit|NotebookEdit"),
@@ -694,6 +695,10 @@ fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
             &pretool_cmd,
             "hook PreToolUse",
         ),
+        // periodic re-nudge: on any tool call, keep the cona habit warm as the
+        // SessionStart map scrolls out of a long context (distinct marker from
+        // the index PostToolUse entry above, so both coexist)
+        ("PostToolUse", None, &posttool_cmd, "hook PostToolUse"),
     ];
     let mut changed = false;
     let hooks = root
