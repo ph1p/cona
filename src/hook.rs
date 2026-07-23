@@ -22,6 +22,13 @@ use std::path::{Path, PathBuf};
 /// redirected to `cona outline`/`show`. Override with `CONA_READ_MAX_LINES`.
 const DEFAULT_MAX_LINES: i64 = 300;
 
+/// Default number of tool calls between periodic re-nudges. A SessionStart note
+/// scrolls out of a long context within a handful of turns; the PreToolUse
+/// redirect only fires on a *wrong* Read/Grep. This closes the gap in the
+/// middle — a one-line reminder every N tool calls keeps the habit warm without
+/// nagging. Override with `CONA_RENUDGE_EVERY` (0 disables).
+const DEFAULT_RENUDGE_EVERY: i64 = 30;
+
 /// What the hook should do about a candidate tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -115,14 +122,19 @@ fn max_lines() -> i64 {
 /// stdin and prints a decision to stdout. ALWAYS exits 0 — this is a helper for
 /// the agent, so a failure here must never break a tool call.
 pub fn run(event: &str) -> Result<()> {
-    if event != "PreToolUse" {
-        return Ok(());
-    }
     if std::env::var("CONA_HOOK_DISABLE").is_ok() {
         return Ok(());
     }
-    // Any error → allow silently.
-    let _ = try_pretooluse();
+    // Any error → do nothing silently.
+    match event {
+        "PreToolUse" => {
+            let _ = try_pretooluse();
+        }
+        "PostToolUse" => {
+            let _ = try_posttooluse();
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -136,6 +148,108 @@ fn try_pretooluse() -> Result<()> {
         Some("Grep") => try_grep(&v),
         _ => Ok(()),
     }
+}
+
+fn renudge_every() -> i64 {
+    std::env::var("CONA_RENUDGE_EVERY")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n >= 0)
+        .unwrap_or(DEFAULT_RENUDGE_EVERY)
+}
+
+/// Path of a per-(project, session) marker file under `data_dir/<kind>/`.
+///
+/// Session identity comes from `CLAUDE_SESSION_ID` when the agent exports it;
+/// without it we fall back to a per-day key so a long-lived shell buckets by
+/// day rather than churning a new marker every call. Both session-scoped hook
+/// mechanisms (`nudge_once`, `tick_toolcall`) share this so the identity rule
+/// stays in ONE place — they only differ in `<kind>` and what they store.
+/// `None` when the data dir is unavailable; each caller picks its own fallback.
+fn session_marker_path(root: &Path, kind: &str) -> Option<PathBuf> {
+    let session = std::env::var("CLAUDE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("day-{}", db::now() / 86_400));
+    let dir = db::data_dir().ok()?;
+    Some(
+        dir.join(kind)
+            .join(format!("{}-{session}", db::project_hash(root))),
+    )
+}
+
+/// Pure re-nudge policy: given the running tool-call count (this call included)
+/// and the cadence, should we re-emit the reminder? Fire on every multiple of
+/// `every` (but never at 0, and never when disabled). Kept pure for testing.
+pub fn should_renudge(count: i64, every: i64) -> bool {
+    every > 0 && count > 0 && count % every == 0
+}
+
+/// PostToolUse: the periodic re-nudge. The SessionStart map orients the agent
+/// once, and the PreToolUse hook catches wrong Read/Grep calls — but between
+/// those, over a long session, the cona habit fades as the startup note scrolls
+/// away. A short reminder every N tool calls (in an indexed project only) keeps
+/// it warm. additionalContext ONLY — never a permission decision — so it can
+/// never block or auto-approve a call. Fully fail-open.
+fn try_posttooluse() -> Result<()> {
+    let every = renudge_every();
+    if every == 0 {
+        return Ok(());
+    }
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    let v: serde_json::Value = serde_json::from_str(&buf)?;
+
+    let root = v["cwd"]
+        .as_str()
+        .map(PathBuf::from)
+        .map(|c| db::git_root_from(&c))
+        .unwrap_or_else(|| db::git_root_from(Path::new(".")));
+
+    // Cheap indexed-repo gate: a single stat, no DB open. Ticking + the cadence
+    // check run BEFORE the expensive `has_index` (which opens the SQLite DB) so
+    // the common case — the 29-in-30 calls that will NOT nudge — never pays for
+    // a connection. Only a call that actually lands on a nudge boundary opens
+    // the DB, and only to confirm the index is real (not just a stale db file).
+    if !db::project_db_path(&root).exists() {
+        return Ok(());
+    }
+    let count = tick_toolcall(&root);
+    if !should_renudge(count, every) || !db::has_index(&root) {
+        return Ok(());
+    }
+    let reason = "Reminder: this project is cona-indexed. Before a full Read or broad \
+                  Grep of code, reach for `cona outline`/`show`/`grep`/`refs` — one \
+                  symbol, not the whole file.";
+    let out = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": reason,
+        }
+    });
+    println!("{}", serde_json::to_string(&out)?);
+    Ok(())
+}
+
+/// Increment and return the per-(project, session) tool-call counter. A tiny
+/// file under the data dir holds the running count (path via
+/// `session_marker_path`, so the session-identity rule is shared with
+/// `nudge_once`). Best-effort: any IO failure returns 0 so the caller simply
+/// doesn't re-nudge this call.
+fn tick_toolcall(root: &Path) -> i64 {
+    let Some(counter) = session_marker_path(root, "toolcalls") else {
+        return 0;
+    };
+    let prev = std::fs::read_to_string(&counter)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    let next = prev + 1;
+    if let Some(parent) = counter.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&counter, next.to_string());
+    next
 }
 
 fn try_read(v: &serde_json::Value) -> Result<()> {
@@ -336,19 +450,9 @@ fn allow_with_reason(root: &Path, cmd: &str, target: &str, reason: &str) -> Resu
 /// without it we fall back to a per-day key so a long-lived shell still only
 /// nags occasionally rather than on every read.
 fn nudge_once(root: &Path) -> bool {
-    let session = std::env::var("CLAUDE_SESSION_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            // no session id: bucket by day so we nudge at most once/day/repo
-            format!("day-{}", db::now() / 86_400)
-        });
-    let Ok(dir) = db::data_dir() else {
+    let Some(marker) = session_marker_path(root, "nudged") else {
         return true; // can't track → don't suppress the (useful) first hint
     };
-    let marker = dir
-        .join("nudged")
-        .join(format!("{}-{session}", db::project_hash(root)));
     if marker.exists() {
         return false;
     }
@@ -445,6 +549,21 @@ mod tests {
             }),
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn renudge_fires_on_multiples_only() {
+        assert!(!should_renudge(1, 30));
+        assert!(!should_renudge(29, 30));
+        assert!(should_renudge(30, 30));
+        assert!(!should_renudge(31, 30));
+        assert!(should_renudge(60, 30));
+    }
+
+    #[test]
+    fn renudge_disabled_at_zero() {
+        assert!(!should_renudge(0, 30));
+        assert!(!should_renudge(30, 0));
     }
 
     fn grep_facts() -> GrepFacts {

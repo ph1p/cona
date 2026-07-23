@@ -168,6 +168,11 @@ broad identifier grep — to the cheaper query. Everything else (partial reads,
 small files, non-code, regex greps) passes untouched. It always fails open;
 `CONA_HOOK_DISABLE=1` turns it off.
 
+**The re-nudge hook** keeps the habit alive in long sessions. A session-start
+note scrolls out of context after a few turns, so a one-line reminder to prefer
+cona fires every `CONA_RENUDGE_EVERY` tool calls (default 30, `0` disables) —
+only in an indexed project, and only as a hint, never a block.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
