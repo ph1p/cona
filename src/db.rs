@@ -48,7 +48,8 @@ pub fn is_ephemeral_path(p: &Path) -> bool {
         "/private/var/folders/".to_string(),
     ];
     let t = std::env::temp_dir();
-    let ts = format!("{}/", t.to_string_lossy().trim_end_matches('/'));
+    let sep = std::path::MAIN_SEPARATOR;
+    let ts = format!("{}{sep}", t.to_string_lossy().trim_end_matches(sep));
     if let Some(bare) = ts.strip_prefix("/private") {
         roots.push(bare.to_string());
     }
@@ -848,11 +849,16 @@ mod tests {
 
     #[test]
     fn ephemeral_paths_classified() {
+        // The system temp dir is ephemeral on every platform.
+        let tmp = std::env::temp_dir().join("cona-it-1");
+        assert!(is_ephemeral_path(&tmp), "{}", tmp.display());
+
+        // Hard-coded unix roots only classify as ephemeral on unix.
+        #[cfg(unix)]
         for p in [
             "/tmp/ltest",
             "/private/tmp/it2",
             "/private/var/folders/6q/x/T/cona-git-123",
-            std::env::temp_dir().join("cona-it-1").to_str().unwrap(),
         ] {
             assert!(is_ephemeral_path(Path::new(p)), "{p}");
         }
