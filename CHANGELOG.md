@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/ph1p/cona/compare/v0.0.3...v0.0.4) - 2026-07-23
+
+### Fixed
+
+- classify system temp dir as ephemeral on Windows
+- update tests
+- update cargo and improve readme
+
 ## [0.0.3] - 2026-07-23
 
 ### Added
