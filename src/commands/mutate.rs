@@ -361,8 +361,9 @@ mod tests {
     use super::project_path;
     use std::path::Path;
 
-    fn fixture() -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("cona-mutation-path-{}", std::process::id()));
+    fn fixture(tag: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("cona-mutation-path-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("nested")).unwrap();
         std::fs::write(root.join("nested/file.rs"), "fn f() {}\n").unwrap();
@@ -371,7 +372,7 @@ mod tests {
 
     #[test]
     fn mutation_paths_stay_under_root() {
-        let root = fixture();
+        let root = fixture("stay-under");
         assert!(project_path(&root, "nested/file.rs").is_ok());
         assert!(project_path(&root, "../outside.rs").is_err());
         assert!(project_path(&root, Path::new("/tmp/outside.rs").to_str().unwrap()).is_err());
@@ -382,11 +383,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn mutation_paths_reject_symlink_escape() {
-        let root = fixture();
+        let root = fixture("symlink-escape");
         let outside = root
             .parent()
             .unwrap()
-            .join(format!("cona-outside-{}", std::process::id()));
+            .join(format!("cona-outside-{}-symlink", std::process::id()));
         std::fs::create_dir_all(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("nested/link")).unwrap();
         assert!(project_path(&root, "nested/link/created.rs").is_err());
