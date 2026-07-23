@@ -456,7 +456,7 @@ fn latest_remote_version() -> Option<String> {
             "5",
             "-A",
             USER_AGENT,
-            "https://index.crates.io/co/de/codenav",
+            "https://index.crates.io/co/na/cona",
         ])
         .output()
         .ok()?;
@@ -656,24 +656,24 @@ fn download_release_binary(ver: &str, dst: &Path) -> Result<Change> {
     Ok(ch)
 }
 
-/// `cargo install codenav@ver` into a temp root, then move the binary into
+/// `cargo install cona@ver` into a temp root, then move the binary into
 /// place — keeps the recorded install path instead of ~/.cargo/bin.
 fn install_via_cargo(ver: &str, dst: &Path) -> Result<Change> {
     let root = std::env::temp_dir().join(format!("cona-cargo-{ver}"));
     let ok = std::process::Command::new("cargo")
         .args(["install", "--locked", "--root"])
         .arg(&root)
-        .arg(format!("codenav@{ver}"))
+        .arg(format!("cona@{ver}"))
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !ok {
-        bail!("cargo install codenav@{ver} failed");
+        bail!("cargo install cona@{ver} failed");
     }
     let bin = root.join("bin").join(if cfg!(windows) {
-        "codenav.exe"
+        "cona.exe"
     } else {
-        "codenav"
+        "cona"
     });
     let ch = replace_binary(&bin, dst)?;
     let _ = std::fs::remove_dir_all(&root);
@@ -684,26 +684,118 @@ fn install_via_cargo(ver: &str, dst: &Path) -> Result<Change> {
 /// Reverses `install`: removes upgrade git hooks from the source repo,
 /// global agent files, the installed binary and the recorded paths.
 /// `--purge` additionally deletes ~/.cona (all indexes + stats).
-pub fn cmd_uninstall(purge: bool) -> Result<()> {
+/// Which parts of a cona install to tear down. Built either from the
+/// interactive checklist or (non-interactive) from flags + safe defaults.
+struct UninstallPlan {
+    agents: bool, // per-project + global agent configs & git hooks
+    binary: bool, // the installed binary
+    purge: bool,  // delete ~/.cona (indexes + stats)
+}
+
+pub fn cmd_uninstall(purge: bool, yes: bool) -> Result<()> {
+    use std::io::IsTerminal;
     let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
 
-    // Purge wipes indexes + stats irreversibly — confirm before destroying it,
-    // unless stdin isn't a TTY (scripted run: ui::confirm returns false → abort
-    // rather than silently deleting).
-    if purge {
-        let d = home.join(".cona");
-        if d.exists()
-            && !ui::confirm(&format!(
-                "purge {} (indexes + stats, irreversible)?",
-                d.display()
-            ))
-        {
-            println!("{}", ui::warn("aborted — nothing removed"));
-            return Ok(());
-        }
-    }
+    let interactive = !yes && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     println!("{}", ui::banner("cona uninstall"));
+
+    let plan = if interactive {
+        // Only offer what's actually present, so the checklist reflects reality.
+        let has_agents = db::registered_project_paths()
+            .iter()
+            .any(|p| super::agents::project_has_cona(Path::new(p)))
+            || super::agents::project_has_cona(&home);
+        let has_binary = matches!(db::meta_get("install_path")?, Some(d) if Path::new(&d).exists());
+        let cona_dir = home.join(".cona");
+        let rows = vec![
+            ui::Row::Item(
+                "agents",
+                "cona from all agent configs + git hooks",
+                has_agents,
+            ),
+            ui::Row::Item("binary", "the installed cona executable", has_binary),
+            ui::Row::Item(
+                "data",
+                "delete ~/.cona (indexes + stats, irreversible)",
+                false,
+            ),
+        ];
+        match ui::multiselect("what should cona remove?", &rows)? {
+            None => {
+                println!("{}", ui::dim("cancelled — nothing removed"));
+                return Ok(());
+            }
+            Some(picked) => {
+                // rows are, in order: 0 agents, 1 binary, 2 data
+                let plan = UninstallPlan {
+                    agents: picked.contains(&0),
+                    binary: picked.contains(&1),
+                    purge: picked.contains(&2),
+                };
+                // Guard the irreversible one behind an explicit confirm.
+                if plan.purge
+                    && cona_dir.exists()
+                    && !ui::confirm(&format!("delete {} for good?", cona_dir.display()))
+                {
+                    println!("{}", ui::warn("aborted — nothing removed"));
+                    return Ok(());
+                }
+                plan
+            }
+        }
+    } else {
+        // Non-interactive: full teardown; ~/.cona only with explicit --purge.
+        UninstallPlan {
+            agents: true,
+            binary: true,
+            purge,
+        }
+    };
+
+    let mut removed = 0usize;
+    if plan.agents {
+        removed += remove_all_agents(&home)?;
+    }
+    if plan.binary {
+        println!("\n{}", ui::heading("binary"));
+        removed += remove_binary()?;
+    }
+    // Drop the recorded paths whenever we tore down the install proper.
+    if plan.agents || plan.binary {
+        db::meta_del("source_dir")?;
+        db::meta_del("install_path")?;
+    }
+    if plan.purge {
+        println!("\n{}", ui::heading("data"));
+        let d = home.join(".cona");
+        if d.exists() {
+            std::fs::remove_dir_all(&d)?;
+            println!("{}", ui::ok(&format!("purged  {}", d.display())));
+            removed += 1;
+        } else {
+            println!("{}", ui::item("~/.cona already gone"));
+        }
+    } else if plan.agents || plan.binary {
+        println!(
+            "\n{}",
+            ui::dim("kept ~/.cona (indexes + stats) — pass --purge to delete")
+        );
+    }
+
+    println!(
+        "\n{}",
+        ui::ok(&format!(
+            "uninstall complete — {removed} item{} removed",
+            if removed == 1 { "" } else { "s" }
+        ))
+    );
+    Ok(())
+}
+
+/// Strip cona from every registered project (agent files + git hooks) and the
+/// global home configs. Returns how many targets were actually touched.
+fn remove_all_agents(home: &Path) -> Result<usize> {
     let mut removed = 0usize;
 
     // upgrade hooks in the source repo (incl. legacy `self-update` lines)
@@ -718,84 +810,65 @@ pub fn cmd_uninstall(purge: bool) -> Result<()> {
     }
 
     // every registered project: agent files + git hooks
-    {
-        let projects = db::registered_project_paths();
-        let mut touched = 0usize;
-        for p in projects {
-            let root = Path::new(&p);
-            if !root.is_dir() {
-                continue;
-            }
-            // Skip registered-but-clean projects entirely — otherwise every one
-            // floods the output with an empty heading + "nothing to do".
-            if !super::agents::project_has_cona(root)
-                && !git_hooks_have(&root.join(".git/hooks"), CONA_HOOK_NEEDLES)
-            {
-                continue;
-            }
-            println!("\n{}", ui::heading(&format!("project {p}")));
-            match cmd_agents(root, "uninstall", &[], false, false) {
-                Ok(true) => removed += 1,
-                Ok(false) => {}
-                Err(e) => println!("{}", ui::warn(&e.to_string())),
-            }
-            if strip_git_hook_lines(&root.join(".git/hooks"), CONA_HOOK_NEEDLES) {
-                println!("{}", ui::item("git hooks removed"));
-                removed += 1;
-            }
-            touched += 1;
+    let mut touched = 0usize;
+    for p in db::registered_project_paths() {
+        let root = Path::new(&p);
+        if !root.is_dir() {
+            continue;
         }
-        if touched == 0 {
-            println!("\n{}", ui::dim("no per-project integration found"));
+        // Skip registered-but-clean projects entirely — otherwise every one
+        // floods the output with an empty heading + "nothing to do".
+        if !super::agents::project_has_cona(root)
+            && !git_hooks_have(&root.join(".git/hooks"), CONA_HOOK_NEEDLES)
+        {
+            continue;
         }
+        println!("\n{}", ui::heading(&format!("project {p}")));
+        match cmd_agents(root, "uninstall", &[], false, false) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(e) => println!("{}", ui::warn(&e.to_string())),
+        }
+        if strip_git_hook_lines(&root.join(".git/hooks"), CONA_HOOK_NEEDLES) {
+            println!("{}", ui::item("git hooks removed"));
+            removed += 1;
+        }
+        touched += 1;
+    }
+    if touched == 0 {
+        println!("\n{}", ui::dim("no per-project integration found"));
     }
 
     // global agent integration
     println!("\n{}", ui::heading("global"));
-    cmd_agents(&home, "uninstall", &[], false, true)?;
+    if cmd_agents(home, "uninstall", &[], false, true)? {
+        removed += 1;
+    }
+    Ok(removed)
+}
 
-    // installed binary (unlinking a running binary is fine on unix)
-    println!("\n{}", ui::heading("binary"));
+/// Remove the recorded installed binary. Returns 1 if a file was deleted.
+fn remove_binary() -> Result<usize> {
     match db::meta_get("install_path")? {
+        // unlinking a running binary is fine on unix
         Some(dst) if Path::new(&dst).exists() => {
             if std::fs::remove_file(&dst).is_ok() {
                 println!("{}", ui::ok(&format!("removed  {dst}")));
-                removed += 1;
+                Ok(1)
             } else {
                 println!("{}", ui::warn(&format!("could not remove {dst}")));
+                Ok(0)
             }
         }
-        Some(dst) => println!("{}", ui::item(&format!("already gone  {dst}"))),
-        None => println!("{}", ui::dim("no installed binary recorded")),
-    }
-    db::meta_del("source_dir")?;
-    db::meta_del("install_path")?;
-
-    println!("\n{}", ui::heading("data"));
-    if purge {
-        let d = home.join(".cona");
-        if d.exists() {
-            std::fs::remove_dir_all(&d)?;
-            println!("{}", ui::ok(&format!("purged  {}", d.display())));
-            removed += 1;
-        } else {
-            println!("{}", ui::item("~/.cona already gone"));
+        Some(dst) => {
+            println!("{}", ui::item(&format!("already gone  {dst}")));
+            Ok(0)
         }
-    } else {
-        println!(
-            "{}",
-            ui::dim("kept ~/.cona (indexes + stats) — pass --purge to delete")
-        );
+        None => {
+            println!("{}", ui::dim("no installed binary recorded"));
+            Ok(0)
+        }
     }
-
-    println!(
-        "\n{}",
-        ui::ok(&format!(
-            "uninstall complete — {removed} item{} removed",
-            if removed == 1 { "" } else { "s" }
-        ))
-    );
-    Ok(())
 }
 
 /// Called at the start of every normal command: if we ARE the installed

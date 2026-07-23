@@ -1,7 +1,7 @@
 # cona
 
-[![CI](https://github.com/ph1p/codenav/actions/workflows/ci.yml/badge.svg)](https://github.com/ph1p/codenav/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/codenav.svg)](https://crates.io/crates/codenav)
+[![CI](https://github.com/ph1p/cona/actions/workflows/ci.yml/badge.svg)](https://github.com/ph1p/cona/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/cona.svg)](https://crates.io/crates/cona)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Token-efficient code navigation and editing CLI for AI agents.
@@ -11,7 +11,7 @@ index fresh via git hooks, and tracks how many tokens it saves you.
 ## Quick start
 
 ```sh
-cargo install codenav       # or prebuilt binary / from source, see Installation
+cargo install cona       # or prebuilt binary / from source, see Installation
 cd your/project
 cona setup               # index + git hooks + agent integration — that's it
 ```
@@ -47,10 +47,10 @@ Any one of these — then `cona setup` inside a project:
 
 | Method          | Command                                                                                                                                        |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Install script  | `curl -fsSL https://raw.githubusercontent.com/ph1p/codenav/main/install.sh \| sh` (no Rust — grabs the prebuilt binary; `wget -qO-` works too) |
-| crates.io       | `cargo install codenav`                                                                                                                        |
-| Prebuilt binary | download from [releases](https://github.com/ph1p/codenav/releases) (Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64), put on `PATH` |
-| From source     | `git clone https://github.com/ph1p/codenav && cd codenav && ./install.sh`                                                                      |
+| Install script  | `curl -fsSL https://raw.githubusercontent.com/ph1p/cona/main/install.sh \| sh` (no Rust — grabs the prebuilt binary; `wget -qO-` works too) |
+| crates.io       | `cargo install cona`                                                                                                                        |
+| Prebuilt binary | download from [releases](https://github.com/ph1p/cona/releases) (Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64), put on `PATH` |
+| From source     | `git clone https://github.com/ph1p/cona && cd cona && ./install.sh`                                                                      |
 
 One `install.sh`, two modes: piped through `curl`/`wget` it downloads the
 prebuilt release binary to `~/.local/bin` (override `BIN_DIR=`, pin
@@ -62,11 +62,44 @@ needs Rust ≥ 1.95.
 
 ```sh
 cd your/project
-cona setup               # interactive chooser: project, global, or both
+cona setup               # index + git hooks, then a checklist of agents to wire up
 ```
 
-Non-interactive: `cona setup project`, `cona setup global`, or
-`cona setup all`. That's it — the index refreshes automatically from then on.
+On a terminal, `cona setup` indexes the project, installs git hooks, then shows
+**one checklist** of every agent in both scopes (this project + your home
+configs), pre-checked with the ones detected on disk — toggle any, press enter
+(`a` toggles all). Non-interactive:
+
+```sh
+cona setup -y            # install every detected agent, no prompt
+cona setup project       # this project only (no prompt)
+cona setup global        # home configs only (~/.claude, ~/.codex, …)
+cona setup all           # both scopes, no prompt
+```
+
+Piped/CI runs skip the prompt automatically. That's it — the index refreshes
+automatically from then on.
+
+### Managing individual agents
+
+`setup` wires up everything at once; to add, remove, or check a single agent
+afterwards, use `cona agents`:
+
+```sh
+cona agents                    # interactive checklist — check = configured, toggle any
+cona agents status             # what's configured, per agent and scope, + how to change it
+cona agents add cursor         # configure one agent for this project
+cona agents add gemini --global   # configure one agent in your home configs
+cona agents remove cursor      # remove one agent (no residue — only cona markers go)
+```
+
+`cona agents status` prints an at-a-glance table (`✓ on` / `– off` / `n/a`) for
+every known agent in both scopes, so you always know where cona is wired.
+`add`/`remove` are friendly aliases for `install`/`uninstall`; name any subset of
+agents (`cona agents add cursor gemini`) or use `--all` for every known one. All
+changes are idempotent and marker-based (`<!-- cona:begin/end -->`) — foreign
+content is never touched. Known agents: `claude`, `agents` (AGENTS.md — Codex /
+OpenCode / Amp / Jules), `cursor`, `gemini`, `pi`.
 
 ### Staying up to date
 
@@ -83,14 +116,28 @@ Manual trigger: `cona upgrade`.
 
 ### Uninstall
 
+Remove just one agent, or everything:
+
 ```sh
-./uninstall.sh [--purge]    # or: cona uninstall [--purge]
+cona agents remove cursor    # drop a single agent (see "Managing individual agents")
+cona uninstall               # interactive: checklist of what to remove
+cona uninstall -y            # non-interactive: remove agents + binary
+cona uninstall -y --purge    # …and also delete ~/.cona (indexes + stats)
+./uninstall.sh [--purge]     # same as `cona uninstall`, from a source checkout
 ```
 
-Removes everything: the binary, upgrade hooks in the source repo, and the
-agent files + git hooks both globally and in **every registered project**.
-Foreign file content is never touched — only cona marker blocks and hook
-entries are removed. `--purge` also deletes `~/.cona` (all indexes + stats).
+On a terminal, `cona uninstall` shows a **checklist** — untick anything you want
+to keep:
+
+- **agents** — cona's agent files + git hooks, both globally and in **every
+  registered project**
+- **binary** — the installed `cona` executable
+- **data** — delete `~/.cona` (indexes + stats, irreversible; confirmed
+  separately)
+
+Piped/CI runs, or `-y`, remove agents + binary without prompting (`--purge` also
+deletes `~/.cona`). Foreign file content is never touched — only cona marker
+blocks and hook entries are removed, so your own config survives intact.
 
 ## Commands
 
@@ -146,11 +193,11 @@ Every command also works **flat** (`cona show Foo` ≡ `cona nav show Foo`) — 
 | `cona hooks install`                        | git hooks (post-commit/-merge/-checkout) for auto-reindex                                                                          |
 | `cona skill`                                | Print the agent SKILL.md                                                                                                           |
 | `cona mcp`                                  | MCP server over stdio — full tool parity: find/show/refs/outline/tree/grep/context/diff/edit/batch_edit/insert/check/impact/callers/callees/path/deps/shape/entries/tests/note |
-| `cona setup [project\|global\|all]`         | Everything at once: index + git hooks + `agents install` — interactive chooser when run bare                                       |
+| `cona setup [project\|global\|all] [-y]`    | Everything at once: index + git hooks + agents — bare shows a checklist of agents to wire up; `-y`/scope/CI skip the prompt        |
 | `cona install [--bin-dir DIR]`              | Install the binary + upgrade hooks in the source repo                                                                              |
 | `cona upgrade [--quiet]`                    | Rebuild from a newer source checkout, else update to the newest release                                                            |
-| `cona agents install\|uninstall [names…] [--all] [--global]` | Inject/remove cona in agent configs (no names = autodetect installed; `--all` = every known agent)                              |
-| `cona uninstall [--purge]`                  | Remove binary + upgrade hooks + global agent files                                                                                 |
+| `cona agents [status\|add\|remove\|install\|uninstall] [names…] [--all] [--global]` | Manage agent integration. Bare = interactive checklist; `status` = what's configured where; `add`/`remove` (aliases for `install`/`uninstall`) target named agents (none = autodetect; `--all` = every known agent) |
+| `cona uninstall [--purge] [-y]`             | Remove cona — bare shows a checklist (agents / binary / data); `-y`/CI remove agents + binary; `--purge` also deletes ~/.cona      |
 
 ## Architecture
 
@@ -240,11 +287,20 @@ indexed yet, the same calls are _nudged_ (allowed, one-time hint that
 
 ## Agent integration
 
-`cona agents install` (per project) or `--global` (home configs) injects
-cona into all detected agent setups. Name one or more agents (`agents install
-cursor gemini`) to target just those, or `--all` for every known agent regardless
-of detection. Idempotent, marker-based (`<!-- cona:begin/end -->`), removable
-without residue via `agents uninstall`:
+`cona setup` wires cona into every detected agent in one shot. To manage agents
+afterwards, use `cona agents`:
+
+- `cona agents` — interactive checklist (check = configured); toggle any agent on
+  or off and confirm
+- `cona agents status` — an at-a-glance table of what's configured, per agent and
+  scope, with the exact command to change each
+- `cona agents add <name…>` / `remove <name…>` — configure or remove specific
+  agents (aliases for `install`/`uninstall`); `--global` targets home configs
+  (`~/.claude`, `~/.codex`, …) instead of the project; no names = autodetect
+  installed; `--all` = every known agent regardless of detection
+
+Every change is idempotent and marker-based (`<!-- cona:begin/end -->`), so it
+never clobbers your own content and `remove` leaves no residue. The targets:
 
 | Agent                  | Project                                                                                                       | Global                                      |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |

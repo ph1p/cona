@@ -5,7 +5,7 @@
 use super::{mark, remove_block_file, upsert_block_file, write_if_changed, SKILL_MD};
 use crate::{db, ui};
 use anyhow::{anyhow, bail, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Compact variant for CLAUDE.md / AGENTS.md / rule files.
 pub const GUIDE_MD: &str = r#"## cona — token-efficient code navigation
@@ -134,6 +134,93 @@ impl AgentName {
             AgentName::Pi => global && home.join(".pi").exists(),
         }
     }
+
+    /// Config files this agent's cona integration lives in for the given scope,
+    /// each tagged with HOW to detect a cona install there (`Presence`). THE
+    /// single source for both — `installed()` reads these tags rather than
+    /// re-deriving the probe from the filename. Empty = this agent has no target
+    /// in this scope (e.g. Pi / global-only Cursor at project scope).
+    pub fn config_paths(
+        self,
+        project_root: &Path,
+        home: &Path,
+        global: bool,
+    ) -> Vec<(PathBuf, Presence)> {
+        // Where the scope's config lives: project root or home.
+        let base = if global { home } else { project_root };
+        match self {
+            AgentName::Claude => {
+                let dir = base.join(".claude");
+                let md = if global {
+                    home.join(".claude/CLAUDE.md")
+                } else {
+                    project_root.join("CLAUDE.md")
+                };
+                vec![
+                    (dir.join("skills/cona/SKILL.md"), Presence::Exists),
+                    (dir.join("settings.json"), Presence::Needle),
+                    (md, Presence::Marker),
+                ]
+            }
+            AgentName::Agents => {
+                let p = if global {
+                    home.join(".codex/AGENTS.md")
+                } else {
+                    project_root.join("AGENTS.md")
+                };
+                vec![(p, Presence::Marker)]
+            }
+            AgentName::Cursor => {
+                vec![(base.join(".cursor/rules/cona.mdc"), Presence::Exists)]
+            }
+            AgentName::Gemini => {
+                let p = if global {
+                    home.join(".gemini/GEMINI.md")
+                } else {
+                    project_root.join("GEMINI.md")
+                };
+                vec![(p, Presence::Marker)]
+            }
+            // Pi only has its own path at global scope.
+            AgentName::Pi if global => vec![(home.join(".pi/agent/AGENTS.md"), Presence::Marker)],
+            AgentName::Pi => vec![],
+        }
+    }
+
+    /// Is cona currently wired into this agent for the given scope? Probes each
+    /// config path the way its `Presence` tag dictates — so it reflects an
+    /// actual install, not mere presence of the agent (`detected`).
+    pub fn installed(self, project_root: &Path, home: &Path, global: bool) -> bool {
+        self.config_paths(project_root, home, global)
+            .iter()
+            .any(|(p, kind)| kind.present(p))
+    }
+}
+
+/// How to tell a cona install is present in a config file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// Full-file write (skill, cursor rule): the file simply existing = present.
+    Exists,
+    /// cona hooks embedded in a JSON config: a `"cona"` needle anywhere in it.
+    Needle,
+    /// A marker block spliced into a shared file (CLAUDE.md, AGENTS.md, …).
+    Marker,
+}
+
+impl Presence {
+    fn present(self, p: &Path) -> bool {
+        match self {
+            Presence::Exists => p.exists(),
+            Presence::Needle => std::fs::read_to_string(p).is_ok_and(|c| c.contains("cona")),
+            Presence::Marker => has_marker(p),
+        }
+    }
+}
+
+/// A file carries a cona marker block. THE shared marker probe.
+fn has_marker(p: &Path) -> bool {
+    std::fs::read_to_string(p).is_ok_and(|c| c.contains(super::BLOCK_BEGIN))
 }
 
 /// The agents whose config is detected on disk (used to pre-check the picker
@@ -142,6 +229,17 @@ pub fn detected_agents(project_root: &Path, home: &Path, global: bool) -> Vec<Ag
     AgentName::ALL
         .into_iter()
         .filter(|a| a.detected(project_root, home, global))
+        .collect()
+}
+
+/// Agents that have a config target in `global`/project scope — the ones a
+/// scope can actually act on. THE scope-eligibility rule (setup picker, the
+/// interactive command, status all read it), so a scope-less agent (e.g. Pi at
+/// project scope) is filtered in ONE place.
+pub fn agents_in_scope(project_root: &Path, home: &Path, global: bool) -> Vec<AgentName> {
+    AgentName::ALL
+        .into_iter()
+        .filter(|a| !a.config_paths(project_root, home, global).is_empty())
         .collect()
 }
 
@@ -169,6 +267,123 @@ impl AgentSel {
         // call means "clean whatever is there", so detection doesn't gate it.
         !self.install || detected
     }
+}
+
+/// `cona agents status` — one glance at what is wired where. Per agent, per
+/// scope: ✓ configured / – not configured / (n/a for scopes an agent lacks),
+/// plus the exact copy-paste command to add or remove it. THE self-explaining
+/// surface for managing single agents.
+pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
+    println!("{}\n", ui::bold("cona agents"));
+
+    let mut any_installed = false;
+    for a in AgentName::ALL {
+        let proj = a.installed(project_root, &home, false);
+        let glob = a.installed(project_root, &home, true);
+        any_installed |= proj || glob;
+        // does this agent even have a target in each scope?
+        let proj_na = a.config_paths(project_root, &home, false).is_empty();
+        let glob_na = a.config_paths(project_root, &home, true).is_empty();
+        let cell = |installed: bool, na: bool| {
+            if na {
+                ui::dim("n/a")
+            } else if installed {
+                ui::green("✓ on")
+            } else {
+                ui::dim("– off")
+            }
+        };
+        println!("{}", ui::heading(a.slug()));
+        println!("  {}", ui::dim(a.desc()));
+        println!(
+            "  project {}    global {}",
+            cell(proj, proj_na),
+            cell(glob, glob_na)
+        );
+        println!();
+    }
+
+    println!("{}", ui::heading("manage"));
+    println!(
+        "  {}",
+        ui::dim("cona agents add <name>            configure one agent (this project)")
+    );
+    println!(
+        "  {}",
+        ui::dim("cona agents add <name> --global   configure one agent (home configs)")
+    );
+    println!(
+        "  {}",
+        ui::dim("cona agents remove <name>         remove one agent")
+    );
+    println!(
+        "  {}",
+        ui::dim("cona agents                       interactive checklist (toggle any)")
+    );
+    if !any_installed {
+        println!(
+            "\n{}",
+            ui::warn("no agents configured yet — run `cona setup`")
+        );
+    }
+    Ok(())
+}
+
+/// Interactive add/remove for single agents: a pre-checked checklist of every
+/// known agent (checked = currently configured). Confirming installs the newly
+/// checked ones and uninstalls the newly unchecked ones — the one-screen way to
+/// add or remove any single agent. TTY-only; callers gate on that.
+pub fn cmd_agents_interactive(project_root: &Path, global: bool) -> Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
+    // Only agents that have a target in this scope are actionable.
+    let choices = agents_in_scope(project_root, &home, global);
+    let before: Vec<bool> = choices
+        .iter()
+        .map(|a| a.installed(project_root, &home, global))
+        .collect();
+    let rows: Vec<ui::Row> = choices
+        .iter()
+        .zip(&before)
+        .map(|(a, on)| ui::Row::Item(a.slug(), a.desc(), *on))
+        .collect();
+
+    let title = if global {
+        "configure agents (home configs)"
+    } else {
+        "configure agents (this project)"
+    };
+    let picked = match ui::multiselect(title, &rows)? {
+        Some(p) => p,
+        None => {
+            println!("{}", ui::dim("cancelled — nothing changed"));
+            return Ok(());
+        }
+    };
+    // `picked` = ordinals of the now-checked items (1:1 with `choices`). Diff
+    // against `before`: newly on → add, newly off → remove, unchanged → skip.
+    let now_on: std::collections::HashSet<usize> = picked.into_iter().collect();
+    let mut to_add = Vec::new();
+    let mut to_remove = Vec::new();
+    for (i, (&a, &was)) in choices.iter().zip(&before).enumerate() {
+        match (was, now_on.contains(&i)) {
+            (false, true) => to_add.push(a),
+            (true, false) => to_remove.push(a),
+            _ => {}
+        }
+    }
+
+    if to_add.is_empty() && to_remove.is_empty() {
+        println!("{}", ui::dim("no changes"));
+        return Ok(());
+    }
+    if !to_remove.is_empty() {
+        cmd_agents(project_root, "uninstall", &to_remove, false, global)?;
+    }
+    if !to_add.is_empty() {
+        cmd_agents(project_root, "install", &to_add, false, global)?;
+    }
+    Ok(())
 }
 
 /// `cona agents install|uninstall [names…] [--all] [--global]`
@@ -404,7 +619,10 @@ pub fn cmd_agents_q(
             if global { "global" } else { "project" }
         ))
     );
-    if install && changed {
+    // Only relevant when a Claude hook/skill actually moved (labels start with
+    // "claude ") — no reason to nag about a restart for a Cursor/Gemini-only edit.
+    let claude_moved = done.iter().any(|d| d.changed && d.line.contains("claude "));
+    if install && claude_moved {
         // Claude Code snapshots hooks + skills at startup for security, so a
         // running session won't see fresh changes until it reloads them.
         println!(
@@ -423,30 +641,21 @@ pub fn cmd_agents_q(
 /// (which would otherwise each print an empty heading + "nothing to do").
 /// Mirrors the project-scoped removal targets in `cmd_agents`.
 pub fn project_has_cona(project_root: &Path) -> bool {
-    let has_marker =
-        |p: &Path| std::fs::read_to_string(p).is_ok_and(|c| c.contains(super::BLOCK_BEGIN));
-    // skill + marker-block files
-    if project_root.join(".claude/skills/cona/SKILL.md").exists()
-        || project_root.join(".cursor/rules/cona.mdc").exists()
-        || has_marker(&project_root.join("CLAUDE.md"))
-        || has_marker(&project_root.join("AGENTS.md"))
-        || has_marker(&project_root.join("GEMINI.md"))
+    // The per-agent probe is THE source of which files carry an install; reuse
+    // it (project scope never reads home, so passing project_root as `home` is
+    // inert). `installed()` covers skill/cursor/marker files + settings.json.
+    if AgentName::ALL
+        .iter()
+        .any(|a| a.installed(project_root, project_root, false))
     {
         return true;
     }
-    // subagent definitions carrying the marker block
+    // Extra target `config_paths` doesn't enumerate: subagent definitions under
+    // .claude/agents/ carrying the marker block.
     if let Ok(rd) = std::fs::read_dir(project_root.join(".claude/agents")) {
-        if rd.flatten().any(|e| has_marker(&e.path())) {
-            return true;
-        }
+        return rd.flatten().any(|e| has_marker(&e.path()));
     }
-    // cona hooks in settings.json
-    let settings = project_root.join(".claude/settings.json");
-    std::fs::read_to_string(&settings)
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v.get("hooks").cloned())
-        .is_some_and(|h| h.to_string().contains("cona"))
+    false
 }
 
 /// Add/remove cona hooks in a Claude Code settings.json.
@@ -676,5 +885,47 @@ mod tests {
         assert_eq!(got_global, vec![AgentName::Claude]);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn installed_reflects_add_then_remove_per_agent() {
+        let tmp = std::env::temp_dir().join(format!("cona-installed-{}", std::process::id()));
+        let proj = tmp.join("proj");
+        let home = tmp.join("home");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+
+        // clean project: no agent reports installed
+        assert!(!AgentName::Cursor.installed(&proj, &home, false));
+        assert!(!AgentName::Gemini.installed(&proj, &home, false));
+
+        // add just Cursor → only Cursor flips on, others stay off
+        cmd_agents_q(&proj, "install", &[AgentName::Cursor], false, false, true).unwrap();
+        assert!(AgentName::Cursor.installed(&proj, &home, false));
+        assert!(!AgentName::Gemini.installed(&proj, &home, false));
+
+        // remove Cursor → back to off (round-trip leaves no residue)
+        cmd_agents_q(&proj, "uninstall", &[AgentName::Cursor], false, false, true).unwrap();
+        assert!(!AgentName::Cursor.installed(&proj, &home, false));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn config_paths_empty_only_for_pi_project_scope() {
+        let proj = Path::new("/proj");
+        let home = Path::new("/home");
+        // Pi has no project target; everything else does.
+        assert!(AgentName::Pi.config_paths(proj, home, false).is_empty());
+        assert!(!AgentName::Pi.config_paths(proj, home, true).is_empty());
+        for a in [
+            AgentName::Claude,
+            AgentName::Agents,
+            AgentName::Cursor,
+            AgentName::Gemini,
+        ] {
+            assert!(!a.config_paths(proj, home, false).is_empty());
+            assert!(!a.config_paths(proj, home, true).is_empty());
+        }
     }
 }

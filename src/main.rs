@@ -354,19 +354,23 @@ struct HooksArgs {
 #[command(long_about = "\
 One-shot setup. Indexes the project, installs git hooks (auto-reindex on commit),\n\
 and wires cona into your agent configs.\n\n\
-With no scope argument on a terminal, prompts for project / global / both, then\n\
-shows a checklist to pick which agents to configure (project pre-checks the ones\n\
-detected on disk; global pre-checks none). Piped/CI runs skip the prompts and\n\
-autodetect installed agents.\n\n\
+On a terminal with no arguments, shows ONE checklist of every agent in both\n\
+scopes (project + home), pre-checked by what's detected on disk — toggle any,\n\
+press enter. Piped/CI runs, an explicit scope, or --yes skip the prompt and\n\
+install every detected agent.\n\n\
 EXAMPLES\n  \
-cona setup                Interactive — choose scope + agents\n  \
-cona setup project        This project only (autodetect agents when non-interactive)\n  \
+cona setup                Interactive checklist (project + global agents)\n  \
+cona setup -y             Non-interactive: install every detected agent\n  \
+cona setup project        This project only, autodetect agents (no prompt)\n  \
 cona setup global         Home configs only (~/.claude, ~/.codex, …)\n  \
-cona setup all            Both, no scope prompt")]
+cona setup all            Both scopes, no prompt")]
 struct SetupArgs {
-    /// What to set up (omit for interactive chooser)
+    /// What to set up (omit for the interactive checklist)
     #[arg(value_enum)]
     target: Option<SetupScope>,
+    /// Non-interactive: install every detected agent without prompting
+    #[arg(short, long)]
+    yes: bool,
 }
 
 #[derive(clap::Args)]
@@ -383,28 +387,61 @@ struct UpgradeArgs {
 }
 
 #[derive(clap::Args)]
+#[command(long_about = "\
+Remove cona: agent configs (every registered project + home), git hooks, and the\n\
+installed binary.\n\n\
+On a terminal with no flags, shows a checklist of what to remove — untick\n\
+anything you want to keep. Piped/CI runs, or --yes, remove everything without\n\
+prompting. --purge additionally deletes ~/.cona (all indexes + stats).\n\n\
+EXAMPLES\n  \
+cona uninstall            Interactive — pick what to remove\n  \
+cona uninstall -y         Non-interactive: remove agents + binary\n  \
+cona uninstall -y --purge Non-interactive: also delete ~/.cona")]
 struct UninstallArgs {
     /// Also delete ~/.cona (all indexes + stats)
     #[arg(long)]
     purge: bool,
+    /// Non-interactive: remove everything without the checklist
+    #[arg(short, long)]
+    yes: bool,
+}
+
+/// What `cona agents` should do. `add`/`remove` are friendly aliases for
+/// `install`/`uninstall`; `status` lists what's configured; omitting the action
+/// on a terminal opens an interactive checklist.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum AgentAction {
+    /// Configure the given (or detected) agents
+    #[value(alias = "add")]
+    Install,
+    /// Remove cona from the given (or all) agents
+    #[value(alias = "remove")]
+    Uninstall,
+    /// Show what's configured per agent, per scope
+    Status,
 }
 
 #[derive(clap::Args)]
 #[command(long_about = "\
-Inject or remove the cona usage guide in agent configs. Idempotent and\n\
-marker-based (`<!-- cona:begin/end -->`), so it never clobbers your content.\n\n\
-Name one or more agents to target just those; pass none to autodetect the ones\n\
-installed on this machine; `--all` targets every known agent regardless. Claude\n\
-Code and (project) AGENTS.md are always configured on a bare install.\n\n\
+Add, remove, or inspect cona's integration in your agent configs. Idempotent\n\
+and marker-based (`<!-- cona:begin/end -->`), so it never clobbers your content.\n\n\
+Run bare on a terminal for an interactive checklist (check = configured); toggle\n\
+any agent on or off and confirm. Or target agents by name for a one-shot change.\n\
+`add`/`remove` are aliases for `install`/`uninstall`. Claude Code and (project)\n\
+AGENTS.md are always configured on a bare install.\n\n\
 EXAMPLES\n  \
-cona agents install               Autodetect installed agents\n  \
-cona agents install cursor gemini Just these two\n  \
+cona agents                       Interactive checklist — toggle any agent\n  \
+cona agents status                What's configured, where, + how to change it\n  \
+cona agents add cursor            Configure one agent (this project)\n  \
+cona agents add gemini --global   Configure one agent (home configs)\n  \
+cona agents remove cursor         Remove one agent\n  \
+cona agents install               Autodetect + configure installed agents\n  \
 cona agents install --all         Every known agent\n  \
-cona agents install --global      Home configs (~/.claude, ~/.codex, …)\n  \
 cona agents uninstall             Remove cona from all agent configs")]
 struct AgentsArgs {
+    /// Action (omit for an interactive checklist on a terminal)
     #[arg(value_enum)]
-    action: IntegrationAction,
+    action: Option<AgentAction>,
     /// Agents to target. None = autodetect installed
     #[arg(value_enum, value_name = "AGENT", conflicts_with = "all")]
     names: Vec<install::AgentName>,
@@ -1100,8 +1137,8 @@ fn run() -> Result<()> {
             print!("{}", install::SKILL_MD);
         }
         Cmd::Maint(Maint::Setup(a)) | Cmd::SetupFlat(a) => {
-            let SetupArgs { target } = a;
-            cmd_setup(&root, *target)?;
+            let SetupArgs { target, yes } = a;
+            cmd_setup(&root, *target, *yes)?;
         }
         Cmd::Maint(Maint::Install(a)) | Cmd::InstallFlat(a) => {
             let InstallArgs { bin_dir } = a;
@@ -1112,17 +1149,33 @@ fn run() -> Result<()> {
             install::cmd_upgrade(*quiet)?;
         }
         Cmd::Maint(Maint::Uninstall(a)) | Cmd::UninstallFlat(a) => {
-            let UninstallArgs { purge } = a;
-            install::cmd_uninstall(*purge)?;
+            let UninstallArgs { purge, yes } = a;
+            install::cmd_uninstall(*purge, *yes)?;
         }
         Cmd::Maint(Maint::Agents(a)) | Cmd::AgentsFlat(a) => {
+            use std::io::IsTerminal;
             let AgentsArgs {
                 action,
                 names,
                 all,
                 global,
             } = a;
-            install::cmd_agents(&root, action.as_str(), names, *all, *global)?;
+            match action {
+                Some(AgentAction::Status) => install::cmd_agents_status(&root)?,
+                Some(AgentAction::Install) => {
+                    install::cmd_agents(&root, "install", names, *all, *global)?;
+                }
+                Some(AgentAction::Uninstall) => {
+                    install::cmd_agents(&root, "uninstall", names, *all, *global)?;
+                }
+                // Bare `cona agents`: interactive checklist on a TTY, else status.
+                // (clap requires an ACTION before any AGENT, so names/--all
+                // never arrive here without a verb.)
+                None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
+                    install::cmd_agents_interactive(&root, *global)?;
+                }
+                None => install::cmd_agents_status(&root)?,
+            }
         }
     }
     Ok(())
@@ -1190,34 +1243,18 @@ fn session_start_context(
     }
 }
 
-fn cmd_setup(root: &Path, scope: Option<SetupScope>) -> Result<()> {
+fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
     use std::io::IsTerminal;
     println!("{}", ui::banner("cona setup"));
-    let scope = match scope {
-        Some(s) => s,
-        None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
-            const ITEMS: [(&str, &str); 3] = [
-                ("all", "project + global — recommended"),
-                (
-                    "project",
-                    "this project only: index, git hooks, agent files",
-                ),
-                ("global", "home configs only: ~/.claude, ~/.codex, …"),
-            ];
-            match ui::select("what should cona set up?", &ITEMS)? {
-                Some(1) => SetupScope::Project,
-                Some(2) => SetupScope::Global,
-                Some(_) => SetupScope::All,
-                None => {
-                    println!("{}", ui::dim("setup cancelled"));
-                    return Ok(());
-                }
-            }
-        }
-        None => SetupScope::All,
-    };
+
+    // An explicit scope arg or `--yes` forces a non-interactive run; otherwise
+    // a terminal gets the checklist. Scope decides which sections are in play.
+    let explicit = scope.is_some();
+    let scope = scope.unwrap_or(SetupScope::All);
     let do_project = scope != SetupScope::Global;
     let do_global = scope != SetupScope::Project;
+    let interactive =
+        !yes && !explicit && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     // Record where this binary lives if `install` never did (prebuilt-binary
     // users install via curl/wget, not from a source checkout) — otherwise
@@ -1228,6 +1265,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>) -> Result<()> {
         }
     }
 
+    // --- 1. index (always) -------------------------------------------------
     println!("{}", ui::heading("index"));
     let conn = db::open_project_db(root)?;
     let r = indexer::index_project(root, &conn)?;
@@ -1239,12 +1277,9 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>) -> Result<()> {
         ))
     );
 
-    let mut agents_configured = 0usize;
+    // --- 2. git hooks (project scope only) ---------------------------------
     if do_project {
-        println!(
-            "\n{}",
-            ui::heading(&format!("project setup — {}", root.display()))
-        );
+        println!();
         if root.join(".git").exists() {
             install::cmd_hooks(root, "install")?;
         } else {
@@ -1253,70 +1288,109 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>) -> Result<()> {
                 ui::warn("no .git — skipped git hooks (run `cona hooks install` later)")
             );
         }
-        match pick_agents(root, false)? {
-            Some(agents) if !agents.is_empty() => {
-                agents_configured += agents.len();
-                install::cmd_agents(root, "install", &agents, false, false)?;
-            }
-            Some(_) => println!("{}", ui::dim("no agents selected")),
-            None => {}
-        }
     }
-    if do_global {
-        println!(
-            "\n{}",
-            ui::heading("global setup — home configs (~/.claude, ~/.codex, …)")
-        );
-        match pick_agents(root, true)? {
-            Some(agents) if !agents.is_empty() => {
-                agents_configured += agents.len();
-                install::cmd_agents(root, "install", &agents, false, true)?;
+
+    // --- 3. agents — pick per scope (interactive) or take every detected ---
+    // `(project_agents, global_agents)`.
+    let (proj_agents, glob_agents) = if interactive {
+        match pick_agents(root, do_project, do_global)? {
+            Some(p) => p,
+            None => {
+                println!("{}", ui::dim("setup cancelled — nothing changed"));
+                return Ok(());
             }
-            Some(_) => println!("{}", ui::dim("no agents selected")),
-            None => {}
         }
+    } else {
+        // non-interactive: install every detected agent in the active scopes
+        let home = dirs::home_dir().unwrap_or_default();
+        let detected = |on: bool, global: bool| {
+            if on {
+                install::detected_agents(root, &home, global)
+            } else {
+                Vec::new()
+            }
+        };
+        (detected(do_project, false), detected(do_global, true))
+    };
+
+    let mut configured = 0usize;
+    for (global, names, label) in [
+        (false, &proj_agents, "project"),
+        (true, &glob_agents, "home configs"),
+    ] {
+        if names.is_empty() {
+            continue;
+        }
+        println!("\n{}", ui::heading(&format!("agents — {label}")));
+        install::cmd_agents(root, "install", names, false, global)?;
+        configured += names.len();
     }
+
+    // --- 4. summary --------------------------------------------------------
     println!(
         "\n{}",
         ui::ok(&ui::bold(&format!(
-            "setup complete — {agents_configured} agent{} configured",
-            if agents_configured == 1 { "" } else { "s" }
+            "setup complete — {configured} agent{} configured",
+            if configured == 1 { "" } else { "s" }
         )))
     );
     println!(
         "{}",
-        ui::dim("run `cona doctor` any time to verify the installation")
+        ui::dim("`cona agents status` shows what's configured · `cona agents` toggles any agent")
+    );
+    println!(
+        "{}",
+        ui::dim("`cona doctor` verifies the installation any time")
     );
     Ok(())
 }
 
-/// Choose which agents to configure for one scope. Interactively → a
-/// multi-select checklist, pre-checked with the detected agents (project
-/// pre-checks Claude Code + AGENTS.md + anything found; global pre-checks only
-/// what is actually installed). Non-interactively → the detected set, no
-/// prompt. `Ok(None)` means the user cancelled (skip this scope).
-fn pick_agents(root: &Path, global: bool) -> Result<Option<Vec<install::AgentName>>> {
-    use std::io::IsTerminal;
+/// The one interactive agent picker: a single checklist spanning both scopes
+/// (PROJECT + HOME sections), each agent pre-checked when detected on disk.
+/// Returns `(project_agents, global_agents)` chosen, or `None` if cancelled.
+type ScopedPicks = (Vec<install::AgentName>, Vec<install::AgentName>);
+fn pick_agents(root: &Path, do_project: bool, do_global: bool) -> Result<Option<ScopedPicks>> {
     let home = dirs::home_dir().unwrap_or_default();
-    let detected = install::detected_agents(root, &home, global);
 
-    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
-        return Ok(Some(detected)); // non-TTY: autodetect, no prompt
+    // `items[ordinal]` = the (agent, global) that item row maps back to; the
+    // ordinal is exactly what `multiselect` hands back for checked rows.
+    let mut rows: Vec<ui::Row> = Vec::new();
+    let mut items: Vec<(install::AgentName, bool)> = Vec::new();
+    for (global, header) in [
+        (false, "PROJECT — this repo"),
+        (true, "HOME — global configs (~/.claude, ~/.codex, …)"),
+    ] {
+        if (global && !do_global) || (!global && !do_project) {
+            continue;
+        }
+        let scoped = install::agents_in_scope(root, &home, global);
+        if scoped.is_empty() {
+            continue;
+        }
+        if !items.is_empty() {
+            rows.push(ui::Row::Header("")); // spacer between sections
+        }
+        rows.push(ui::Row::Header(header));
+        for a in scoped {
+            let on = a.detected(root, &home, global);
+            rows.push(ui::Row::Item(a.slug(), a.desc(), on));
+            items.push((a, global));
+        }
     }
 
-    let items: Vec<(&str, &str, bool)> = install::AgentName::ALL
-        .iter()
-        .map(|a| (a.slug(), a.desc(), detected.contains(a)))
-        .collect();
-    match ui::multiselect("select agents to configure", &items)? {
-        Some(idxs) => Ok(Some(
-            idxs.into_iter()
-                .map(|i| install::AgentName::ALL[i])
-                .collect(),
-        )),
-        None => {
-            println!("{}", ui::dim("agent setup skipped"));
-            Ok(None)
+    match ui::multiselect("configure cona agents", &rows)? {
+        None => Ok(None),
+        Some(picked) => {
+            let (mut proj, mut glob) = (Vec::new(), Vec::new());
+            for ord in picked {
+                let (agent, global) = items[ord];
+                if global {
+                    glob.push(agent);
+                } else {
+                    proj.push(agent);
+                }
+            }
+            Ok(Some((proj, glob)))
         }
     }
 }

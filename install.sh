@@ -5,8 +5,8 @@
 #       builds with cargo and wires upgrade git hooks.
 #
 #   Without Rust (curl/wget one-liner):
-#       curl -fsSL https://raw.githubusercontent.com/ph1p/codenav/main/install.sh | sh
-#       wget -qO- https://raw.githubusercontent.com/ph1p/codenav/main/install.sh | sh
+#       curl -fsSL https://raw.githubusercontent.com/ph1p/cona/main/install.sh | sh
+#       wget -qO- https://raw.githubusercontent.com/ph1p/cona/main/install.sh | sh
 #       downloads the prebuilt release binary — no toolchain needed.
 #
 # Env overrides (binary mode):
@@ -14,7 +14,7 @@
 #   CONA_VERSION=X  pin a version (default: latest release)
 set -eu
 
-REPO="ph1p/codenav"
+REPO="ph1p/cona"
 
 # --- source-checkout mode: build + `cona install` -----------------------
 # Only when run as a file sitting next to Cargo.toml (not piped through sh).

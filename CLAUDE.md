@@ -168,7 +168,10 @@ src/dashboard.rs `cona ui` — ratatui live TUI, polls DBs (~1s, read-only)
 src/ui.rs        ANSI styling (zero deps): NO_COLOR/CLICOLOR_FORCE/TERM=dumb +
                  IsTerminal — piped output stays plain (agents!). All CLI colors
                  run through here; clap help styles in main.rs. ui::select = THE
-                 raw-mode selector (drop guard) for all prompts — never re-roll
+                 raw-mode single-select; ui::multiselect = THE raw-mode
+                 checklist over ui::Row (Header|Item) — headers/spacers skipped
+                 by the cursor, `a` toggles all, returns a bool-per-row mask;
+                 both share ONE drop-guard prompt discipline — never re-roll
 src/mcp.rs       MCP framing (stdio JSON-RPC 2.0, newline-delimited, pure over
                  BufRead/Write, tested): initialize/ping/tools/list/tools/call;
                  tool error = result with isError, never a protocol error.
@@ -210,7 +213,19 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           no output-string scanning); claude_hooks (settings.json
                           via serde_json); AgentName ValueEnum + AgentSel::want =
                           THE selection rule: named/--all override detection,
-                          bare install autodetects, bare uninstall cleans all
+                          bare install autodetects, bare uninstall cleans all.
+                          AgentName::config_paths = THE per-scope file list an
+                          agent's integration lives in (Pi empty at project
+                          scope); installed() probes it for real markers/skill/
+                          hook — feeds cmd_agents_status (per-agent×scope ✓/–/
+                          n/a table + copy-paste manage hints) and
+                          cmd_agents_interactive (pre-checked checklist; diff of
+                          before/after → install added, uninstall removed).
+                          Restart-note gated on a claude-labeled mark actually
+                          moving. CLI: `agents [status|add|remove|install|
+                          uninstall]`, action optional (bare+TTY → interactive,
+                          bare+names → add, bare non-TTY → status); add/remove =
+                          ValueEnum aliases of install/uninstall
                  doctor.rs cmd_doctor: binary/PATH, hooks+skill (global+project),
                           index, per-scope config freshness, helper status
 src/db.rs        SQLite: ~/.cona/projects/<fnv1a-hash>.db per project
@@ -267,13 +282,20 @@ in ONE call, each syntax-verified; stops at first error (applied edits remain,
 progress reported — no silent partial state). edit runs through cmd_edit_code
 (replacement as &str — stdin belongs to the protocol). Usage logged `mcp:<tool>`.
 
-## Setup UX
+## Setup / uninstall UX
 
-`cona setup` with no args + TTY (stdin+stdout) → ui::select chooser
-(all/project/global, SetupScope); non-TTY or `project|global|all` arg bypasses
-(--project/--global = hidden legacy aliases, conflicts_with positional).
-`cona install` ends with print_next_steps(); install.sh's binary-download
-path prints its own next-steps heredoc — keep the two texts in sync.
+`cona setup` always indexes + (project scope) installs git hooks, then picks
+agents. Interactive = no `-y`, no explicit scope arg, TTY → pick_agents shows
+ONE ui::multiselect across BOTH scopes (PROJECT + HOME sections via Row::Header,
+items pre-checked by AgentName::detected). Non-interactive (`-y`, an explicit
+`project|global|all`, or non-TTY) installs every detected agent in the active
+scopes, no prompt. SetupScope still gates which sections/hooks run.
+`cona uninstall` mirrors this: interactive (no `-y`, TTY) → ui::multiselect of
+agents/binary/data (a UninstallPlan); non-interactive/`-y` → full teardown
+(agents + binary), `~/.cona` only with `--purge`. Data removal is always
+confirmed separately (irreversible). remove_all_agents/remove_binary are the
+shared executors. `cona install` ends with print_next_steps(); install.sh's
+binary-download path prints its own next-steps heredoc — keep the two in sync.
 
 ## Known limits / roadmap
 

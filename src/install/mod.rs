@@ -45,11 +45,11 @@ pub fn release_target() -> Option<&'static str> {
 /// GitHub repo the release artifacts live under. The single source for both
 /// the self-upgrade download and the resolve helper auto-fetch — a rename
 /// here must not leave a second hardcoded copy behind.
-pub const GITHUB_REPO: &str = "ph1p/codenav";
+pub const GITHUB_REPO: &str = "ph1p/cona";
 pub const USER_AGENT: &str = concat!(
     "cona/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/ph1p/codenav)"
+    " (https://github.com/ph1p/cona)"
 );
 
 /// Release archive extension for this platform.
