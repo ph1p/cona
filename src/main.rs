@@ -1205,6 +1205,23 @@ fn read_replacement(file: Option<&str>) -> Result<String> {
 /// One-shot setup. Indexes the project, then wires agent integration for the
 /// project and/or the global home configs. No scope → interactive chooser on
 /// a terminal, both otherwise.
+/// Thousands-separated count for human-facing tallies (e.g. `1234567` → `1,234,567`).
+fn fmt_count(n: i64) -> String {
+    let s = n.abs().to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if n < 0 {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
 /// Build the SessionStart context block the agent sees at the top of a session.
 ///
 /// For an indexed project: a short reference-ranked symbol map (the fastest
@@ -1226,9 +1243,35 @@ fn session_start_context(
         "cona has this project indexed ({} files, {} symbols). Before you Read a \
          whole code file or Grep for a name, reach for cona: `cona outline <file>` \
          \u{2192} `cona show <Symbol>` reads one symbol, `cona grep`/`refs <Name>` \
-         searches code semantically. Most-referenced symbols (your orientation map):\n\n",
+         searches code semantically.\n",
         report.total_files, report.total_symbols
     ));
+    // Standing rule, not a one-shot startup note. A plain orientation line reads
+    // as trivia and decays out of a long context within a few turns; framing it
+    // as an invariant that persists for the whole session is what keeps the habit
+    // alive after the map has scrolled away (the PostToolUse read/grep hook is the
+    // hard backstop, but this sets the default before the first wrong Read).
+    ctx.push_str(
+        "This is a standing rule for the WHOLE session, not just now: default to \
+         cona before any full Read or broad Grep of indexed code. It does not lapse \
+         after many turns, and it still applies when you are unsure \u{2014} reach \
+         for `outline`/`show`/`grep` first, and only Read with an explicit \
+         offset/limit or on a file cona does not index.\n",
+    );
+    // A little social proof: surface what the habit has already bought on this
+    // project. Cheap SELECT, fully fail-open — no tally, no line.
+    if let Some(saved) = db::open_global_db()
+        .and_then(|g| db::totals(&g, root.to_str()))
+        .map(|t| t.tokens_saved)
+        .ok()
+        .filter(|s| *s > 0)
+    {
+        ctx.push_str(&format!(
+            "So far cona has saved ~{} tokens on this project (`cona stats` for the breakdown).\n",
+            fmt_count(saved)
+        ));
+    }
+    ctx.push_str("\nMost-referenced symbols (your orientation map):\n\n");
     ctx.push_str(&map);
 
     let payload = serde_json::json!({
