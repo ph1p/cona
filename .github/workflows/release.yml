@@ -68,12 +68,16 @@ jobs:
           cp README.md LICENSE dist/
           cd dist
           if [[ "${{ matrix.target }}" == *windows* ]]; then
-            7z a "../cona-${{ github.ref_name }}-${{ matrix.target }}.zip" .
+            archive="cona-${{ github.ref_name }}-${{ matrix.target }}.zip"
+            7z a "../$archive" .
           else
-            tar czf "../cona-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" .
+            archive="cona-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+            tar czf "../$archive" .
           fi
           cd ..
-          openssl dgst -sha256 -r "cona-${{ github.ref_name }}-${{ matrix.target }}".* > "cona-${{ github.ref_name }}-${{ matrix.target }}".sha256
+          # checksum sidecar MUST be "<archive>.sha256" (keep the .tar.gz/.zip
+          # ext) — cona fetches "{archive_url}.sha256"; dropping the ext 404s.
+          openssl dgst -sha256 -r "$archive" > "$archive.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: cona-${{ matrix.target }}

@@ -77,8 +77,18 @@ pub fn fetch_release_archive(ver: &str, target: &str, tmp: &Path) -> Result<()> 
     let checksum = tmp.join("cona.sha256");
     let result = (|| {
         download_to(&url, &archive)?;
-        download_to(&checksum_url, &checksum)?;
-        verify_sha256(&archive, &checksum)?;
+        // The checksum sidecar is best-effort: a release that shipped without
+        // it (or with a mismatched name) must NOT abort an otherwise-good
+        // binary download. Fetch quietly so a 404 here doesn't spew a scary
+        // `curl: (56) … 404` line; verify only when we actually got one.
+        if download_quiet(&checksum_url, &checksum).is_ok() {
+            verify_sha256(&archive, &checksum)?;
+        } else {
+            eprintln!(
+                "{}",
+                crate::ui::warn("no release checksum — skipping verification")
+            );
+        }
         validate_archive_paths(&archive)?;
         // bsdtar (macOS, Windows 10+) and GNU tar both handle .tar.gz; bsdtar
         // also extracts the Windows .zip.
@@ -105,6 +115,23 @@ pub fn fetch_release_archive(ver: &str, target: &str, tmp: &Path) -> Result<()> 
 fn download_to(url: &str, destination: &Path) -> Result<()> {
     let ok = std::process::Command::new("curl")
         .args(["-fsSL", "--max-time", "120", "-A", USER_AGENT, "-o"])
+        .arg(destination)
+        .arg(url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        Ok(())
+    } else {
+        bail!("download failed: {url}");
+    }
+}
+
+/// Like `download_to` but silent on HTTP/transport errors (`-fsS` → `-fs`), for
+/// optional assets whose absence is expected and must not print a scary line.
+fn download_quiet(url: &str, destination: &Path) -> Result<()> {
+    let ok = std::process::Command::new("curl")
+        .args(["-fsL", "--max-time", "120", "-A", USER_AGENT, "-o"])
         .arg(destination)
         .arg(url)
         .status()
