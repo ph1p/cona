@@ -156,14 +156,25 @@ src/resolve.rs   Optional semantic resolution tier (fail-open): spawns
                  opt-out CONA_NO_FETCH_HELPER); doctor reports status. NEVER
                  a cargo dependency of cona (links collision). Findings:
                  docs/spike-semantic-resolution.md
-src/hook.rs      PreToolUse hook (`cona hook <event>`, matcher Read|Grep):
-                 pure decide_read/decide_grep + fail-open runner; redirects
-                 large full reads + broad identifier greps (indexed project, no
-                 glob/type/path filter) to cona; hook NEVER creates a DB.
-                 try_read gates (partial/non-code/metadata-size) BEFORE reading
-                 bytes — multi-GB file must not be slurped just to be allowed.
-                 Nudges emit additionalContext ONLY, never a permissionDecision
-                 ("allow" would silently bypass the permission system)
+src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
+                 PreToolUse (matcher Read|Grep) = pure decide_read/decide_grep +
+                 fail-open runner; redirects large full reads + broad identifier
+                 greps (indexed project, no glob/type/path filter) to cona; hook
+                 NEVER creates a DB. try_read gates (partial/non-code/metadata-
+                 size) BEFORE reading bytes — multi-GB file must not be slurped
+                 just to be allowed. PostToolUse (no matcher) = periodic re-nudge:
+                 a per-(project,session) tool-call counter (tick_toolcall) emits
+                 a one-line reminder every CONA_RENUDGE_EVERY calls (default 30,
+                 0 disables) in an indexed project — keeps the cona habit alive
+                 as the SessionStart map scrolls out of a long context
+                 (should_renudge = pure, tested). Hot-path order: cheap
+                 project_db_path stat + counter tick gate BEFORE the expensive
+                 has_index DB-open, so 29-in-30 calls never open the DB.
+                 tick_toolcall + nudge_once share session_marker_path (the ONE
+                 session-identity rule: CLAUDE_SESSION_ID, else per-day bucket).
+                 ALL hint paths emit additionalContext ONLY, never a
+                 permissionDecision ("allow" would silently bypass the permission
+                 system)
 src/dashboard.rs `cona ui` — ratatui live TUI, polls DBs (~1s, read-only)
 src/ui.rs        ANSI styling (zero deps): NO_COLOR/CLICOLOR_FORCE/TERM=dumb +
                  IsTerminal — piped output stays plain (agents!). All CLI colors
