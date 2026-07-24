@@ -722,7 +722,7 @@ pub fn first_param_is_receiver(sig: &str) -> bool {
 fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<Sym>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if let Some((label, is_container, name_field)) = classify(lang, child.kind()) {
+        if let Some((label, _is_container, name_field)) = classify(lang, child.kind()) {
             if needs_body(child.kind()) && child.child_by_field_name("body").is_none() {
                 walk(child, src, lang, parent, out);
                 continue;
@@ -741,11 +741,9 @@ fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<S
                     end_line: child.end_position().row + 1,
                     signature: first_line_sig(child, src),
                 });
-                if is_container {
-                    walk(child, src, lang, Some(&qualified), out);
-                    continue;
-                }
-                // still descend to catch nested defs (e.g. closures with inner fns)
+                // Descend into every named symbol to catch nested defs
+                // (methods in a class, closures with inner fns, …). Containers
+                // and leaf defs are handled identically here.
                 walk(child, src, lang, Some(&qualified), out);
                 continue;
             }
@@ -806,11 +804,20 @@ pub fn ident_occurrences(lang: &str, src: &str) -> anyhow::Result<Vec<(String, u
 }
 
 fn collect_idents(node: Node, src: &str, out: &mut Vec<(String, usize)>) {
-    // one traversal implementation for all ident collection — the call-position
-    // variant is the superset, this wrapper just drops the flag
-    let mut full = Vec::new();
-    collect_idents_with_call(node, src, &mut full);
-    out.extend(full.into_iter().map(|(n, l, _, _)| (n, l)));
+    // Lean traversal for the flag-less callers (refs / tree --rank): pushes
+    // (name, line) directly. Deliberately does NOT run call_node_of per ident —
+    // that ancestor walk is pure waste when the call flag is thrown away, and
+    // this path runs over every identifier of every file on hot commands.
+    if node.child_count() == 0 && node.kind().ends_with("identifier") {
+        if let Ok(text) = node.utf8_text(src.as_bytes()) {
+            out.push((text.to_string(), node.start_position().row + 1));
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_idents(child, src, out);
+    }
 }
 
 /// 1-based lines where `name` occurs as an identifier. Semantic via

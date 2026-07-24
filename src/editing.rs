@@ -3,19 +3,25 @@
 /// A CRLF source stays CRLF throughout (replacement is normalized to match).
 pub fn splice_lines(src: &str, start: usize, end: usize, replacement: &str) -> String {
     let crlf = src.contains("\r\n");
+    // A source with no final newline keeps that state after the edit — avoids a
+    // spurious "\ No newline at end of file" flip in every diff.
+    let had_trailing_nl = src.is_empty() || src.ends_with('\n');
     let replacement = replacement.replace("\r\n", "\n");
     let lines: Vec<&str> = src.lines().collect();
     let start_idx = start.saturating_sub(1);
     let end_idx = end.min(lines.len());
-    let mut out = String::with_capacity(src.len() + replacement.len());
-    for l in &lines[..start_idx.min(lines.len())] {
-        out.push_str(l);
-        out.push('\n');
-    }
-    out.push_str(replacement.trim_end_matches('\n'));
-    out.push('\n');
-    for l in &lines[end_idx..] {
-        out.push_str(l);
+    let mut pieces: Vec<&str> = Vec::new();
+    pieces.extend(lines[..start_idx.min(lines.len())].iter().copied());
+    pieces.push(replacement.trim_end_matches('\n'));
+    pieces.extend(lines[end_idx..].iter().copied());
+    join_lines(pieces, had_trailing_nl, crlf)
+}
+
+/// Join lines with `\n`, appending a trailing newline only when `trailing_nl`.
+/// CRLF sources are re-expanded at the end.
+fn join_lines(lines: Vec<&str>, trailing_nl: bool, crlf: bool) -> String {
+    let mut out = lines.join("\n");
+    if trailing_nl && !out.is_empty() {
         out.push('\n');
     }
     if crlf {
@@ -30,25 +36,15 @@ pub fn splice_lines(src: &str, start: usize, end: usize, replacement: &str) -> S
 /// empty source (produces just the inserted code). CRLF is preserved.
 pub fn splice_insert(src: &str, at: usize, code: &str) -> String {
     let crlf = src.contains("\r\n");
+    let had_trailing_nl = src.is_empty() || src.ends_with('\n');
     let code = code.replace("\r\n", "\n");
     let lines: Vec<&str> = src.lines().collect();
     let at = at.min(lines.len());
-    let mut out = String::with_capacity(src.len() + code.len() + 1);
-    for l in &lines[..at] {
-        out.push_str(l);
-        out.push('\n');
-    }
-    out.push_str(code.trim_end_matches('\n'));
-    out.push('\n');
-    for l in &lines[at..] {
-        out.push_str(l);
-        out.push('\n');
-    }
-    if crlf {
-        out.replace('\n', "\r\n")
-    } else {
-        out
-    }
+    let mut pieces: Vec<&str> = Vec::new();
+    pieces.extend(lines[..at].iter().copied());
+    pieces.push(code.trim_end_matches('\n'));
+    pieces.extend(lines[at..].iter().copied());
+    join_lines(pieces, had_trailing_nl, crlf)
 }
 
 /// Replace `old` (of known byte length) with `new` at the given identifier
@@ -125,6 +121,21 @@ mod tests {
         assert_eq!(splice_insert("a\nb\n", 0, "Z"), "Z\na\nb\n"); // prepend
         assert_eq!(splice_insert("a\nb\n", 1, "Z"), "a\nZ\nb\n"); // after line 1
         assert_eq!(splice_insert("a\nb\n", 99, "Z"), "a\nb\nZ\n"); // clamp → append
+    }
+
+    #[test]
+    fn splice_preserves_missing_trailing_newline() {
+        // last line has no EOL → edit must not add one
+        assert_eq!(splice_lines("a\nb", 2, 2, "Z"), "a\nZ");
+        assert_eq!(splice_lines("a\nb", 1, 1, "Z"), "Z\nb");
+        // editing a non-final line still leaves the (absent) final EOL absent
+        assert_eq!(splice_lines("a\nb\nc", 1, 1, "Z"), "Z\nb\nc");
+    }
+
+    #[test]
+    fn insert_preserves_missing_trailing_newline() {
+        assert_eq!(splice_insert("a\nb", 2, "Z"), "a\nb\nZ");
+        assert_eq!(splice_insert("a\nb", 0, "Z"), "Z\na\nb");
     }
 
     #[test]

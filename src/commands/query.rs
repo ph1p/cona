@@ -1054,9 +1054,11 @@ pub fn cmd_grep(
             continue;
         };
         let mut match_lines: Vec<usize> = Vec::new();
-        let mut line_lens: Vec<usize> = Vec::new();
+        // Full per-line lengths up front so the ±READ_PAD_LINES baseline window
+        // isn't clamped short when a match sits near the file's end or when the
+        // limit truncates this file mid-scan.
+        let line_lens: Vec<usize> = src.lines().map(str::len).collect();
         for (ln, line) in src.lines().enumerate() {
-            line_lens.push(line.len());
             let matched = if ignore_case {
                 line.to_lowercase().contains(&needle)
             } else {

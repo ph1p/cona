@@ -135,9 +135,21 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
         .map(|n| n.get())
         .unwrap_or(4)
         .min(candidates.len().max(1));
+    // Greedy longest-processing-time bin packing: hand each file (largest
+    // first) to the currently-lightest thread. Round-robin by index could pile
+    // every big file onto one thread when sizes vary widely.
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.size));
     let mut chunks: Vec<Vec<Candidate>> = (0..n_threads).map(|_| Vec::new()).collect();
-    for (i, c) in candidates.into_iter().enumerate() {
-        chunks[i % n_threads].push(c);
+    let mut loads: Vec<i64> = vec![0; n_threads];
+    for c in candidates {
+        let t = loads
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, &l)| l)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        loads[t] += c.size.max(1);
+        chunks[t].push(c);
     }
     let mut results: Vec<(Candidate, Vec<lang::Sym>)> = Vec::new();
     std::thread::scope(|scope| {
@@ -300,9 +312,15 @@ pub fn is_stale(root: &Path, conn: &Connection, rel: &str) -> bool {
         })
         .ok();
     match db {
-        Some((m, s)) => m != file_mtime(&meta) || s != meta.len() as i64,
+        Some((m, s)) => !meta_matches(&meta, m, s),
         None => true,
     }
+}
+
+/// True when on-disk `meta` matches the indexed `(mtime, size)` — the ONE
+/// freshness comparison, shared by `is_stale` and the dashboard's batched scan.
+pub fn meta_matches(meta: &std::fs::Metadata, mtime: i64, size: i64) -> bool {
+    file_mtime(meta) == mtime && meta.len() as i64 == size
 }
 
 /// Refresh one file's index rows if its mtime/size changed — the single owner
