@@ -130,9 +130,11 @@ pub fn cmd_edit_range(
     if start == 0 || end < start {
         bail!("invalid --range {start}-{end} (1-based, start ≤ end)");
     }
-    // reindex first so the file on disk and the index agree afterward
-    indexer::reindex_file(root, conn, file)?;
+    // validate the path is in-root BEFORE any read/reindex, so an out-of-root
+    // `../` file never even enters the index
     let abs = project_path(root, file)?;
+    // reindex so the file on disk and the index agree afterward
+    indexer::reindex_file(root, conn, file)?;
     let original = std::fs::read_to_string(&abs)?;
     let new_src = editing::splice_lines(&original, start, end, replacement);
     write_verified(root, conn, file, &new_src, force)?;

@@ -12,6 +12,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Gauge, List, ListItem, Paragraph, Row, Table,
 };
 use ratatui::Frame;
+use rusqlite::Connection;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -59,71 +60,142 @@ struct Snapshot {
 }
 
 pub fn run(root: &Path) -> Result<()> {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() {
+        anyhow::bail!("`cona ui` needs an interactive terminal — for scriptable output use `cona stats` (or `cona stats --json`)");
+    }
     let mut terminal = ratatui::init();
     let res = event_loop(&mut terminal, root);
     ratatui::restore();
     res
 }
 
+/// Sort key for the "by command" table, cycled with `s`.
+#[derive(Clone, Copy, PartialEq)]
+enum SortKey {
+    Saved,
+    Calls,
+    AvgMs,
+}
+impl SortKey {
+    fn next(self) -> Self {
+        match self {
+            SortKey::Saved => SortKey::Calls,
+            SortKey::Calls => SortKey::AvgMs,
+            SortKey::AvgMs => SortKey::Saved,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            SortKey::Saved => "saved",
+            SortKey::Calls => "calls",
+            SortKey::AvgMs => "avg ms",
+        }
+    }
+}
+
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, root: &Path) -> Result<()> {
     let root = root.to_path_buf();
     // scope: true = only this project, false = global across all projects
     let mut project_scope = true;
-    let mut snap = gather(&root, project_scope)?;
+    let mut sort = SortKey::Saved;
+    // Open the DBs ONCE — reopening per tick re-runs PRAGMAs/migration probes.
+    // WAL still makes external reindexes visible to these long-lived handles.
+    let g = db::open_global_db()?;
+    let pconn = db::open_project_db(&root)?;
+    // The index-state scan (one fs stat per indexed file) is the expensive part;
+    // it rarely changes, so recompute it at most every 5s while the cheap usage
+    // stats refresh every 1s.
+    let mut idx = gather_index_state(&g, &pconn, &root)?;
+    let mut snap = gather(&g, &root, project_scope, sort, &idx)?;
     let mut last = Instant::now();
+    let mut last_idx = Instant::now();
+
+    let refresh =
+        |project_scope, sort, idx: &IndexState| gather(&g, &root, project_scope, sort, idx);
 
     loop {
-        terminal.draw(|f| draw(f, &snap, project_scope))?;
+        terminal.draw(|f| draw(f, &snap, project_scope, sort))?;
 
         if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(k) = event::read()? {
-                if k.kind == KeyEventKind::Press {
-                    match k.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('p') | KeyCode::Tab => {
-                            project_scope = !project_scope;
-                            snap = gather(&root, project_scope)?;
-                            last = Instant::now();
-                        }
-                        KeyCode::Char('c')
-                            if k.modifiers
-                                .contains(ratatui::crossterm::event::KeyModifiers::CONTROL) =>
-                        {
-                            break
-                        }
-                        _ => {}
-                    }
+            match event::read()? {
+                Event::Resize(..) => {
+                    terminal.draw(|f| draw(f, &snap, project_scope, sort))?;
                 }
+                Event::Key(k) if k.kind == KeyEventKind::Press => match k.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('p') | KeyCode::Tab => {
+                        project_scope = !project_scope;
+                        snap = refresh(project_scope, sort, &idx)?;
+                        last = Instant::now();
+                    }
+                    KeyCode::Char('s') => {
+                        sort = sort.next();
+                        snap = refresh(project_scope, sort, &idx)?;
+                    }
+                    KeyCode::Char('r') => {
+                        idx = gather_index_state(&g, &pconn, &root)?;
+                        snap = refresh(project_scope, sort, &idx)?;
+                        last = Instant::now();
+                        last_idx = Instant::now();
+                    }
+                    KeyCode::Char('c')
+                        if k.modifiers
+                            .contains(ratatui::crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        break
+                    }
+                    _ => {}
+                },
+                _ => {}
             }
         }
+        if last_idx.elapsed() >= Duration::from_secs(5) {
+            idx = gather_index_state(&g, &pconn, &root)?;
+            last_idx = Instant::now();
+        }
         if last.elapsed() >= Duration::from_secs(1) {
-            snap = gather(&root, project_scope)?;
+            snap = refresh(project_scope, sort, &idx)?;
             last = Instant::now();
         }
     }
     Ok(())
 }
 
-fn gather(root: &Path, project_scope: bool) -> Result<Snapshot> {
-    let g = db::open_global_db()?;
-    let scope = project_scope.then(|| root.to_string_lossy().to_string());
-    let scope_ref = scope.as_deref();
+/// Slow-changing project index state (file/symbol counts, staleness). One fs
+/// stat per indexed file — throttled by the caller so it doesn't run every tick.
+struct IndexState {
+    files: i64,
+    symbols: i64,
+    stale: i64,
+    db_bytes: i64,
+    last_indexed: Option<i64>,
+}
 
-    // current-project index state (always shown in the header)
-    let pconn = db::open_project_db(root)?;
+fn gather_index_state(g: &Connection, pconn: &Connection, root: &Path) -> Result<IndexState> {
     let files: i64 = pconn
         .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
         .unwrap_or(0);
     let symbols: i64 = pconn
         .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
         .unwrap_or(0);
+    // Batch: pull (path, mtime, size) once and compare against a single fs stat
+    // per file — was N SQL queries (one per path via is_stale) every scan.
     let mut stale = 0i64;
     {
-        let mut stmt = pconn.prepare("SELECT path FROM files")?;
-        let paths: Vec<String> = stmt.query_map([], |r| r.get(0))?.flatten().collect();
-        for p in paths {
-            if indexer::is_stale(root, &pconn, &p) {
-                stale += 1;
+        let mut stmt = pconn.prepare("SELECT path, mtime, size FROM files")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows.flatten() {
+            let (path, m, s) = row;
+            match std::fs::metadata(root.join(&path)) {
+                Ok(meta) if indexer::meta_matches(&meta, m, s) => {}
+                _ => stale += 1,
             }
         }
     }
@@ -135,24 +207,50 @@ fn gather(root: &Path, project_scope: bool) -> Result<Snapshot> {
         )
         .ok()
         .flatten();
-
-    Ok(Snapshot {
-        project_path: root.to_string_lossy().to_string(),
+    Ok(IndexState {
         files,
         symbols,
-        db_bytes: db::project_db_size(root),
         stale,
+        db_bytes: db::project_db_size(root),
         last_indexed,
-        totals: db::totals(&g, scope_ref)?,
-        per_cmd: db::per_command(&g, scope_ref)?,
-        top: db::top_targets(&g, scope_ref, 8)?,
-        // live activity shows real queries only — index/edit/hook:* maintenance
-        // carries no savings and is just noise in the feed
-        recent: db::recent(&g, scope_ref, 40, true)?,
     })
 }
 
-fn draw(f: &mut Frame, s: &Snapshot, project_scope: bool) {
+fn gather(
+    g: &Connection,
+    root: &Path,
+    project_scope: bool,
+    sort: SortKey,
+    idx: &IndexState,
+) -> Result<Snapshot> {
+    let scope = project_scope.then(|| root.to_string_lossy().to_string());
+    let scope_ref = scope.as_deref();
+
+    let mut per_cmd = db::per_command(g, scope_ref)?;
+    // sort only the query rows; maintenance is folded out in draw_middle anyway
+    per_cmd.sort_by(|a, b| match sort {
+        SortKey::Saved => b.4.cmp(&a.4),
+        SortKey::Calls => b.1.cmp(&a.1),
+        SortKey::AvgMs => b.2.total_cmp(&a.2),
+    });
+
+    Ok(Snapshot {
+        project_path: root.to_string_lossy().to_string(),
+        files: idx.files,
+        symbols: idx.symbols,
+        db_bytes: idx.db_bytes,
+        stale: idx.stale,
+        last_indexed: idx.last_indexed,
+        totals: db::totals(g, scope_ref)?,
+        per_cmd,
+        top: db::top_targets(g, scope_ref, 8)?,
+        // live activity shows real queries only — index/edit/hook:* maintenance
+        // carries no savings and is just noise in the feed
+        recent: db::recent(g, scope_ref, 40, true)?,
+    })
+}
+
+fn draw(f: &mut Frame, s: &Snapshot, project_scope: bool, sort: SortKey) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -165,8 +263,8 @@ fn draw(f: &mut Frame, s: &Snapshot, project_scope: bool) {
 
     draw_header(f, root[0], s);
     draw_gauge(f, root[1], s);
-    draw_middle(f, root[2], s);
-    draw_footer(f, root[3], project_scope);
+    draw_middle(f, root[2], s, sort);
+    draw_footer(f, root[3], project_scope, sort);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, s: &Snapshot) {
@@ -256,7 +354,7 @@ fn draw_gauge(f: &mut Frame, area: Rect, s: &Snapshot) {
     );
 }
 
-fn draw_middle(f: &mut Frame, area: Rect, s: &Snapshot) {
+fn draw_middle(f: &mut Frame, area: Rect, s: &Snapshot, sort: SortKey) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -300,7 +398,7 @@ fn draw_middle(f: &mut Frame, area: Rect, s: &Snapshot) {
         Row::new(vec!["cmd", "calls", "avg ms", "out", "saved"])
             .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
     )
-    .block(panel("by command"));
+    .block(panel(&format!("by command · ↓{}", sort.label())));
     f.render_widget(table, table_area[0]);
     if !maint.is_empty() {
         let parts: Vec<String> = maint
@@ -346,17 +444,24 @@ fn draw_middle(f: &mut Frame, area: Rect, s: &Snapshot) {
     f.render_widget(List::new(feed).block(panel("live activity")), cols[1]);
 }
 
-fn draw_footer(f: &mut Frame, area: Rect, project_scope: bool) {
+fn draw_footer(f: &mut Frame, area: Rect, project_scope: bool, sort: SortKey) {
     let scope = if project_scope { "project" } else { "global" };
     let key = Style::default().fg(Color::Black).bg(ACCENT);
-    let line = Line::from(vec![
+    let spans = vec![
         Span::styled(" q ", key),
         Span::styled(" quit  ", Style::default().fg(MUTED)),
-        Span::styled(" p/tab ", key),
-        Span::styled(format!(" scope: {scope}  "), Style::default().fg(MUTED)),
-        Span::styled("· live, refreshing every 1s", Style::default().fg(MUTED)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+        Span::styled(" p ", key),
+        Span::styled(format!(" scope:{scope}  "), Style::default().fg(MUTED)),
+        Span::styled(" s ", key),
+        Span::styled(
+            format!(" sort:{}  ", sort.label()),
+            Style::default().fg(MUTED),
+        ),
+        Span::styled(" r ", key),
+        Span::styled(" refresh  ", Style::default().fg(MUTED)),
+        Span::styled("· live", Style::default().fg(MUTED)),
+    ];
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn fmt_k(n: i64) -> String {
@@ -370,6 +475,9 @@ fn fmt_k(n: i64) -> String {
 }
 
 fn trunc(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     if s.chars().count() <= max {
         format!("{s:<max$}")
     } else {

@@ -91,7 +91,9 @@ src/indexer.rs   3-phase: walk → parallel parse → one write transaction.
                  (`index --watch`, notify, 300ms debounce) runs through
                  index_project — the ONE write path.
 src/editing.rs   splice_lines/splice_insert/apply_renames — pure, tested splice
-                 logic for edit/rename (CRLF-preserving, right-to-left per line)
+                 logic for edit/rename (CRLF-preserving, right-to-left per line).
+                 join_lines = shared tail assembly; a source with no final
+                 newline keeps that state (no spurious EOF-newline diff flip)
 src/graph.rs     In-memory call graph (one pass over all files): callers_of/
                  callees_of/path. Name-based. narrow_by_scope = THE scope
                  preference policy (used by prefer_scope AND cmd_context): on
@@ -175,7 +177,12 @@ src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  ALL hint paths emit additionalContext ONLY, never a
                  permissionDecision ("allow" would silently bypass the permission
                  system)
-src/dashboard.rs `cona ui` — ratatui live TUI, polls DBs (~1s, read-only)
+src/dashboard.rs `cona ui` — ratatui live TUI, read-only. DBs opened ONCE (not
+                 per tick); cheap usage stats refresh 1s, the expensive index-
+                 state scan (one fs stat/file) throttled to 5s. Keys: q quit,
+                 p scope, s sort by-command (saved/calls/avg-ms), r force
+                 refresh; Resize handled. Requires a TTY (else clean error, no
+                 panic)
 src/ui.rs        ANSI styling (zero deps): NO_COLOR/CLICOLOR_FORCE/TERM=dumb +
                  IsTerminal — piped output stays plain (agents!). All CLI colors
                  run through here; clap help styles in main.rs. ui::select = THE

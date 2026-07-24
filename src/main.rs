@@ -224,7 +224,7 @@ struct EntriesArgs {
     #[arg(long)]
     path: Option<String>,
     /// Max rows per section
-    #[arg(long, default_value_t = 40)]
+    #[arg(long, default_value_t = defaults::ENTRIES_LIMIT)]
     limit: usize,
 }
 
@@ -237,7 +237,7 @@ struct TestsArgs {
 struct BlameArgs {
     /// Symbol (Name or Parent.Name)
     symbol: String,
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = defaults::BLAME_LIMIT)]
     limit: usize,
 }
 
@@ -246,7 +246,7 @@ struct HotArgs {
     /// Git --since window
     #[arg(long, default_value = "6 months ago")]
     since: String,
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = defaults::HOT_LIMIT)]
     limit: usize,
 }
 
@@ -255,7 +255,7 @@ struct CouplingArgs {
     file: String,
     #[arg(long, default_value = "1 year ago")]
     since: String,
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, default_value_t = defaults::COUPLING_LIMIT)]
     limit: usize,
 }
 
@@ -270,7 +270,7 @@ struct CallsArgs {
 struct PathArgs {
     from: String,
     to: String,
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = defaults::PATH_DEPTH)]
     max_depth: usize,
 }
 
@@ -1122,11 +1122,27 @@ fn run() -> Result<()> {
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .flatten()
                 .collect();
-            if rows.is_empty() {
-                println!("no projects indexed yet — run `cona index` inside a project");
-            }
-            for (p, f, s, _) in rows {
-                println!("{p}  ({f} files, {s} symbols)");
+            if cli.json {
+                let items: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|(p, f, s, li)| {
+                        serde_json::json!({
+                            "path": p,
+                            "files": f,
+                            "symbols": s,
+                            "last_indexed": li,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::Value::Array(items));
+            } else {
+                if rows.is_empty() {
+                    println!("no projects indexed yet — run `cona index` inside a project");
+                }
+                for (p, f, s, li) in rows {
+                    let when = li.map(db::ago).unwrap_or_else(|| "never".into());
+                    println!("{p}  ({f} files, {s} symbols, indexed {when})");
+                }
             }
         }
         Cmd::Maint(Maint::Hooks(a)) | Cmd::HooksFlat(a) => {
@@ -1183,10 +1199,14 @@ fn run() -> Result<()> {
 
 /// Parse an "S-E" line range (1-based, inclusive) for `edit --range`.
 fn parse_range(s: &str) -> Result<(usize, usize)> {
-    let (a, b) = s
-        .split_once('-')
-        .ok_or_else(|| anyhow::anyhow!("--range must be S-E, e.g. 42-48"))?;
-    Ok((a.trim().parse()?, b.trim().parse()?))
+    let bad = || anyhow::anyhow!("--range must be S-E with 1-based S ≤ E, e.g. 42-48");
+    let (a, b) = s.split_once('-').ok_or_else(bad)?;
+    let start: usize = a.trim().parse().map_err(|_| bad())?;
+    let end: usize = b.trim().parse().map_err(|_| bad())?;
+    if start == 0 || end < start {
+        return Err(bad());
+    }
+    Ok((start, end))
 }
 
 /// Read replacement/insert source from a file, or stdin when no file is given.
