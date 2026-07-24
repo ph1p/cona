@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/ph1p/cona/compare/v0.0.6...v0.0.7) - 2026-07-24
+
+### Other
+
+- dedup json + freshness helpers, tidy dashboard footer
+
 ## [0.0.6](https://github.com/ph1p/cona/compare/v0.0.5...v0.0.6) - 2026-07-23
 
 ### Fixed
