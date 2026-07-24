@@ -357,7 +357,7 @@ fn mcp_call(
             (o, b, sym.to_string())
         }
         "entries" => {
-            let (o, b) = cmd_entries(conn, opt("path"), 40, false)?;
+            let (o, b) = cmd_entries(conn, opt("path"), defaults::ENTRIES_LIMIT, false)?;
             (o, b, opt("path").unwrap_or("").to_string())
         }
         "tests" => {

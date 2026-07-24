@@ -172,6 +172,11 @@ pub mod defaults {
     pub const GREP_LIMIT: usize = 50;
     pub const CALLS_DEPTH: usize = 2;
     pub const SHAPE_BUDGET: i64 = 2000;
+    pub const ENTRIES_LIMIT: usize = 40;
+    pub const BLAME_LIMIT: usize = 10;
+    pub const HOT_LIMIT: usize = 20;
+    pub const COUPLING_LIMIT: usize = 15;
+    pub const PATH_DEPTH: usize = 8;
 }
 
 pub(crate) fn scan_ref_sites(
@@ -274,7 +279,14 @@ fn locate_symbol_kind(
         .flatten()
         .collect();
     if let Some(f) = &file_filter {
-        rows.retain(|(p, ..)| p == f || p.ends_with(&format!("/{f}")));
+        // An exact project-relative path wins outright — otherwise a filter like
+        // `src/main.rs` also suffix-matches `src/resolve-helper/src/main.rs` and
+        // stays ambiguous, defeating the escape hatch (invariant 4).
+        if rows.iter().any(|(p, ..)| p == f) {
+            rows.retain(|(p, ..)| p == f);
+        } else {
+            rows.retain(|(p, ..)| p.ends_with(&format!("/{f}")));
+        }
     }
     if rows.is_empty() {
         let hint = kind
