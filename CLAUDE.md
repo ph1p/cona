@@ -164,14 +164,18 @@ src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  greps (indexed project, no glob/type/path filter) to cona; hook
                  NEVER creates a DB. try_read gates (partial/non-code/metadata-
                  size) BEFORE reading bytes — multi-GB file must not be slurped
-                 just to be allowed. PostToolUse (no matcher) = periodic re-nudge:
-                 a per-(project,session) tool-call counter (tick_toolcall) emits
-                 a one-line reminder every CONA_RENUDGE_EVERY calls (default 30,
-                 0 disables) in an indexed project — keeps the cona habit alive
-                 as the SessionStart map scrolls out of a long context
-                 (should_renudge = pure, tested). Hot-path order: cheap
-                 project_db_path stat + counter tick gate BEFORE the expensive
-                 has_index DB-open, so 29-in-30 calls never open the DB.
+                 just to be allowed. PostToolUse (no matcher) = periodic re-nudge,
+                 OFF by default (DEFAULT_RENUDGE_EVERY = 0): repeating the same
+                 rule across SessionStart + guide + timer is over-constraint for
+                 current models. Opt in with CONA_RENUDGE_EVERY=<n> → a
+                 per-(project,session) tool-call counter (tick_toolcall) emits a
+                 one-line reminder every n calls in an indexed project
+                 (should_renudge = pure, tested). Hook entry stays registered but
+                 shell-gated (`[ "$CONA_RENUDGE_EVERY" -gt 0 ] && …`) — the env
+                 var alone flips it on, no reinstall, and disabled the cona
+                 binary never even spawns. Hot-path order: cheap project_db_path stat
+                 + counter tick gate BEFORE the expensive has_index DB-open, so
+                 non-nudging calls never open the DB.
                  tick_toolcall + nudge_once share session_marker_path (the ONE
                  session-identity rule: CLAUDE_SESSION_ID, else per-day bucket).
                  ALL hint paths emit additionalContext ONLY, never a
@@ -361,3 +365,21 @@ separates maintenance from query lines; `stats` + TUI show maintenance as
 compact one-liners under the query table, never in savings columns. Aggregate
 helpers (totals/per_command/top_targets/recent/savings_series) feed both
 `stats` and the `ui` dashboard.
+<!-- cona:begin -->
+## cona — token-efficient code navigation
+
+This project is cona-indexed: reading ONE symbol costs a fraction of a whole
+file, and `cona grep`/`refs` search code semantically (identifier nodes — never
+strings or comments). Prefer them over a full Read or a broad Grep when you want
+a specific function, class, or usage site.
+
+Coarse → fine: `cona tree --rank` (orient) → `cona outline <file>` (map a file) →
+`cona show <Sym>` (read one symbol) → `cona edit <Sym>` (syntax-verified write).
+
+`<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name`. Index auto-refreshes;
+`cona index` (~1s) if a repo isn't indexed yet.
+
+Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
+`insert` `rename` `note` `check` — is listed in `cona --help`, with details per
+group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).
+<!-- cona:end -->

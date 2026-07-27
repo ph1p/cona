@@ -22,12 +22,13 @@ use std::path::{Path, PathBuf};
 /// redirected to `cona outline`/`show`. Override with `CONA_READ_MAX_LINES`.
 const DEFAULT_MAX_LINES: i64 = 300;
 
-/// Default number of tool calls between periodic re-nudges. A SessionStart note
-/// scrolls out of a long context within a handful of turns; the PreToolUse
-/// redirect only fires on a *wrong* Read/Grep. This closes the gap in the
-/// middle — a one-line reminder every N tool calls keeps the habit warm without
-/// nagging. Override with `CONA_RENUDGE_EVERY` (0 disables).
-const DEFAULT_RENUDGE_EVERY: i64 = 30;
+/// Default cadence for the periodic re-nudge: OFF. Repeating the same guidance
+/// across SessionStart, the agent guide and a timer is over-constraint for
+/// current models — they hold the habit from one statement, and the PreToolUse
+/// redirect still catches an actual wrong Read/Grep. Opt in with
+/// `CONA_RENUDGE_EVERY=<n>` (n tool calls between reminders) on a model that
+/// drifts; 0 keeps it disabled.
+const DEFAULT_RENUDGE_EVERY: i64 = 0;
 
 /// What the hook should do about a candidate tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,12 +186,10 @@ pub fn should_renudge(count: i64, every: i64) -> bool {
     every > 0 && count > 0 && count % every == 0
 }
 
-/// PostToolUse: the periodic re-nudge. The SessionStart map orients the agent
-/// once, and the PreToolUse hook catches wrong Read/Grep calls — but between
-/// those, over a long session, the cona habit fades as the startup note scrolls
-/// away. A short reminder every N tool calls (in an indexed project only) keeps
-/// it warm. additionalContext ONLY — never a permission decision — so it can
-/// never block or auto-approve a call. Fully fail-open.
+/// PostToolUse: the opt-in periodic re-nudge (see `DEFAULT_RENUDGE_EVERY` —
+/// off unless `CONA_RENUDGE_EVERY=<n>`). additionalContext ONLY — never a
+/// permission decision — so it can never block or auto-approve a call. Fully
+/// fail-open.
 fn try_posttooluse() -> Result<()> {
     let every = renudge_every();
     if every == 0 {
@@ -208,8 +207,8 @@ fn try_posttooluse() -> Result<()> {
 
     // Cheap indexed-repo gate: a single stat, no DB open. Ticking + the cadence
     // check run BEFORE the expensive `has_index` (which opens the SQLite DB) so
-    // the common case — the 29-in-30 calls that will NOT nudge — never pays for
-    // a connection. Only a call that actually lands on a nudge boundary opens
+    // the common case — a call that will NOT nudge — never pays for a
+    // connection. Only a call that actually lands on a nudge boundary opens
     // the DB, and only to confirm the index is real (not just a stale db file).
     if !db::project_db_path(&root).exists() {
         return Ok(());
