@@ -48,7 +48,7 @@ Work coarse → fine: tree → outline → show → edit.
 3. edit re-verifies syntax and re-indexes automatically
 
 ## Rules
-- NEVER cat/read a whole file just to find one function — use find/show.
+- `find`/`show` reach one function for a fraction of a whole-file read — prefer them over cat/Read when you want a specific symbol.
 - Prefer qualified names (`UserService.login`) to disambiguate.
 - Use `--json` when you need to parse output programmatically.
 - Line numbers in the index can go stale after manual edits — `cona index` refreshes in ms (or install git hooks: `cona hooks install`).

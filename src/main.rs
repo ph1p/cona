@@ -1266,18 +1266,11 @@ fn session_start_context(
          searches code semantically.\n",
         report.total_files, report.total_symbols
     ));
-    // Standing rule, not a one-shot startup note. A plain orientation line reads
-    // as trivia and decays out of a long context within a few turns; framing it
-    // as an invariant that persists for the whole session is what keeps the habit
-    // alive after the map has scrolled away (the PostToolUse read/grep hook is the
-    // hard backstop, but this sets the default before the first wrong Read).
-    ctx.push_str(
-        "This is a standing rule for the WHOLE session, not just now: default to \
-         cona before any full Read or broad Grep of indexed code. It does not lapse \
-         after many turns, and it still applies when you are unsure \u{2014} reach \
-         for `outline`/`show`/`grep` first, and only Read with an explicit \
-         offset/limit or on a file cona does not index.\n",
-    );
+    // One statement is enough for current models — the "standing rule for the
+    // WHOLE session" reinforcement paragraph that used to follow here was
+    // repeated-instruction noise (same rule as the line above and the agent
+    // guide). The PreToolUse redirect remains the backstop for an actual
+    // wrong Read/Grep.
     // A little social proof: surface what the habit has already bought on this
     // project. Cheap SELECT, fully fail-open — no tally, no line.
     if let Some(saved) = db::open_global_db()
