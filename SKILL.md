@@ -5,9 +5,25 @@ description: Token-efficient code navigation. Use INSTEAD of reading whole files
 
 # cona — navigate code by symbols, not by reading files
 
-## Why
-Reading full files burns thousands of tokens. cona gives you exactly the lines you need.
-Work coarse → fine: tree → outline → show → edit.
+## The 90% case — start here
+
+```
+cona outline <file>        # every symbol in the file + exact line ranges
+cona show <Sym>            # print ONLY that symbol's source
+cona context <Sym>         # its source + what it calls + who calls it, in ONE call
+cona grep <Name>           # semantic search; each hit labelled with its symbol
+```
+
+**The bright line:** reading a whole file over ~100 lines to understand ONE function is
+always the wrong move — `outline` then `show`. Two cheap calls beat one expensive read.
+A full Read is right only when you genuinely need the whole file (about to rewrite it).
+
+Never re-read a file already in your context — including one the user pasted or
+`@`-mentioned. Those bytes are already spent; `show` the symbol you need instead.
+
+`<Sym>` = `Name`, `Parent.Name` (methods), or `file.rs:Name` (disambiguates).
+
+Everything below is reference — reach for it when the four above don't cover the job.
 
 ## Commands
 - `cona index` — build/update the index (fast, incremental; auto-runs on first use); `--watch` keeps running and reindexes on file changes (debounced)
@@ -48,7 +64,8 @@ Work coarse → fine: tree → outline → show → edit.
 3. edit re-verifies syntax and re-indexes automatically
 
 ## Rules
-- `find`/`show` reach one function for a fraction of a whole-file read — prefer them over cat/Read when you want a specific symbol.
+- **Wanting one symbol means `show`, not Read.** `find`/`show` reach one function for a fraction of a whole-file read. This is not a preference to weigh against habit — a full Read of an indexed file you only needed one function from is a mistake, at any file size.
+- **A file already in context is never re-read.** Pasted, `@`-mentioned or Read earlier in the session — the bytes are spent; `show`/`context` the symbol instead.
 - Prefer qualified names (`UserService.login`) to disambiguate.
 - Use `--json` when you need to parse output programmatically.
 - Line numbers in the index can go stale after manual edits — `cona index` refreshes in ms (or install git hooks: `cona hooks install`).
@@ -57,7 +74,7 @@ Work coarse → fine: tree → outline → show → edit.
 - `cona setup` = index + git hooks + agent integration in one shot.
 - `cona stats` (per-project + global: savings, top targets, recent) shows how many tokens you've saved.
 - `cona ui` opens a live dashboard of index state + token savings in real time.
-- With agent hooks installed, a full `Read` of a large indexed code file is redirected here — reach for `outline`/`show` first; pass an explicit offset/limit to force a full read.
+- With agent hooks installed, a full `Read` of a large indexed code file is redirected here — reach for `outline`/`show` first; pass an explicit offset/limit to force a full read. Mid-size files (≥120 lines), repeat reads of the same file, and a run of several full reads in one session get a non-blocking hint instead. Tune with `CONA_READ_MAX_LINES` (block threshold, default 300), `CONA_ADVISE_MIN_LINES` (hint threshold, default 120, 0=off), `CONA_READ_STREAK` (reads per session before the volume hint, default 4, 0=off).
 
 ## Lifecycle (rarely needed)
 - `cona install` / `./install.sh` — install binary + upgrade git hooks (run from the source checkout)

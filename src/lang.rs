@@ -75,6 +75,28 @@ pub fn detect_lang(path: &str) -> Option<&'static str> {
     }
 }
 
+/// Does this language have named code units worth reading one at a time?
+///
+/// cona indexes prose, markup and data formats too — Markdown headings, CSS
+/// rules and JSON/YAML keys are useful `outline`/`grep` targets — but "read one
+/// function instead of the whole file" is meaningless advice for them: a README
+/// is read as prose, a stylesheet and a config are read whole. The read-advisory
+/// hook tier uses this to stay quiet on such files.
+///
+/// Deny-list rather than allow-list so a newly added *code* language is
+/// advisable by default — the safe direction to be wrong in. Every entry must be
+/// a string `detect_lang` can actually return, and the set is exactly those
+/// reachable languages whose `classify` arms yield no function-like kind.
+///
+/// NOTE: adding a prose/markup/data language to `detect_lang` means adding it
+/// here too (see CLAUDE.md "Adding a new language").
+pub fn has_callable_symbols(lang: &str) -> bool {
+    !matches!(
+        lang,
+        "markdown" | "json" | "yaml" | "toml" | "xml" | "html" | "css" | "graphql"
+    )
+}
+
 pub fn language_for(lang: &str) -> Option<Language> {
     match lang {
         "rust" => Some(tree_sitter_rust::LANGUAGE.into()),
