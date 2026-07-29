@@ -367,6 +367,76 @@ pub fn cmd_agents_interactive(project_root: &Path, global: bool) -> Result<()> {
     Ok(())
 }
 
+/// How deep a `.claude/agents` tree is walked. Shipped collections nest one
+/// level (`engineering/backend.md`); the cap keeps a stray checkout or symlink
+/// loop under `.claude/agents` from turning the walk unbounded.
+const SUBAGENT_MAX_DEPTH: usize = 4;
+
+/// Every `.md` under a `.claude/agents` tree. THE subagent enumeration rule —
+/// `sync_subagents` and `project_has_cona` both consume it, so "definitions nest
+/// in category subdirectories" is encoded ONCE (a flat `read_dir` sees none of
+/// them). Fail-open: an unreadable directory yields nothing rather than aborting
+/// a whole install. Does not follow symlinks, and stops at
+/// `SUBAGENT_MAX_DEPTH`.
+fn subagent_defs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth >= SUBAGENT_MAX_DEPTH {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        // file_type() reads the dir entry (no extra stat) and does NOT follow
+        // symlinks — a link back into the tree can't make the walk recurse.
+        let Ok(ft) = entry.file_type() else { continue };
+        let path = entry.path();
+        if ft.is_dir() {
+            subagent_defs(&path, depth + 1, out);
+        } else if ft.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+            out.push(path);
+        }
+    }
+}
+
+/// A `.md` under `.claude/agents` is a real agent definition (YAML frontmatter),
+/// not a stray README/runbook doc that happens to live in the same tree.
+fn is_agent_def(body: &str) -> bool {
+    body.starts_with("---\n") || body.starts_with("---\r\n")
+}
+
+/// Splice (or strip) the guide block in every agent definition under `dir`.
+/// Install only touches definitions (`is_agent_def`); uninstall cleans ANY `.md`
+/// carrying the marker, so previously-patched files stay reachable even if their
+/// frontmatter changed.
+fn sync_subagents(dir: &Path, install: bool, done: &mut Vec<super::Mark>) -> Result<()> {
+    let mut paths = Vec::new();
+    subagent_defs(dir, 0, &mut paths);
+    for path in paths {
+        if install {
+            // ONE read per file: the frontmatter gate and the splice share it.
+            // Going through upsert_block_file would re-read every definition.
+            let Ok(existing) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if !is_agent_def(&existing) {
+                continue;
+            }
+            let updated = super::upsert_block(&existing, GUIDE_MD);
+            if updated == existing {
+                mark(done, "claude subagent", "unchanged", &path);
+                continue;
+            }
+            std::fs::write(&path, updated)?;
+            mark(done, "claude subagent", "updated", &path);
+        } else if remove_block_file(&path)? {
+            // Can't delete the file: install required frontmatter, so the
+            // remainder after stripping our block is never empty.
+            mark(done, "claude subagent", "removed", &path);
+        }
+    }
+    Ok(())
+}
+
 /// `cona agents install|uninstall [names…] [--all] [--global]`
 /// Injects/removes cona into the selected agent configs. With no names and
 /// no `--all`, installs into every detected agent (Claude Code + AGENTS.md are
@@ -470,32 +540,10 @@ pub fn cmd_agents_q(
             }
             Err(e) => println!("warning: could not edit {}: {e}", settings.display()),
         }
-        // subagents (.claude/agents/*.md) — custom agents run on their own system
-        // prompt and don't reliably see CLAUDE.md, so each existing definition
-        // gets the guide as a marker block (never creates agent files).
-        let agents_dir = claude_dir.join("agents");
-        if agents_dir.is_dir() {
-            for entry in std::fs::read_dir(&agents_dir)?.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    continue;
-                }
-                if install {
-                    // only real agent definitions (YAML frontmatter), not stray
-                    // docs like README.md living in the same directory
-                    let is_agent_def = std::fs::read_to_string(&path)
-                        .is_ok_and(|c| c.starts_with("---\n") || c.starts_with("---\r\n"));
-                    if !is_agent_def {
-                        continue;
-                    }
-                    let ch = upsert_block_file(&path, GUIDE_MD)?;
-                    mark(&mut done, "claude subagent", ch.verb(), &path);
-                } else if remove_block_file(&path)? {
-                    // uninstall cleans ANY .md carrying the marker block
-                    mark(&mut done, "claude subagent", "removed", &path);
-                }
-            }
-        }
+        // subagents — they run on their own system prompt and don't reliably see
+        // CLAUDE.md, so each existing definition carries the guide itself (never
+        // creates agent files).
+        sync_subagents(&claude_dir.join("agents"), install, &mut done)?;
     } // 'claude
 
     // --- generic AGENTS.md (Codex, OpenCode, Amp, Jules, …) ----------------
@@ -631,12 +679,15 @@ pub fn project_has_cona(project_root: &Path) -> bool {
     {
         return true;
     }
-    // Extra target `config_paths` doesn't enumerate: subagent definitions under
-    // .claude/agents/ carrying the marker block.
-    if let Ok(rd) = std::fs::read_dir(project_root.join(".claude/agents")) {
-        return rd.flatten().any(|e| has_marker(&e.path()));
-    }
-    false
+    // Extra target `config_paths` doesn't enumerate (a glob has no place in its
+    // fixed path list): subagent definitions carrying the marker block. Shares
+    // the recursive enumerator with the writer — a flat scan would miss the
+    // nested definitions install actually patches, so uninstall and the
+    // version-gated re-sync would both skip a scope whose only footprint is
+    // there.
+    let mut paths = Vec::new();
+    subagent_defs(&project_root.join(".claude/agents"), 0, &mut paths);
+    paths.iter().any(|p| has_marker(p))
 }
 
 /// Add/remove cona hooks in a Claude Code settings.json.
@@ -877,6 +928,70 @@ mod tests {
         // global scope: only Claude is unconditional; nothing else present in home.
         let got_global = detected_agents(&proj, &home, true);
         assert_eq!(got_global, vec![AgentName::Claude]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Agent collections nest definitions in category subdirectories — the walk
+    /// must reach them, skip non-definition docs, and round-trip cleanly.
+    #[test]
+    fn subagents_are_patched_recursively() {
+        let tmp = std::env::temp_dir().join(format!("cona-subagents-{}", std::process::id()));
+        let proj = tmp.join("proj");
+        let nested = proj.join(".claude/agents/engineering/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let top = proj.join(".claude/agents/top.md");
+        let deep = nested.join("backend.md");
+        let doc = proj.join(".claude/agents/README.md");
+        std::fs::write(&top, "---\nname: top\n---\n\nbody\n").unwrap();
+        std::fs::write(&deep, "---\nname: backend\n---\n\nbody\n").unwrap();
+        std::fs::write(&doc, "# just docs\n").unwrap();
+
+        cmd_agents_q(&proj, "install", &[AgentName::Claude], false, false, true).unwrap();
+        assert!(has_marker(&top));
+        assert!(has_marker(&deep), "nested agent definition must be patched");
+        assert!(!has_marker(&doc), "non-definition doc must stay untouched");
+
+        // the probe shares the walk: a nested-only footprint must still count as
+        // installed, else uninstall/re-sync skip the scope
+        std::fs::remove_file(&top).unwrap();
+        assert!(project_has_cona(&proj));
+
+        cmd_agents_q(&proj, "uninstall", &[AgentName::Claude], false, false, true).unwrap();
+        assert!(!has_marker(&deep));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The walk is bounded: it stops at SUBAGENT_MAX_DEPTH and never follows a
+    /// symlink, so a loop under .claude/agents can't recurse forever.
+    #[test]
+    fn subagent_walk_is_bounded() {
+        let tmp = std::env::temp_dir().join(format!("cona-subwalk-{}", std::process::id()));
+        let agents = tmp.join(".claude/agents");
+        let too_deep = agents.join("a/b/c/d/e");
+        std::fs::create_dir_all(&too_deep).unwrap();
+        std::fs::write(agents.join("a/shallow.md"), "---\nx\n---\n").unwrap();
+        std::fs::write(too_deep.join("buried.md"), "---\nx\n---\n").unwrap();
+
+        let mut found = Vec::new();
+        subagent_defs(&agents, 0, &mut found);
+        assert!(found.iter().any(|p| p.ends_with("shallow.md")));
+        assert!(
+            !found.iter().any(|p| p.ends_with("buried.md")),
+            "walk must stop at SUBAGENT_MAX_DEPTH"
+        );
+
+        // a symlink pointing back at the tree must not be descended
+        #[cfg(unix)]
+        {
+            let loop_link = agents.join("loop");
+            std::os::unix::fs::symlink(&agents, &loop_link).unwrap();
+            let mut again = Vec::new();
+            subagent_defs(&agents, 0, &mut again);
+            assert_eq!(found.len(), again.len(), "symlinked dir must be skipped");
+        }
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
