@@ -230,7 +230,21 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           the fs scan + quiet re-sync — self-heals stale project
                           once per version (!= catches downgrades, no unbounded
                           meta rows)
-                 agents.rs GUIDE_MD; cmd_agents (thin) + cmd_agents_q (fully
+                 agents.rs GUIDE_MD; subagent_defs = THE .claude/agents
+                          enumeration, RECURSIVE (collections nest by category:
+                          design/, engineering/, …; a flat read_dir misses every
+                          def) — consumed by BOTH sync_subagents and
+                          project_has_cona, so a nested-only footprint still
+                          counts as installed (else uninstall + the version-gated
+                          re-sync skip the scope). Bounded: SUBAGENT_MAX_DEPTH +
+                          file_type() (no symlink follow). Subagents can't be
+                          reached by one shared file — they run on their own
+                          system prompt — so per-def marker blocks are the only
+                          mechanism; sync_subagents reads each file ONCE (gate +
+                          splice share it; upsert_block_file would re-read) and
+                          patches only YAML-frontmatter defs (never README/
+                          runbook prose), uninstall strips any marked .md;
+                          cmd_agents (thin) + cmd_agents_q (fully
                           silent, reports changes via per-mark Mark.changed —
                           no output-string scanning); claude_hooks (settings.json
                           via serde_json); AgentName ValueEnum + AgentSel::want =
