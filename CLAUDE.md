@@ -305,6 +305,11 @@ src/db.rs        SQLite: ~/.cona/projects/<fnv1a-hash>.db per project
    kinds in `classify` (label, is_container, name_field)
 3. Test case in `tests/basic.rs`
 4. Language lists in README.md ("Languages") and CLAUDE.md (src/lang.rs entry)
+5. If it is prose/markup/data (no function-like `classify` kind), add it to the
+   `has_callable_symbols` deny-list in `lang.rs` — otherwise the read-advisory
+   hook tells the agent to `cona show <Symbol>` on a file that has no such
+   symbols. `non_callable_languages_are_reachable` guards the reverse mistake
+   (a deny-list entry `detect_lang` can never return).
 
 ## MCP server (`cona mcp`)
 
@@ -371,8 +376,13 @@ for the extra files they force open (you'd genuinely reopen those). Each
 returns `(String, i64)`. `detail` = query target (symbol/file) for top-target
 aggregation; added via guarded migration (`ALTER TABLE … ADD COLUMN`,
 `column_exists`). Hook logs redirected reads as `cmd = "hook:read-block"`,
-greps as `"hook:grep-block"` (count lines, `tokens_saved = 0` — saving credited
-to the follow-up query, else double-counting). `cmd_grep` prefilters candidates
+greps as `"hook:grep-block"`, and the advisory (non-blocking) outcomes as
+`"hook:read-advise"` (mid-size ≥`CONA_ADVISE_MIN_LINES` or repeat read of a
+path already read this session), `"hook:read-streak"` (every
+`CONA_READ_STREAK`-th full read in one session) and `"hook:read-nudge"` /
+`"hook:grep-nudge"` (unindexed repo) — all count lines with
+`tokens_saved = 0` (saving credited to the follow-up query, else
+double-counting). `cmd_grep` prefilters candidates
 via rg (fallback system grep, else full scan — fail-open); hit labeling stays
 with the index. `db::is_maintenance_cmd` (index/edit/rename/note/hook:*)
 separates maintenance from query lines; `stats` + TUI show maintenance as
