@@ -77,18 +77,16 @@ pub fn fetch_release_archive(ver: &str, target: &str, tmp: &Path) -> Result<()> 
     let checksum = tmp.join("cona.sha256");
     let result = (|| {
         download_to(&url, &archive)?;
-        // The checksum sidecar is best-effort: a release that shipped without
-        // it (or with a mismatched name) must NOT abort an otherwise-good
-        // binary download. Fetch quietly so a 404 here doesn't spew a scary
-        // `curl: (56) … 404` line; verify only when we actually got one.
-        if download_quiet(&checksum_url, &checksum).is_ok() {
-            verify_sha256(&archive, &checksum)?;
-        } else {
-            eprintln!(
-                "{}",
-                crate::ui::warn("no release checksum — skipping verification")
-            );
-        }
+        // Verification is mandatory: this archive's `cona` is renamed over the
+        // user's own executable, so an unverified binary must never be
+        // installed. Every release publishes the sidecar (release.yml), and a
+        // hard error here is not a dead end — the caller falls back to
+        // `install_via_cargo`, which builds from source. Fetch quietly so a
+        // missing sidecar doesn't spew `curl: (56) … 404` before our own
+        // message.
+        download_quiet(&checksum_url, &checksum)
+            .map_err(|_| anyhow!("no release checksum for v{ver} ({target}) — refusing to install an unverified binary"))?;
+        verify_sha256(&archive, &checksum)?;
         validate_archive_paths(&archive)?;
         // bsdtar (macOS, Windows 10+) and GNU tar both handle .tar.gz; bsdtar
         // also extracts the Windows .zip.
