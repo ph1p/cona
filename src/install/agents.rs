@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 /// Compact variant for CLAUDE.md / AGENTS.md / rule files.
 pub const GUIDE_MD: &str = r#"## cona — token-efficient code navigation
 
-This project is cona-indexed: reading ONE symbol costs a fraction of a whole
+Once a repo is cona-indexed, reading ONE symbol costs a fraction of a whole
 file, and `cona grep`/`refs` search code semantically (identifier nodes — never
 strings or comments). Prefer them over a full Read or a broad Grep when you want
 a specific function, class, or usage site.
