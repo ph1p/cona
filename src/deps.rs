@@ -106,16 +106,22 @@ fn expand_use_tree(spec: &str) -> Vec<String> {
     let spec = spec.trim();
     if let Some(open) = spec.find('{') {
         let base = spec[..open].trim().trim_end_matches("::").to_string();
-        // matching close brace (the tail after it is junk/whitespace)
+        // matching close brace (the tail after it is junk/whitespace).
+        // Scan the tail from `open` and add the offset back, so byte indices
+        // stay in one space: `find` returns a BYTE offset, and a
+        // `char_indices().skip(open)` would skip that many CHARS instead —
+        // any non-ASCII earlier in the line then overshot the `{`, leaving
+        // `close` at `spec.len()` so the `}` and `;` were parsed as part of
+        // the imported name (`use ä::{b};` yielded `b};`).
         let mut depth = 0usize;
         let mut close = spec.len();
-        for (i, c) in spec.char_indices().skip(open) {
+        for (i, c) in spec[open..].char_indices() {
             match c {
                 '{' => depth += 1,
                 '}' => {
-                    depth -= 1;
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        close = i;
+                        close = open + i;
                         break;
                     }
                 }
@@ -464,6 +470,24 @@ mod tests {
 
     fn no_crates() -> HashSet<String> {
         HashSet::new()
+    }
+
+    #[test]
+    fn use_tree_with_non_ascii_finds_the_closing_brace() {
+        // `find('{')` is a byte offset; scanning with `char_indices().skip(open)`
+        // skipped that many chars instead and overshot the brace, so `close`
+        // stayed at `spec.len()` and the `}`/`;` landed inside the last name.
+        assert_eq!(expand_use_tree("ä::{b}"), vec!["ä::b".to_string()]);
+        assert_eq!(
+            expand_use_tree("äö::{b, c}"),
+            vec!["äö::b".to_string(), "äö::c".to_string()]
+        );
+        assert_eq!(expand_use_tree("ä::{b::{c}}"), vec!["ä::b::c".to_string()]);
+        // and the whole extract path, semicolon included
+        assert_eq!(
+            extract_imports("rust", "use ä::{b, c};\n"),
+            vec!["ä::b".to_string(), "ä::c".to_string()]
+        );
     }
 
     #[test]
