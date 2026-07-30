@@ -392,7 +392,7 @@ helpers (totals/per_command/top_targets/recent/savings_series) feed both
 <!-- cona:begin -->
 ## cona — token-efficient code navigation
 
-This project is cona-indexed: reading ONE symbol costs a fraction of a whole
+Once a repo is cona-indexed, reading ONE symbol costs a fraction of a whole
 file, and `cona grep`/`refs` search code semantically (identifier nodes — never
 strings or comments). Prefer them over a full Read or a broad Grep when you want
 a specific function, class, or usage site.
