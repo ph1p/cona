@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/ph1p/cona/compare/v0.0.12...v0.0.13) - 2026-07-31
+
+### Added
+
+- support sandboxed agent navigation
+- *(grep)* opt-in regex via --regex
+- *(query)* --path scoping, show --all, context --no-tests
+
+### Fixed
+
+- *(hook)* grep redirect no longer sends regex searches away
+
+### Other
+
+- *(commands)* make --path one policy, resolved once
+
 ## [0.0.12](https://github.com/ph1p/cona/compare/v0.0.11...v0.0.12) - 2026-07-30
 
 ### Fixed
