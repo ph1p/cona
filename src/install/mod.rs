@@ -190,6 +190,7 @@ pub const SKILL_MD: &str = include_str!("../../SKILL.md");
 
 pub mod agents;
 pub mod doctor;
+pub mod mcp_config;
 pub mod upgrade;
 
 pub use agents::*;

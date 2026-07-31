@@ -127,12 +127,29 @@ Known agents: `claude`, `agents` (Codex / OpenCode / Amp / Jules via AGENTS.md),
 
 ## MCP server
 
-For hosts without hook support, cona speaks MCP over stdio:
+For hosts without hook support, cona speaks MCP over stdio. `cona setup` /
+`cona agents install` registers the server automatically wherever a harness
+config exists:
+
+| harness | project scope | global scope |
+| --- | --- | --- |
+| Claude Code | `.mcp.json` | — (`~/.claude.json` is Claude's own session state) |
+| Codex | `.codex/config.toml` | `~/.codex/config.toml` |
+| Cursor | `.cursor/mcp.json` | `~/.cursor/mcp.json` |
+| Gemini CLI | `.gemini/settings.json` | `~/.gemini/settings.json` |
+
+Entries are written with the absolute binary path, are idempotent, and leave
+foreign servers in the same file untouched; `cona agents remove` strips them
+again. `cona agents status` has an `mcp` column, `cona doctor` lists every
+registered target. Set `CONA_EXE` to pin the command spelling that gets written.
+
+To wire it by hand instead:
 
 ```json
 {
   "mcpServers": {
     "cona": {
+      "type": "stdio",
       "command": "cona",
       "args": ["mcp"]
     }

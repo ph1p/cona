@@ -8,7 +8,7 @@ use std::io::{BufRead, Write};
 
 /// Protocol versions cona speaks, newest first. The newest is what we
 /// advertise when a client asks for something we don't know.
-pub const SUPPORTED_PROTOCOLS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+pub const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Negotiate the protocol version per spec: echo the client's request when we
 /// support it, otherwise answer with our latest supported version (the client
@@ -225,9 +225,10 @@ mod tests {
         // supported version → echoed
         assert_eq!(negotiate_protocol(Some("2025-03-26")), "2025-03-26");
         assert_eq!(negotiate_protocol(Some("2024-11-05")), "2024-11-05");
+        assert_eq!(negotiate_protocol(Some("2025-11-25")), "2025-11-25");
         // unknown / missing → our latest supported
-        assert_eq!(negotiate_protocol(Some("1.0.0")), "2025-06-18");
-        assert_eq!(negotiate_protocol(None), "2025-06-18");
+        assert_eq!(negotiate_protocol(Some("1.0.0")), "2025-11-25");
+        assert_eq!(negotiate_protocol(None), "2025-11-25");
     }
 
     #[test]
@@ -240,7 +241,7 @@ mod tests {
             None,
         );
         // never echo an unsupported version — answer with our latest
-        assert_eq!(replies[0]["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(replies[0]["result"]["protocolVersion"], "2025-11-25");
         assert_eq!(
             replies[0]["result"]["serverInfo"]["title"],
             "cona — code navigation"

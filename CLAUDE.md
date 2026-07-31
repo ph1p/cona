@@ -315,8 +315,27 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           uninstall]`, action optional (bare+TTY → interactive,
                           bare+names → add, bare non-TTY → status); add/remove =
                           ValueEnum aliases of install/uninstall
+                 mcp_config.rs THE MCP-registration writer, driven by
+                          AgentName::mcp_path (claude .mcp.json project-only —
+                          ~/.claude.json is Claude's live session state, never
+                          rewritten; codex .codex/config.toml; cursor
+                          .cursor/mcp.json; gemini .gemini/settings.json; pi
+                          none). ONE server_entry shape
+                          {type:"stdio",command,args:["mcp"]} — `type` is
+                          REQUIRED by Cursor, harmless elsewhere. json_server
+                          parses + re-serializes (serde_json preserve_order:
+                          foreign servers AND key order survive), errors rather
+                          than clobbering invalid JSON, and deletes a file that
+                          held only cona. toml_server owns a `# cona:begin/end`
+                          block (no toml crate dep) — replaced in place, so a
+                          moved binary self-heals; backslashes/quotes escaped
+                          for Windows paths. registered() = the Presence probe
+                          config_paths uses, so an MCP-only scope still counts
+                          as installed
                  doctor.rs cmd_doctor: binary/PATH, hooks+skill (global+project),
-                          index, per-scope config freshness, helper status
+                          index, per-scope config freshness, helper status,
+                          mcp-server registration (informational, never an issue
+                          — MCP is the optional second surface)
 src/db.rs        SQLite: ~/.cona/projects/<fnv1a-hash>.db per project
                  (data dir overridable via CONA_DATA_DIR — tests set it,
                  real ~/.cona never sees test repos)
@@ -375,11 +394,21 @@ note (tests/basic.rs handshake pins parity). batch_edit = multiple symbol edits
 in ONE call, each syntax-verified; stops at first error (applied edits remain,
 progress reported — no silent partial state). edit runs through cmd_edit_code
 (replacement as &str — stdin belongs to the protocol). Usage logged `mcp:<tool>`.
+SUPPORTED_PROTOCOLS is newest-first and MUST stay so (negotiate_protocol answers
+with `[0]` on an unknown request); newest = 2025-11-25, whose additions (`_meta`,
+`icons`, `outputSchema`) are all optional, so existing payloads stay valid.
+Registration into harness configs is NOT here — it is install-time
+(src/install/mcp_config.rs), run by `agents install`/`setup`.
 
 ## Setup / uninstall UX
 
 `cona setup` always indexes + (project scope) installs git hooks, then picks
-agents. Interactive = no `-y`, no explicit scope arg, TTY → pick_agents shows
+agents. Installing an agent also registers the MCP server wherever that
+harness keeps its config (mcp_config.rs) — written with the ABSOLUTE binary
+path from agent_exe() (`CONA_EXE` overrides; it also keeps tests off the
+shared global.db `install_path`, which other commands legitimately rewrite).
+Skipped when the parent dir does not exist (except the project root), and a
+failure there warns instead of aborting the install. Interactive = no `-y`, no explicit scope arg, TTY → pick_agents shows
 ONE ui::multiselect across BOTH scopes (PROJECT + HOME sections via Row::Header,
 items pre-checked by `installed() || detected()` — reality first, detection only
 as the first-run suggestion). **Setup is also the manage surface: unchecking an
@@ -463,28 +492,3 @@ separates maintenance from query lines; `stats` + TUI show maintenance as
 compact one-liners under the query table, never in savings columns. Aggregate
 helpers (totals/per_command/top_targets/recent/savings_series) feed both
 `stats` and the `ui` dashboard.
-<!-- cona:begin -->
-## cona — token-efficient code navigation
-
-Once a repo is cona-indexed, reading ONE symbol costs a fraction of a whole
-file, and `cona grep`/`refs` search code semantically (identifier nodes — never
-strings or comments). Prefer them over a full Read or a broad Grep when you want
-a specific function, class, or usage site.
-
-Coarse → fine: `cona tree --rank` (orient) → `cona outline <file>` (map a file) →
-`cona show <Sym>` (read one symbol) → `cona edit <Sym>` (syntax-verified write).
-
-`<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name`. Index auto-refreshes;
-`cona index` (~1s) if a repo isn't indexed yet. In a sandbox where `~/.cona`
-is not writable, cona falls back to temporary storage; set `CONA_DATA_DIR` when
-you need a persistent index. Use `--read-only` to inspect an existing index
-without writing code, indexes, or usage stats.
-
-Too many hits? `--path <dir>` scopes `find`/`refs`/`grep`/`tree` to a subtree.
-Ambiguous name? `cona show <Sym> --all` prints every definition instead of
-erroring. `cona grep` matches literally; add `--regex` for a real regex.
-
-Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
-`insert` `rename` `note` `check` — is listed in `cona --help`, with details per
-group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).
-<!-- cona:end -->
