@@ -560,9 +560,10 @@ fn try_grep(v: &serde_json::Value) -> Result<()> {
             let reason = format!(
                 "this project is cona-indexed — `cona grep {pattern}` searches code only \
                  and labels every hit with its enclosing symbol, and `cona refs {pattern}` \
-                 gives semantic usage sites (strings/comments never match). If you really need \
-                 a raw regex/all-file search, re-issue Grep with a glob, type, path or \
-                 head_limit filter."
+                 gives semantic usage sites (strings/comments never match). cona grep also \
+                 does regex: `cona grep <pattern> --regex`. If you need to search \
+                 non-code files too, re-issue Grep with a glob, type, path or head_limit \
+                 filter."
             );
             deny(&root, "hook:grep-block", pattern, &reason)
         }
