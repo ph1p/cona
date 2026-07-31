@@ -23,7 +23,7 @@ Coarse → fine: `cona tree --rank` (orient) → `cona outline <file>` (map a fi
 
 Too many hits? `--path <dir>` scopes `find`/`refs`/`grep`/`tree` to a subtree.
 Ambiguous name? `cona show <Sym> --all` prints every definition instead of
-erroring. `cona grep` is a literal substring match, not a regex.
+erroring. `cona grep` matches literally; add `--regex` for a real regex.
 
 Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
 `insert` `rename` `note` `check` — is listed in `cona --help`, with details per

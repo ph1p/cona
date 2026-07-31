@@ -64,9 +64,18 @@ src/commands/    cmd_* implementations, split by concern:
                           outlines it)/refs/context (--no-tests filters at
                           COLLECTION time — the caller cap is first-come, so
                           post-filtering would let test fns crowd out real
-                          callers; hidden count disclosed)/diff/grep (literal,
-                          not regex — a pattern with regex metachars gets a note
-                          naming its longest literal run)
+                          callers; hidden count disclosed)/diff/grep.
+                          Matcher = THE grep line-matching rule: literal by
+                          default (`foo.bar` is code, not a pattern), regex on
+                          `--regex`/`-e`; Matcher::literal for identifier
+                          callers (scan_ref_sites) where regex is never right.
+                          prefilter_flag keeps rg/grep reading the pattern the
+                          SAME way — a disagreeing prefilter drops files holding
+                          real matches (rg needs no flag in regex mode: it is
+                          already Rust-regex). Invalid regex = error, never a
+                          silent literal fallback. Zero hits on a metachar
+                          pattern in literal mode names `--regex` + the longest
+                          literal run
                  mutate.rs edit / edit --range / insert (--before/--after <Sym>
                           OR --at <file> <line>, incl. new/empty file) / note /
                           rename. write_verified = THE shared syntax-verify +
@@ -368,9 +377,13 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
 - Token estimate = 4 chars ≈ 1 token (heuristic, trend metric).
 - `--path` resolves directory-vs-prefix by stat-ing the filter, so a filter that
   names a dir which no longer exists on disk degrades to the prefix reading.
-- `grep` is a literal substring match, not a regex (no `regex` dependency — the
-  supply-chain cost isn't worth it). Metachars in a pattern trigger a note
-  naming the longest literal run to retry with.
+- `grep` matches literally by DEFAULT, regex only on `--regex`/`-e`. Literal is
+  the default because `foo.bar`/`Vec<T>` are ordinary code — reinterpreting them
+  would change what existing queries mean. `regex` is a direct dependency at
+  zero cost: it was already in `Cargo.lock` via `tree-sitter` (`cargo tree -i
+  regex`), so it adds no crates and ~32 KB of binary. A regex is matched
+  in-process by the `regex` crate, and rg/grep get the matching flag so the
+  prefilter agrees.
 - `rename` semantic (identifier positions) but name-based: collision guard +
   syntax verify + all-or-nothing rollback; unparsable files only with --force.
 - `deps`: internal imports → edges; external packages counted + listed but not

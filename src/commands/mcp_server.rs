@@ -49,8 +49,8 @@ fn mcp_tools() -> Vec<serde_json::Value> {
         ),
         mcp_tool(
             "grep",
-            "Code-only substring search; hits labeled with their enclosing symbol. Use instead of ripgrep/regex over the repo — it skips strings, comments, and non-code. Matching is LITERAL, not regex",
-            json!({"pattern": s("literal substring to search — not a regex"), "ignore_case": {"type": "boolean"}, "path": s("only search files under this prefix (file or directory)")}),
+            "Code-only search; hits labeled with their enclosing symbol. Use instead of ripgrep over the repo — it skips strings, comments, and non-code. Matching is LITERAL unless regex is set",
+            json!({"pattern": s("substring to search — literal unless regex is true"), "ignore_case": {"type": "boolean"}, "regex": {"type": "boolean", "description": "treat pattern as a regular expression (Rust regex syntax)"}, "path": s("only search files under this prefix (file or directory)")}),
             &["pattern"],
             read_only("Code grep"),
         ),
@@ -245,6 +245,7 @@ fn mcp_call(
                 conn,
                 p,
                 flag("ignore_case"),
+                flag("regex"),
                 defaults::GREP_LIMIT,
                 opt("path"),
                 false,

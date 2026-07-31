@@ -6,7 +6,7 @@ use super::{
     PathFilter, ENCLOSING_SYMBOL_SQL,
 };
 use crate::{db, diffmap, entries, fuzzy, gitmap, graph, indexer, lang, resolve};
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -1152,10 +1152,12 @@ pub fn cmd_grep(
     conn: &Connection,
     pattern: &str,
     ignore_case: bool,
+    regex: bool,
     limit: usize,
     path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
+    let matcher = Matcher::new(pattern, ignore_case, regex)?;
     let pf = PathFilter::new(root, path_filter);
     let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let mut files: Vec<String> = stmt.query_map([], |r| r.get(0))?.flatten().collect();
@@ -1163,16 +1165,12 @@ pub fn cmd_grep(
     // everything in-process; on any failure we fall back to the full scan.
     // A directory scope is handed to rg as its search root, so a scoped query
     // walks that subtree instead of the whole repo.
-    if let Some(candidates) = grep_prefilter(root, pattern, ignore_case, pf.search_root()) {
+    if let Some(candidates) = grep_prefilter(root, pattern, &matcher, ignore_case, pf.search_root())
+    {
         files.retain(|f| candidates.contains(f));
     }
     files.retain(|f| pf.ok(f));
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
-    let needle = if ignore_case {
-        pattern.to_lowercase()
-    } else {
-        pattern.to_string()
-    };
     let mut hits: Vec<(String, usize, String, String)> = Vec::new();
     // Honest baseline: per hit file, a grep pass + a Read window around each
     // match line — what the same search costs an agent without cona, NOT
@@ -1189,12 +1187,7 @@ pub fn cmd_grep(
         // limit truncates this file mid-scan.
         let line_lens: Vec<usize> = src.lines().map(str::len).collect();
         for (ln, line) in src.lines().enumerate() {
-            let matched = if ignore_case {
-                line.to_lowercase().contains(&needle)
-            } else {
-                line.contains(&needle)
-            };
-            if !matched {
+            if !matcher.is_match(line) {
                 continue;
             }
             if match_lines.is_empty() {
@@ -1238,18 +1231,17 @@ pub fn cmd_grep(
     }
     if hits.is_empty() {
         out.push_str(&format!("no matches for '{pattern}'"));
-        // `grep` is deliberately fixed-string. A pattern that *looks* like a
-        // regex returning zero hits is the worst failure mode — the agent
-        // concludes the code doesn't exist. Say why instead of staying silent.
-        if let Some(literal) = regexish_literal(pattern) {
+        // Literal is the default. A regex-looking pattern returning zero hits is
+        // the worst failure mode — the agent concludes the code doesn't exist.
+        // Name the flag that would have matched instead of staying silent.
+        if let Some(literal) = regexish_literal(pattern).filter(|_| !regex) {
             out.push_str(&format!(
-                "\n  note: matching is literal (no regex) — '{}' was searched verbatim.",
-                pattern
+                "\n  note: matching is literal by default — '{pattern}' was searched verbatim.\
+                 \n  try `cona grep {pattern} --regex`"
             ));
             if !literal.is_empty() {
-                out.push_str(&format!("\n  try `cona grep {literal}`"));
+                out.push_str(&format!(" — or the literal part: `cona grep {literal}`"));
             }
-            out.push_str(" — or `rg` for a real regex");
         } else if path_filter.is_some() {
             out.push_str(" — try without --path");
         }
@@ -1260,6 +1252,75 @@ pub fn cmd_grep(
 
 /// Regex metacharacters that make a pattern *look* like a regex. Used only to
 /// explain a zero-hit fixed-string search — never to change matching.
+/// THE line-matching rule behind `grep`, in one place so the per-line test is a
+/// single call and the mode can't drift between the in-process scan and the
+/// rg/grep prefilter that narrows the candidate files.
+///
+/// Literal is the default: patterns like `foo.bar` or `Vec<T>` are ordinary code
+/// and must not be reinterpreted. `--regex` opts in.
+pub(super) enum Matcher {
+    /// Pre-lowercased when `ignore_case`, so the needle isn't rebuilt per line.
+    Literal { needle: String, ignore_case: bool },
+    Regex(regex::Regex),
+}
+
+impl Matcher {
+    /// Case-sensitive literal — for callers whose pattern is an identifier, where
+    /// regex is never the right reading (a name holding `$` or `.` must match
+    /// itself).
+    pub(super) fn literal(pattern: &str) -> Self {
+        Matcher::Literal {
+            needle: pattern.to_string(),
+            ignore_case: false,
+        }
+    }
+
+    /// `Err` only for an invalid regex — the caller surfaces it verbatim, since
+    /// a silent fallback to literal would answer a different question.
+    pub(super) fn new(pattern: &str, ignore_case: bool, regex: bool) -> Result<Self> {
+        if !regex {
+            let needle = if ignore_case {
+                pattern.to_lowercase()
+            } else {
+                pattern.to_string()
+            };
+            return Ok(Matcher::Literal {
+                needle,
+                ignore_case,
+            });
+        }
+        regex::RegexBuilder::new(pattern)
+            .case_insensitive(ignore_case)
+            .build()
+            .map(Matcher::Regex)
+            .map_err(|e| anyhow!("invalid regex '{pattern}': {e}"))
+    }
+
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Matcher::Literal {
+                needle,
+                ignore_case: true,
+            } => line.to_lowercase().contains(needle),
+            Matcher::Literal { needle, .. } => line.contains(needle),
+            Matcher::Regex(re) => re.is_match(line),
+        }
+    }
+
+    /// The extra flag rg/grep needs to read the pattern the same way we do, if
+    /// any. rg is already Rust-regex by default — exactly our regex dialect —
+    /// so the regex case needs nothing from it; system grep needs ERE to come
+    /// close. A prefilter that disagreed would drop files holding real matches.
+    fn prefilter_flag(&self, bin: &str) -> Option<&'static str> {
+        match self {
+            Matcher::Literal { .. } if bin == "rg" => Some("--fixed-strings"),
+            Matcher::Literal { .. } => Some("-F"),
+            Matcher::Regex(_) if bin == "rg" => None,
+            Matcher::Regex(_) => Some("-E"),
+        }
+    }
+}
+
 fn regexish_literal(pattern: &str) -> Option<String> {
     const META: [char; 11] = ['(', ')', '[', ']', '|', '+', '*', '?', '^', '$', '\\'];
     if !pattern.contains(|c| META.contains(&c)) {
@@ -1285,17 +1346,16 @@ fn regexish_literal(pattern: &str) -> Option<String> {
 pub(super) fn grep_prefilter(
     root: &Path,
     pattern: &str,
+    matcher: &Matcher,
     ignore_case: bool,
     scope: Option<&str>,
 ) -> Option<HashSet<String>> {
     let attempts: [(&str, Vec<&str>); 2] = [
-        (
-            "rg",
-            vec!["--files-with-matches", "--fixed-strings", "--no-messages"],
-        ),
-        ("grep", vec!["-r", "-l", "-I", "-F", "-s"]),
+        ("rg", vec!["--files-with-matches", "--no-messages"]),
+        ("grep", vec!["-r", "-l", "-I", "-s"]),
     ];
     for (bin, mut args) in attempts {
+        args.extend(matcher.prefilter_flag(bin));
         if ignore_case {
             args.push("-i");
         }
@@ -1322,4 +1382,74 @@ pub(super) fn grep_prefilter(
         );
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn literal_is_the_default_reading() {
+        // Regex metachars are ordinary code — `foo.bar` must not match `fooXbar`.
+        let m = Matcher::new("foo.bar", false, false).unwrap();
+        assert!(m.is_match("let x = foo.bar;"));
+        assert!(!m.is_match("let x = fooXbar;"));
+    }
+
+    #[test]
+    fn regex_mode_applies_the_pattern() {
+        let m = Matcher::new(r"tokens_(out|saved)", false, true).unwrap();
+        assert!(m.is_match("let tokens_out = 1;"));
+        assert!(m.is_match("let tokens_saved = 1;"));
+        assert!(!m.is_match("let tokens_total = 1;"));
+    }
+
+    #[test]
+    fn ignore_case_applies_in_both_modes() {
+        assert!(Matcher::new("FooBar", true, false)
+            .unwrap()
+            .is_match("let foobar = 1;"));
+        assert!(Matcher::new("^foo.ar$", true, true)
+            .unwrap()
+            .is_match("FooBar"));
+    }
+
+    #[test]
+    fn literal_ctor_never_reads_the_name_as_a_regex() {
+        // scan_ref_sites prefilters by identifier; a name holding metachars
+        // (`$crate`, `x.y`) must match itself, not act as a pattern.
+        let m = Matcher::literal("$crate");
+        assert!(m.is_match("$crate::foo()"));
+        assert!(!m.is_match("Xcrate::foo()"));
+    }
+
+    #[test]
+    fn invalid_regex_is_an_error_not_a_literal_fallback() {
+        // Silently searching `foo(` verbatim would answer a different question.
+        assert!(Matcher::new("foo(", false, true).is_err());
+        assert!(Matcher::new("foo(", false, false).is_ok());
+    }
+
+    /// The prefilter narrows which files are scanned at all, so it MUST read the
+    /// pattern the same way the in-process matcher does — a disagreement drops
+    /// files that hold real matches.
+    #[test]
+    fn prefilter_flag_matches_the_matcher_mode() {
+        let lit = Matcher::new("a.b", false, false).unwrap();
+        assert_eq!(lit.prefilter_flag("rg"), Some("--fixed-strings"));
+        assert_eq!(lit.prefilter_flag("grep"), Some("-F"));
+        let re = Matcher::new("a.b", false, true).unwrap();
+        // rg is already Rust-regex by default — our exact dialect.
+        assert_eq!(re.prefilter_flag("rg"), None);
+        assert_eq!(re.prefilter_flag("grep"), Some("-E"));
+    }
+
+    #[test]
+    fn regexish_literal_only_fires_on_metachars() {
+        assert_eq!(regexish_literal("plain_name"), None);
+        assert_eq!(
+            regexish_literal("tokens_(out|saved)").as_deref(),
+            Some("tokens_")
+        );
+    }
 }

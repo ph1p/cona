@@ -179,11 +179,14 @@ struct DiffArgs {
 
 #[derive(clap::Args)]
 struct GrepArgs {
-    /// Literal substring to search for — NOT a regex
+    /// Substring to search for — literal unless --regex
     pattern: String,
     /// Case-insensitive match
     #[arg(short = 'i', long)]
     ignore_case: bool,
+    /// Treat the pattern as a regular expression (Rust regex syntax)
+    #[arg(short = 'e', long)]
+    regex: bool,
     #[arg(long, default_value_t = defaults::GREP_LIMIT)]
     limit: usize,
     /// Only search files under this path prefix (file or directory)
@@ -883,6 +886,7 @@ fn run() -> Result<()> {
             let GrepArgs {
                 pattern,
                 ignore_case,
+                regex,
                 limit,
                 path,
             } = a;
@@ -892,6 +896,7 @@ fn run() -> Result<()> {
                 &conn,
                 pattern,
                 *ignore_case,
+                *regex,
                 *limit,
                 path.as_deref(),
                 cli.json,
