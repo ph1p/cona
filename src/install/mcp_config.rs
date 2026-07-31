@@ -47,7 +47,7 @@ pub fn json_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
     if !install && existing.is_none() {
         return Ok(Change::Unchanged);
     }
-    let raw = existing.clone().unwrap_or_else(|| "{}".into());
+    let raw = existing.unwrap_or_else(|| "{}".into());
     // An empty (or whitespace-only) file is a valid starting point, not a
     // parse error — `touch .mcp.json` is a thing users do.
     let mut root: serde_json::Value = if raw.trim().is_empty() {
@@ -149,33 +149,29 @@ pub fn toml_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
         return write_if_changed(path, &stripped);
     }
     let block = toml_block(exe);
-    let updated = match existing {
-        None => block,
-        Some(body) if body.contains(TOML_BEGIN) => {
-            // replace in place — keeps the block where the user has it
-            let head = strip_toml_block(&body);
-            let head = head.trim_end();
-            if head.is_empty() {
-                block
-            } else {
-                format!("{head}\n\n{block}")
-            }
-        }
-        Some(body) => {
-            let head = body.trim_end();
-            if head.is_empty() {
-                block
-            } else {
-                format!("{head}\n\n{block}")
-            }
-        }
+    // Strip any block we already own (replace in place, so a moved binary
+    // self-heals) and append after whatever foreign config remains. Stripping
+    // is a no-op on a config that has no cona block, so both cases are one path.
+    let head = existing.map(|b| strip_toml_block(&b)).unwrap_or_default();
+    let head = head.trim_end();
+    let updated = if head.is_empty() {
+        block
+    } else {
+        format!("{head}\n\n{block}")
     };
     write_if_changed(path, &updated)
 }
 
 /// Is cona registered as an MCP server in this config file? One probe for both
-/// shapes — the JSON files carry a `"cona"` key under `mcpServers`, the TOML
-/// one carries the marker. Cheap enough for a status row (one read).
+/// shapes — the JSON files carry a `"cona"` key under `mcpServers`, the TOML one
+/// carries the marker.
+///
+/// Substring, not a parse: this sits on the auto-refresh hot path (every command
+/// → `maybe_refresh_project_config` → `project_has_cona` → `installed`), where a
+/// `serde_json` parse of up to eight harness configs per invocation is real cost
+/// for a boolean. Same trade the existing `Presence::Needle` probe makes, and
+/// the needles are specific — `"mcpServers"` plus a quoted `"cona"` key. The
+/// writers still parse properly; only this yes/no answer is approximate.
 pub fn registered(path: &Path) -> bool {
     let Ok(body) = std::fs::read_to_string(path) else {
         return false;
@@ -183,14 +179,7 @@ pub fn registered(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()) == Some("toml") {
         return body.contains(TOML_BEGIN);
     }
-    serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| {
-            v.get("mcpServers")
-                .and_then(|s| s.get(SERVER_NAME))
-                .map(|_| true)
-        })
-        .unwrap_or(false)
+    body.contains("mcpServers") && body.contains(&format!("\"{SERVER_NAME}\""))
 }
 
 #[cfg(test)]

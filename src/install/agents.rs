@@ -36,14 +36,6 @@ group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).
 
 /// The `cona` invocation agents should use — absolute if we know it.
 pub(crate) fn agent_exe() -> String {
-    // Explicit override wins: lets a packager pin the spelling that lands in
-    // generated MCP configs (and keeps tests off the shared global.db, whose
-    // `install_path` other commands legitimately rewrite).
-    if let Ok(exe) = std::env::var("CONA_EXE") {
-        if !exe.is_empty() {
-            return exe;
-        }
-    }
     db::meta_get("install_path")
         .ok()
         .flatten()
@@ -132,30 +124,33 @@ impl AgentName {
         }
     }
 
-    /// Config files this agent's cona integration lives in for the given scope,
-    /// each tagged with HOW to detect a cona install there (`Presence`). THE
-    /// single source for both — `installed()` reads these tags rather than
-    /// re-deriving the probe from the filename. Empty = this agent has no target
-    /// in this scope (e.g. Pi / global-only Cursor at project scope).
-    pub fn config_paths(
+    /// Every file this agent's cona install leaves a trace in for the given
+    /// scope — the guide targets PLUS the MCP entry — each tagged with HOW to
+    /// detect cona there (`Presence`). This is the "is cona installed here?"
+    /// question: a scope whose ONLY trace is the server entry must still count,
+    /// or uninstall (`project_has_cona`) and the status ✓ would both miss it.
+    ///
+    /// NOT the same question as `config_paths` — see there.
+    pub fn footprint_paths(
         self,
         project_root: &Path,
         home: &Path,
         global: bool,
     ) -> Vec<(PathBuf, Presence)> {
-        let mut paths = self.guide_paths(project_root, home, global);
-        // The MCP registration is part of the footprint too — a scope whose
-        // ONLY cona trace is the server entry must still count as installed,
-        // or uninstall (project_has_cona) and the status row would both miss
-        // it. Appended here so `config_paths` stays THE single source.
+        let mut paths = self.config_paths(project_root, home, global);
         if let Some(p) = self.mcp_path(project_root, home, global) {
             paths.push((p, Presence::McpServer));
         }
         paths
     }
 
-    /// The guide/skill/hook targets alone (everything but the MCP entry).
-    fn guide_paths(
+    /// The guide/skill/hook targets this scope can act on — everything but the
+    /// MCP entry. This is the "can this scope configure the agent?" question
+    /// (`agents_in_scope`, the n/a status cells): an agent that only had an MCP
+    /// target here would be offered in the picker and then receive nothing, so
+    /// the two readings stay separate functions. Empty = no target in this scope
+    /// (e.g. Pi at project scope).
+    pub fn config_paths(
         self,
         project_root: &Path,
         home: &Path,
@@ -211,26 +206,17 @@ impl AgentName {
     /// checked-in team scope): its user-scope servers live in `~/.claude.json`,
     /// a file Claude Code owns as live session state — cona does not rewrite it.
     pub fn mcp_path(self, project_root: &Path, home: &Path, global: bool) -> Option<PathBuf> {
+        // Same relative path in both scopes for everything but Claude — only
+        // the base moves.
+        let base = if global { home } else { project_root };
         match self {
             AgentName::Claude if !global => Some(project_root.join(".mcp.json")),
             AgentName::Claude => None,
             // Codex speaks TOML; project scope only applies to trusted projects,
             // but writing it is harmless there and matches its documented path.
-            AgentName::Agents => Some(if global {
-                home.join(".codex/config.toml")
-            } else {
-                project_root.join(".codex/config.toml")
-            }),
-            AgentName::Cursor => Some(if global {
-                home.join(".cursor/mcp.json")
-            } else {
-                project_root.join(".cursor/mcp.json")
-            }),
-            AgentName::Gemini => Some(if global {
-                home.join(".gemini/settings.json")
-            } else {
-                project_root.join(".gemini/settings.json")
-            }),
+            AgentName::Agents => Some(base.join(".codex/config.toml")),
+            AgentName::Cursor => Some(base.join(".cursor/mcp.json")),
+            AgentName::Gemini => Some(base.join(".gemini/settings.json")),
             // pi.dev's MCP config shape isn't ours to guess — guide only.
             AgentName::Pi => None,
         }
@@ -240,7 +226,7 @@ impl AgentName {
     /// config path the way its `Presence` tag dictates — so it reflects an
     /// actual install, not mere presence of the agent (`detected`).
     pub fn installed(self, project_root: &Path, home: &Path, global: bool) -> bool {
-        self.config_paths(project_root, home, global)
+        self.footprint_paths(project_root, home, global)
             .iter()
             .any(|(p, kind)| kind.present(p))
     }
@@ -274,6 +260,27 @@ impl Presence {
 /// A file carries a cona marker block. THE shared marker probe.
 fn has_marker(p: &Path) -> bool {
     std::fs::read_to_string(p).is_ok_and(|c| c.contains(super::BLOCK_BEGIN))
+}
+
+/// Every MCP target cona owns, as `(agent, scope-is-global, path, registered)`.
+/// THE single traversal of `AgentName::ALL × scopes × mcp_path` — `agents
+/// status` folds it to one cell per agent, `doctor` prints the registered rows.
+/// Two surfaces, one enumeration, so a new agent shows up in both from its
+/// `mcp_path` arm alone.
+pub fn mcp_registrations(
+    project_root: &Path,
+    home: &Path,
+) -> Vec<(AgentName, bool, PathBuf, bool)> {
+    let mut out = Vec::new();
+    for a in AgentName::ALL {
+        for global in [false, true] {
+            if let Some(p) = a.mcp_path(project_root, home, global) {
+                let on = mcp_config::registered(&p);
+                out.push((a, global, p, on));
+            }
+        }
+    }
+    out
 }
 
 /// The agents whose config is detected on disk (used to pre-check the picker
@@ -358,6 +365,7 @@ pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
         ui::dim("target")
     );
     let mut any_installed = false;
+    let mcp = mcp_registrations(project_root, &home);
     for a in AgentName::ALL {
         let proj = a.installed(project_root, &home, false);
         let glob = a.installed(project_root, &home, true);
@@ -367,17 +375,15 @@ pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
         let glob_na = a.config_paths(project_root, &home, true).is_empty();
         // MCP is a second, optional surface: on when the server entry exists in
         // EITHER scope, n/a for a harness cona has no MCP config for.
-        let mcp_targets: Vec<_> = [false, true]
-            .iter()
-            .filter_map(|&g| a.mcp_path(project_root, &home, g))
-            .collect();
-        let mcp_on = mcp_targets.iter().any(|p| mcp_config::registered(p));
+        let mut rows = mcp.iter().filter(|(n, ..)| *n == a).peekable();
+        let mcp_na = rows.peek().is_none();
+        let mcp_on = rows.any(|&(.., on)| on);
         println!(
             "  {}  {}  {}  {}  {}",
             ui::bold(&format!("{:<name_w$}", a.slug())),
             cell(proj, proj_na),
             cell(glob, glob_na),
-            cell(mcp_on, mcp_targets.is_empty()),
+            cell(mcp_on, mcp_na),
             ui::dim(a.desc())
         );
     }
@@ -536,9 +542,9 @@ fn sync_subagents(dir: &Path, install: bool, done: &mut Vec<super::Mark>) -> Res
 
 /// Register (or remove) cona as an MCP server for one agent+scope, if that
 /// combination has a config we own. THE one place the two config shapes are
-/// chosen between, so every agent block below is a single call. Fail-soft: a
-/// broken foreign config warns and leaves the rest of the install intact —
-/// losing the MCP entry must never cost the user the guide + hooks.
+/// chosen between. Fail-soft: a broken foreign config warns and leaves the rest
+/// of the install intact — losing the MCP entry must never cost the user the
+/// guide + hooks.
 fn mcp_register(agent: AgentName, ctx: &Ctx, install: bool, done: &mut Vec<super::Mark>) {
     let Some(path) = agent.mcp_path(ctx.project_root, ctx.home, ctx.global) else {
         return;
@@ -568,8 +574,8 @@ fn mcp_register(agent: AgentName, ctx: &Ctx, install: bool, done: &mut Vec<super
     }
 }
 
-/// The per-invocation constants every agent block needs. Bundled so
-/// `mcp_register` takes one argument instead of four positional paths.
+/// The per-invocation constants the MCP loop carries. `exe` in particular is
+/// resolved ONCE here rather than per agent — `agent_exe()` reads global.db.
 struct Ctx<'a> {
     project_root: &'a Path,
     home: &'a Path,
@@ -690,9 +696,6 @@ pub fn cmd_agents_q(
         // CLAUDE.md, so each existing definition carries the guide itself (never
         // creates agent files).
         sync_subagents(&claude_dir.join("agents"), install, &mut done)?;
-        // native MCP tools alongside the shell-out guide (project scope only —
-        // see AgentName::mcp_path)
-        mcp_register(AgentName::Claude, &ctx, install, &mut done);
     } // 'claude
 
     // --- generic AGENTS.md (Codex, OpenCode, Amp, Jules, …) ----------------
@@ -712,7 +715,6 @@ pub fn cmd_agents_q(
         } else if remove_block_file(&agents_md)? {
             mark(&mut done, label, "removed", &agents_md);
         }
-        mcp_register(AgentName::Agents, &ctx, install, &mut done);
     }
 
     // --- Cursor ------------------------------------------------------------
@@ -735,7 +737,6 @@ pub fn cmd_agents_q(
             std::fs::remove_file(&cursor)?;
             mark(&mut done, "cursor rule", "removed", &cursor);
         }
-        mcp_register(AgentName::Cursor, &ctx, install, &mut done);
     }
 
     // --- Gemini CLI ----------------------------------------------------------
@@ -754,7 +755,6 @@ pub fn cmd_agents_q(
         } else if remove_block_file(&gemini)? {
             mark(&mut done, "gemini memory", "removed", &gemini);
         }
-        mcp_register(AgentName::Gemini, &ctx, install, &mut done);
     }
 
     // --- pi.dev --------------------------------------------------------------
@@ -773,6 +773,17 @@ pub fn cmd_agents_q(
             mark(&mut done, "pi memory", ch.verb(), &pi_agents);
         } else if remove_block_file(&pi_agents)? {
             mark(&mut done, "pi memory", "removed", &pi_agents);
+        }
+    }
+
+    // --- MCP server ----------------------------------------------------------
+    // Native tools alongside the shell-out guides. Driven by ONE loop over the
+    // exhaustive `mcp_path` match rather than a call per agent block: a new
+    // agent then gets its MCP entry from that arm alone, and cannot end up with
+    // a path that `installed()` counts but nothing ever writes or strips.
+    for a in AgentName::ALL {
+        if sel.want(a, a.detected(project_root, &home, global)) {
+            mcp_register(a, &ctx, install, &mut done);
         }
     }
 
@@ -1053,18 +1064,25 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // seed a Claude project so the install has a target
         std::fs::write(dir.join("CLAUDE.md"), "# my project\n").unwrap();
-        // Pin the binary spelling: without it the two installs read
-        // `install_path` from the SHARED global.db, which a concurrently
-        // running test can rewrite — the .mcp.json command would then differ
-        // between the two runs and the second install would report a change.
-        std::env::set_var("CONA_EXE", "/usr/local/bin/cona");
         // first install writes the guide block → changed
         let first =
             cmd_agents_q(&dir, "install", &[AgentName::Claude], false, false, true).unwrap();
         assert!(first, "first install must report a change");
-        // second install with identical baked content → no change, quiet returns false
-        let second =
-            cmd_agents_q(&dir, "install", &[AgentName::Claude], false, false, true).unwrap();
+        // Second install with identical baked content → no change. The MCP
+        // entry bakes in `agent_exe()`, which reads `install_path` from the
+        // SHARED global.db that a concurrently running lib test may rewrite
+        // between the two calls; that would flip the entry's command and make
+        // this a change for a reason the test isn't about. Re-run until the
+        // resolved exe holds still across the pair.
+        let mut second = true;
+        for _ in 0..5 {
+            let before = agent_exe();
+            second =
+                cmd_agents_q(&dir, "install", &[AgentName::Claude], false, false, true).unwrap();
+            if agent_exe() == before {
+                break;
+            }
+        }
         assert!(!second, "re-install of current config must be a no-op");
         let _ = std::fs::remove_dir_all(&dir);
     }

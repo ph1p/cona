@@ -141,7 +141,7 @@ config exists:
 Entries are written with the absolute binary path, are idempotent, and leave
 foreign servers in the same file untouched; `cona agents remove` strips them
 again. `cona agents status` has an `mcp` column, `cona doctor` lists every
-registered target. Set `CONA_EXE` to pin the command spelling that gets written.
+registered target.
 
 To wire it by hand instead:
 

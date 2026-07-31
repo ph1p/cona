@@ -302,9 +302,18 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           via serde_json); AgentName ValueEnum + AgentSel::want =
                           THE selection rule: named/--all override detection,
                           bare install autodetects, bare uninstall cleans all.
-                          AgentName::config_paths = THE per-scope file list an
-                          agent's integration lives in (Pi empty at project
-                          scope); installed() probes it for real markers/skill/
+                          TWO per-scope path lists, deliberately separate:
+                          config_paths = the guide/skill/hook targets a scope can
+                          ACT on (Pi empty at project scope) → agents_in_scope +
+                          the n/a cells; footprint_paths = those PLUS the MCP
+                          entry = "is cona installed here?" → installed() /
+                          project_has_cona / the ✓ cells. Merging them would let
+                          an MCP-only scope be offered in the picker and then
+                          receive nothing. mcp_registrations = THE single
+                          traversal of ALL × scopes × mcp_path, shared by
+                          cmd_agents_status (folds to one cell) and doctor
+                          (prints registered rows).
+                          installed() probes for real markers/skill/
                           hook — feeds cmd_agents_status (ONE row per agent:
                           name + ✓on/–off/n-a per scope + desc; pad BEFORE
                           coloring or ANSI breaks every column) and
@@ -330,8 +339,14 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           block (no toml crate dep) — replaced in place, so a
                           moved binary self-heals; backslashes/quotes escaped
                           for Windows paths. registered() = the Presence probe
-                          config_paths uses, so an MCP-only scope still counts
-                          as installed
+                          footprint_paths uses, so an MCP-only scope still counts
+                          as installed — a SUBSTRING probe, not a parse, because
+                          it sits on the auto-refresh hot path (same trade as
+                          Presence::Needle); the writers still parse properly.
+                          Install/uninstall drive it from ONE loop over
+                          AgentName::ALL in cmd_agents_q, never a call per agent
+                          block — a new agent's mcp_path arm is then the whole
+                          change
                  doctor.rs cmd_doctor: binary/PATH, hooks+skill (global+project),
                           index, per-scope config freshness, helper status,
                           mcp-server registration (informational, never an issue
@@ -405,9 +420,7 @@ Registration into harness configs is NOT here — it is install-time
 `cona setup` always indexes + (project scope) installs git hooks, then picks
 agents. Installing an agent also registers the MCP server wherever that
 harness keeps its config (mcp_config.rs) — written with the ABSOLUTE binary
-path from agent_exe() (`CONA_EXE` overrides; it also keeps tests off the
-shared global.db `install_path`, which other commands legitimately rewrite).
-Skipped when the parent dir does not exist (except the project root), and a
+path from agent_exe(). Skipped when the parent dir does not exist (except the project root), and a
 failure there warns instead of aborting the install. Interactive = no `-y`, no explicit scope arg, TTY → pick_agents shows
 ONE ui::multiselect across BOTH scopes (PROJECT + HOME sections via Row::Header,
 items pre-checked by `installed() || detected()` — reality first, detection only
