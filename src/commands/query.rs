@@ -2,8 +2,8 @@
 //! context, diff, grep.
 
 use super::{
-    jout, locate_fresh, path_ok, push_numbered_lines, render_symbol_body, scan_ref_sites, BudgetOut,
-    ENCLOSING_SYMBOL_SQL,
+    jout, locate_fresh, push_numbered_lines, render_symbol_body, scan_ref_sites, BudgetOut,
+    PathFilter, ENCLOSING_SYMBOL_SQL,
 };
 use crate::{db, diffmap, entries, fuzzy, gitmap, graph, indexer, lang, resolve};
 use anyhow::{bail, Result};
@@ -12,11 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub fn cmd_tree(
+    root: &Path,
     conn: &Connection,
     budget: i64,
     path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
+    let pf = PathFilter::new(root, path_filter);
     let mut stmt = conn.prepare(
         "SELECT f.path, s.kind, s.qualified, s.start_line, s.end_line, f.size
          FROM symbols s JOIN files f ON f.id = s.file_id
@@ -43,7 +45,7 @@ pub fn cmd_tree(
         let mut current = "";
         let mut items = Vec::new();
         for (p, k, q, s, e, size) in &rows {
-            if path_filter.is_some_and(|pf| !p.starts_with(pf)) {
+            if !pf.ok(p) {
                 continue;
             }
             if p.as_str() != current {
@@ -60,10 +62,8 @@ pub fn cmd_tree(
     let mut bo = BudgetOut::new(String::new(), budget);
     let mut current = String::new();
     for (path, kind, name, s, e, size) in rows {
-        if let Some(pf) = path_filter {
-            if !path.starts_with(pf) {
-                continue;
-            }
+        if !pf.ok(&path) {
+            continue;
         }
         let mut chunk = String::new();
         let new_file = path != current;
@@ -97,6 +97,7 @@ pub fn cmd_tree_rank(
     path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
+    let pf = PathFilter::new(root, path_filter);
     struct RankSym {
         path: String,
         kind: String,
@@ -149,7 +150,7 @@ pub fn cmd_tree_rank(
 
     let mut ranked: Vec<(i64, &RankSym)> = syms
         .iter()
-        .filter(|sym| path_filter.is_none_or(|pf| sym.path.starts_with(pf)))
+        .filter(|sym| pf.ok(&sym.path))
         // one-line `mod x;` declarations soak up their module's whole fan-in
         // but point at no code — orientation noise, drop them from the ranking
         .filter(|sym| !(sym.kind == "mod" && sym.start == sym.end))
@@ -218,11 +219,11 @@ pub fn cmd_tree_rank(
 }
 
 pub fn cmd_outline(
+    root: &Path,
     conn: &Connection,
     file: &str,
     show_sig: bool,
     json: bool,
-    root: Option<&Path>,
 ) -> Result<(String, i64)> {
     // suffix match only at a path-separator boundary (`db.rs` must not pull in
     // `gitdb.rs`), with LIKE metacharacters escaped so `_`/`%` in names stay literal
@@ -253,7 +254,9 @@ pub fn cmd_outline(
     if rows.is_empty() {
         // A directory is a natural thing to hand `outline`; answer it with the
         // command that does cover directories instead of erroring out.
-        let is_dir = root.is_some_and(|r| r.join(file).is_dir())
+        // On disk normally; the index probe still answers for a directory that
+        // was indexed but has since been removed from the working tree.
+        let is_dir = root.join(file).is_dir()
             || conn
                 .query_row(
                     "SELECT 1 FROM files WHERE path LIKE ?1 ESCAPE '\\' LIMIT 1",
@@ -312,6 +315,7 @@ pub fn cmd_find(
     path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
+    let pf = PathFilter::new(root, path_filter);
     let kind_clause = kind.map(|_| "AND s.kind = ?4").unwrap_or("");
     let sql = format!(
         "SELECT f.path, s.kind, s.qualified, s.start_line, s.end_line, s.signature, f.size,
@@ -325,8 +329,10 @@ pub fn cmd_find(
     // `--path` is applied in Rust (below), so the SQL LIMIT must not clip
     // in-scope rows before that filter runs — over-fetch when scoped, then
     // truncate to `limit` afterwards.
-    let sql_limit = if path_filter.is_some() {
-        limit.saturating_mul(20).max(1000)
+    // Clamped both ways: a floor so a small --limit still sees enough rows to
+    // filter, a ceiling so a large one can't scale the fetch without bound.
+    let sql_limit = if pf.is_scoped() {
+        limit.saturating_mul(20).clamp(1000, 5000)
     } else {
         limit
     };
@@ -352,16 +358,18 @@ pub fn cmd_find(
             .flatten()
             .collect()
     };
-    if path_filter.is_some() {
-        let matched_out_of_scope = !rows.is_empty();
-        rows.retain(|(p, ..)| path_ok(root, p, path_filter));
+    if pf.is_scoped() {
+        let had_rows = !rows.is_empty();
+        rows.retain(|(p, ..)| pf.ok(p));
         rows.truncate(limit.max(0) as usize);
         // Distinguish "name exists, just not here" from "no such name" — the
         // fuzzy fallback would misleadingly answer the second question.
-        if rows.is_empty() && matched_out_of_scope {
-            let pf = path_filter.unwrap_or("");
+        if rows.is_empty() && had_rows {
+            let scope = pf.as_str();
             return Ok((
-                format!("no '{name}' under '{pf}' — it exists elsewhere; retry without --path\n"),
+                format!(
+                    "no '{name}' under '{scope}' — it exists elsewhere; retry without --path\n"
+                ),
                 0,
             ));
         }
@@ -489,9 +497,13 @@ pub fn cmd_show(
     all: bool,
 ) -> Result<(String, i64)> {
     // A path handed to `show` means "map this file" — answer with the outline
-    // instead of failing on a symbol name that was never a symbol.
-    if looks_like_path(symbol) && root.join(symbol).is_file() {
-        return cmd_outline(conn, symbol, sig, json, Some(root));
+    // instead of failing on a symbol name that was never a symbol. Directories
+    // route here too, so they reach cmd_outline's `tree --path` redirect rather
+    // than dead-ending in the symbol resolver. The filesystem is the authority;
+    // `split_locator` only keeps a `file.rs:Name` locator (which addresses a
+    // symbol) from being mistaken for a path.
+    if super::split_locator(symbol).is_none() && root.join(symbol).exists() {
+        return cmd_outline(root, conn, symbol, sig, json);
     }
     if all {
         let cands = super::locate_all(conn, symbol, kind)?;
@@ -517,17 +529,6 @@ pub fn cmd_show(
         }
     }
     show_one(root, conn, symbol, context, kind, sig, json, true)
-}
-
-/// True when the argument reads as a bare file path rather than a symbol name.
-/// A `path:Name` locator is NOT a path — that form addresses a symbol, and
-/// `locate_symbol_kind` already handles it. A trailing `:` colon is the only
-/// thing that distinguishes them, so check for it before anything else.
-fn looks_like_path(arg: &str) -> bool {
-    let is_locator = arg
-        .rsplit_once(':')
-        .is_some_and(|(f, n)| f.contains('.') && !n.is_empty() && !n.contains('/'));
-    !is_locator && (arg.contains('/') || arg.contains('.'))
 }
 
 fn show_one(
@@ -1155,14 +1156,17 @@ pub fn cmd_grep(
     path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
+    let pf = PathFilter::new(root, path_filter);
     let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let mut files: Vec<String> = stmt.query_map([], |r| r.get(0))?.flatten().collect();
     // rg (or grep) prefilters the candidate files far faster than reading
     // everything in-process; on any failure we fall back to the full scan.
-    if let Some(candidates) = grep_prefilter(root, pattern, ignore_case) {
+    // A directory scope is handed to rg as its search root, so a scoped query
+    // walks that subtree instead of the whole repo.
+    if let Some(candidates) = grep_prefilter(root, pattern, ignore_case, pf.search_root()) {
         files.retain(|f| candidates.contains(f));
     }
-    files.retain(|f| path_ok(root, f, path_filter));
+    files.retain(|f| pf.ok(f));
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     let needle = if ignore_case {
         pattern.to_lowercase()
@@ -1275,10 +1279,14 @@ fn regexish_literal(pattern: &str) -> Option<String> {
 /// Fixed-string list of files containing `pattern`, via ripgrep when
 /// installed, system grep as fallback. `None` = no prefilter available
 /// (tool missing or errored) — caller scans everything, fail-open.
+/// `scope` (a repo-relative directory) becomes the search root, so a scoped
+/// query makes rg walk only that subtree. Hits come back relative to it, so the
+/// scope is prefixed again to keep every path repo-relative.
 pub(super) fn grep_prefilter(
     root: &Path,
     pattern: &str,
     ignore_case: bool,
+    scope: Option<&str>,
 ) -> Option<HashSet<String>> {
     let attempts: [(&str, Vec<&str>); 2] = [
         (
@@ -1291,7 +1299,8 @@ pub(super) fn grep_prefilter(
         if ignore_case {
             args.push("-i");
         }
-        args.extend(["--", pattern, "."]);
+        let search_dir = scope.unwrap_or(".");
+        args.extend(["--", pattern, search_dir]);
         let out = match std::process::Command::new(bin)
             .args(&args)
             .current_dir(root)

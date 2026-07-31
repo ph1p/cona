@@ -227,14 +227,14 @@ fn mcp_call(
         "outline" => {
             let f = sarg("file")?;
             let sig = args.get("sig").and_then(|v| v.as_bool()).unwrap_or(false);
-            let (o, b) = cmd_outline(conn, f, sig, false, Some(root))?;
+            let (o, b) = cmd_outline(root, conn, f, sig, false)?;
             (o, b, f.to_string())
         }
         "tree" => {
             let (o, b) = if flag("rank") {
                 cmd_tree_rank(root, conn, defaults::TREE_BUDGET, opt("path"), false)?
             } else {
-                cmd_tree(conn, defaults::TREE_BUDGET, opt("path"), false)?
+                cmd_tree(root, conn, defaults::TREE_BUDGET, opt("path"), false)?
             };
             (o, b, opt("path").unwrap_or("").to_string())
         }
