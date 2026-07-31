@@ -53,6 +53,9 @@ struct Cli {
     /// Output machine-readable JSON where supported
     #[arg(long, global = true)]
     json: bool,
+    /// Inspect an existing index without changing code, indexes, or usage statistics
+    #[arg(long, global = true)]
+    read_only: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -707,19 +710,30 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if cli.read_only {
+        db::set_read_only(true);
+        if !read_only_command(&cli.cmd) {
+            anyhow::bail!(
+                "`--read-only` only permits navigation and inspection commands; run without it to modify code, indexes, configuration, or statistics"
+            );
+        }
+    }
     let root = db::project_root()?;
     let t0 = Instant::now();
 
     // Auto-update/tidy runs before every command except the install-lifecycle
     // ones (they manage the binary themselves) and the hook (latency-sensitive).
-    if !matches!(
-        &cli.cmd,
-        Cmd::Maint(Maint::Install(_) | Maint::Upgrade(_) | Maint::Uninstall(_) | Maint::Hook(_))
-            | Cmd::InstallFlat(_)
-            | Cmd::UpgradeFlat(_)
-            | Cmd::UninstallFlat(_)
-            | Cmd::HookFlat(_)
-    ) {
+    if !cli.read_only
+        && !matches!(
+            &cli.cmd,
+            Cmd::Maint(
+                Maint::Install(_) | Maint::Upgrade(_) | Maint::Uninstall(_) | Maint::Hook(_)
+            ) | Cmd::InstallFlat(_)
+                | Cmd::UpgradeFlat(_)
+                | Cmd::UninstallFlat(_)
+                | Cmd::HookFlat(_)
+        )
+    {
         install::maybe_auto_update(&root);
         db::auto_tidy();
     }
@@ -829,11 +843,13 @@ fn run() -> Result<()> {
                     &root,
                     &conn,
                     symbol,
-                    *context,
-                    kind.as_deref(),
-                    *sig,
+                    ShowOpts {
+                        context: *context,
+                        kind: kind.as_deref(),
+                        sig: *sig,
+                        all: *all,
+                    },
                     cli.json,
-                    *all,
                 ) {
                     Ok((o, b)) => {
                         if i > 0 && !cli.json {
@@ -895,10 +911,12 @@ fn run() -> Result<()> {
                 &root,
                 &conn,
                 pattern,
-                *ignore_case,
-                *regex,
-                *limit,
-                path.as_deref(),
+                GrepOpts {
+                    ignore_case: *ignore_case,
+                    regex: *regex,
+                    limit: *limit,
+                    path: path.as_deref(),
+                },
                 cli.json,
             )?;
             print!("{out}");
@@ -1245,6 +1263,39 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The command-level guard for `--read-only`. The database layer independently
+/// opens SQLite read-only and suppresses telemetry, while this protects source
+/// files and integration configuration from write-capable subcommands.
+fn read_only_command(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::Nav(_)
+            | Cmd::Inspect(_)
+            | Cmd::History(_)
+            | Cmd::Edit(EditCmd::Check(_))
+            | Cmd::Tree(_)
+            | Cmd::Outline(_)
+            | Cmd::Find(_)
+            | Cmd::Show(_)
+            | Cmd::Refs(_)
+            | Cmd::Grep(_)
+            | Cmd::ContextFlat(_)
+            | Cmd::DiffFlat(_)
+            | Cmd::ImpactFlat(_)
+            | Cmd::ShapeFlat(_)
+            | Cmd::DepsFlat(_)
+            | Cmd::EntriesFlat(_)
+            | Cmd::TestsFlat(_)
+            | Cmd::CallersFlat(_)
+            | Cmd::CalleesFlat(_)
+            | Cmd::PathFlat(_)
+            | Cmd::CheckFlat(_)
+            | Cmd::BlameFlat(_)
+            | Cmd::HotFlat(_)
+            | Cmd::CouplingFlat(_)
+    )
 }
 
 /// Parse an "S-E" line range (1-based, inclusive) for `edit --range`.

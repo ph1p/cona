@@ -3,7 +3,7 @@
 
 use super::{
     jout, locate_fresh, push_numbered_lines, render_symbol_body, scan_ref_sites, BudgetOut,
-    PathFilter, ENCLOSING_SYMBOL_SQL,
+    GrepOpts, PathFilter, ShowOpts, ENCLOSING_SYMBOL_SQL,
 };
 use crate::{db, diffmap, entries, fuzzy, gitmap, graph, indexer, lang, resolve};
 use anyhow::{anyhow, bail, Result};
@@ -218,6 +218,9 @@ pub fn cmd_tree_rank(
     Ok((out, baseline))
 }
 
+/// One outline row: `(path, kind, qualified, start, end, signature, file_size)`.
+type OutlineRow = (String, String, String, i64, i64, String, i64);
+
 pub fn cmd_outline(
     root: &Path,
     conn: &Connection,
@@ -237,20 +240,25 @@ pub fn cmd_outline(
          WHERE f.path = ?1 OR f.path LIKE ?2 ESCAPE '\\'
          ORDER BY f.path, s.start_line",
     )?;
-    let rows: Vec<(String, String, String, i64, i64, String, i64)> = stmt
-        .query_map(rusqlite::params![file, format!("%/{escaped}")], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })?
-        .flatten()
-        .collect();
+    // One projection, used again after a refresh replaces the rows below.
+    let like = format!("%/{escaped}");
+    let mut fetch = || -> Result<Vec<OutlineRow>> {
+        Ok(stmt
+            .query_map(rusqlite::params![file, like], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })?
+            .flatten()
+            .collect())
+    };
+    let rows = fetch()?;
     if rows.is_empty() {
         // A directory is a natural thing to hand `outline`; answer it with the
         // command that does cover directories instead of erroring out.
@@ -279,11 +287,25 @@ pub fn cmd_outline(
         }
     }
     let baseline = db::est_tokens(bytes as usize);
+    // Every line range below comes from the index, so the matched files must be
+    // refreshed before they are printed (invariant 2) — an outline is exactly the
+    // map an agent uses to pick its next `show`, and stale ranges send it to the
+    // wrong lines. In read-only mode the refresh cannot happen, so name the stale
+    // files instead of presenting their old ranges as current.
+    let refreshed = indexer::refresh_files(root, conn, rows.iter().map(|(p, ..)| p.as_str()));
+    let stale = refreshed.stale;
+    // Re-read only when a refresh actually wrote — otherwise the rows above are
+    // still current and a second identical query is pure waste.
+    let rows = if refreshed.any_refreshed {
+        fetch()?
+    } else {
+        rows
+    };
     if json {
         let items: Vec<_> = rows
             .iter()
             .map(|(p, k, q, s, e, sig, _)| {
-                serde_json::json!({"file": p, "kind": k, "symbol": q, "start": s, "end": e, "sig": sig})
+                serde_json::json!({"file": p, "kind": k, "symbol": q, "start": s, "end": e, "sig": sig, "stale": stale.contains(p)})
             })
             .collect();
         return jout(&items, baseline);
@@ -292,7 +314,11 @@ pub fn cmd_outline(
     let mut current = String::new();
     for (path, kind, name, s, e, sig, _) in rows {
         if path != current {
-            out.push_str(&format!("{path}\n"));
+            if stale.contains(&path) {
+                out.push_str(&format!("{path}  (stale — file changed since indexing)\n"));
+            } else {
+                out.push_str(&format!("{path}\n"));
+            }
             current = path;
         }
         let depth = name.matches('.').count();
@@ -490,12 +516,11 @@ pub fn cmd_show(
     root: &Path,
     conn: &Connection,
     symbol: &str,
-    context: usize,
-    kind: Option<&str>,
-    sig: bool,
+    opts: ShowOpts<'_>,
     json: bool,
-    all: bool,
 ) -> Result<(String, i64)> {
+    // `context` is not read here — it is `show_one`'s to apply, per candidate.
+    let ShowOpts { kind, sig, all, .. } = opts;
     // A path handed to `show` means "map this file" — answer with the outline
     // instead of failing on a symbol name that was never a symbol. Directories
     // route here too, so they reach cmd_outline's `tree --path` redirect rather
@@ -513,7 +538,7 @@ pub fn cmd_show(
             for (p, _, _, q) in &cands {
                 // address each candidate unambiguously by file:Name
                 let addr = format!("{p}:{}", db::name_tail(q));
-                match show_one(root, conn, &addr, context, kind, sig, false, false) {
+                match show_one(root, conn, &addr, opts, false, false) {
                     Ok((body, b)) => {
                         out.push_str(&body);
                         out.push('\n');
@@ -523,24 +548,28 @@ pub fn cmd_show(
                 }
             }
             if json {
-                return jout(&serde_json::json!({"symbol": symbol, "matches": cands.len(), "text": out}), baseline);
+                return jout(
+                    &serde_json::json!({"symbol": symbol, "matches": cands.len(), "text": out}),
+                    baseline,
+                );
             }
             return Ok((out, baseline));
         }
     }
-    show_one(root, conn, symbol, context, kind, sig, json, true)
+    show_one(root, conn, symbol, opts, json, true)
 }
 
 fn show_one(
     root: &Path,
     conn: &Connection,
     symbol: &str,
-    context: usize,
-    kind: Option<&str>,
-    sig: bool,
+    opts: ShowOpts<'_>,
     json: bool,
     disclose_others: bool,
 ) -> Result<(String, i64)> {
+    let ShowOpts {
+        context, kind, sig, ..
+    } = opts;
     let (path, s, e, q) = locate_fresh(root, conn, symbol, kind)?;
     // --sig: the signature is already in the index — print it without ever
     // reading the file body. The leanest possible peek (one line, not the span).
@@ -654,32 +683,39 @@ pub fn cmd_refs(
     // across visit calls, unlike a Vec<&str> of the lines)
     let mut cur_offsets: Vec<usize> = Vec::new();
     let mut cur_lns: Vec<usize> = Vec::new();
-    scan_ref_sites(root, conn, name, None, path_filter, |rel, ln, _, _, fsrc| {
-        if rel != cur_file {
-            if !cur_lns.is_empty() {
-                baseline += db::baseline_tokens(&cur_lens, &cur_lns);
+    scan_ref_sites(
+        root,
+        conn,
+        name,
+        None,
+        path_filter,
+        |rel, ln, _, _, fsrc| {
+            if rel != cur_file {
+                if !cur_lns.is_empty() {
+                    baseline += db::baseline_tokens(&cur_lens, &cur_lns);
+                }
+                cur_file = rel.to_string();
+                cur_lens = fsrc.lines().map(|l| l.len()).collect();
+                cur_offsets = std::iter::once(0)
+                    .chain(fsrc.match_indices('\n').map(|(i, _)| i + 1))
+                    .collect();
+                cur_lns.clear();
             }
-            cur_file = rel.to_string();
-            cur_lens = fsrc.lines().map(|l| l.len()).collect();
-            cur_offsets = std::iter::once(0)
-                .chain(fsrc.match_indices('\n').map(|(i, _)| i + 1))
-                .collect();
-            cur_lns.clear();
-        }
-        let ln = ln as usize;
-        cur_lns.push(ln);
-        let text = cur_offsets
-            .get(ln - 1)
-            .and_then(|&st| fsrc[st..].lines().next())
-            .unwrap_or("")
-            .trim();
-        hits.push((rel.to_string(), ln, text.to_string()));
-        if hits.len() >= limit {
-            truncated = true;
-            return false;
-        }
-        true
-    })?;
+            let ln = ln as usize;
+            cur_lns.push(ln);
+            let text = cur_offsets
+                .get(ln - 1)
+                .and_then(|&st| fsrc[st..].lines().next())
+                .unwrap_or("")
+                .trim();
+            hits.push((rel.to_string(), ln, text.to_string()));
+            if hits.len() >= limit {
+                truncated = true;
+                return false;
+            }
+            true
+        },
+    )?;
     if !cur_lns.is_empty() {
         baseline += db::baseline_tokens(&cur_lens, &cur_lns);
     }
@@ -1151,12 +1187,15 @@ pub fn cmd_grep(
     root: &Path,
     conn: &Connection,
     pattern: &str,
-    ignore_case: bool,
-    regex: bool,
-    limit: usize,
-    path_filter: Option<&str>,
+    opts: GrepOpts<'_>,
     json: bool,
 ) -> Result<(String, i64)> {
+    let GrepOpts {
+        ignore_case,
+        regex,
+        limit,
+        path: path_filter,
+    } = opts;
     let matcher = Matcher::new(pattern, ignore_case, regex)?;
     let pf = PathFilter::new(root, path_filter);
     let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
@@ -1260,7 +1299,10 @@ pub fn cmd_grep(
 /// and must not be reinterpreted. `--regex` opts in.
 pub(super) enum Matcher {
     /// Pre-lowercased when `ignore_case`, so the needle isn't rebuilt per line.
-    Literal { needle: String, ignore_case: bool },
+    Literal {
+        needle: String,
+        ignore_case: bool,
+    },
     Regex(regex::Regex),
 }
 

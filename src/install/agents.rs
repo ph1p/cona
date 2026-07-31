@@ -19,7 +19,10 @@ Coarse → fine: `cona tree --rank` (orient) → `cona outline <file>` (map a fi
 `cona show <Sym>` (read one symbol) → `cona edit <Sym>` (syntax-verified write).
 
 `<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name`. Index auto-refreshes;
-`cona index` (~1s) if a repo isn't indexed yet.
+`cona index` (~1s) if a repo isn't indexed yet. In a sandbox where `~/.cona`
+is not writable, cona falls back to temporary storage; set `CONA_DATA_DIR` when
+you need a persistent index. Use `--read-only` to inspect an existing index
+without writing code, indexes, or usage stats.
 
 Too many hits? `--path <dir>` scopes `find`/`refs`/`grep`/`tree` to a subtree.
 Ambiguous name? `cona show <Sym> --all` prints every definition instead of

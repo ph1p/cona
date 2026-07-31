@@ -1,5 +1,5 @@
 use crate::{db, lang};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use ignore::WalkBuilder;
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
@@ -336,8 +336,65 @@ pub fn ensure_fresh(root: &Path, conn: &Connection, rel: &str) -> bool {
     false
 }
 
+/// Outcome of refreshing a set of files: which ones could NOT be brought up to
+/// date (read-only mode, vanished mid-scan), and whether any refresh actually
+/// wrote — the second half tells a caller whether rows it already fetched are
+/// now invalid and must be re-read.
+pub struct Refreshed {
+    pub stale: Vec<String>,
+    pub any_refreshed: bool,
+}
+
+/// Refresh every path in `paths` and report what stayed stale — THE shared
+/// "bring these files up to date before printing their line ranges" step
+/// (invariant 2) for commands that render index-derived ranges for a whole file
+/// set, rather than one symbol (`locate_fresh`) or one file (`ensure_fresh`).
+///
+/// Stats each path once: `ensure_fresh` re-checks staleness internally, so
+/// pairing it with an outer `is_stale` guard would double the syscalls — and its
+/// `false` means both "was fresh" and "refresh failed", which callers must not
+/// conflate. Duplicate paths are skipped, so a path-ordered row set can be fed
+/// in directly.
+pub fn refresh_files<'a>(
+    root: &Path,
+    conn: &Connection,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Refreshed {
+    let mut out = Refreshed {
+        stale: Vec::new(),
+        any_refreshed: false,
+    };
+    let mut seen = "";
+    for path in paths {
+        if path == seen {
+            continue;
+        }
+        seen = path;
+        if !is_stale(root, conn, path) {
+            continue;
+        }
+        if reindex_file(root, conn, path).is_ok() {
+            out.any_refreshed = true;
+        } else {
+            out.stale.push(path.to_string());
+        }
+    }
+    out
+}
+
 /// Re-index a single file after an edit.
+///
+/// Read-only mode cannot refresh the index, and must not pretend otherwise: the
+/// connection is opened `SQLITE_OPEN_READ_ONLY`, so the write below would fail
+/// with rusqlite's opaque "attempt to write a readonly database". Refusing here
+/// — at the ONE write path both `ensure_fresh` and `locate_fresh` funnel
+/// through — keeps invariant 2 intact: a caller either gets line numbers that
+/// match the live file, or an error naming the stale file. It never gets stale
+/// ranges dressed up as fresh.
 pub fn reindex_file(root: &Path, conn: &Connection, rel: &str) -> Result<usize> {
+    if db::is_read_only() {
+        bail!("{rel} changed since it was indexed; cannot refresh in read-only mode (run `cona index` from a writable environment)");
+    }
     let abs = root.join(rel);
     let Some(language) = lang::detect_lang(rel) else {
         return Ok(0);

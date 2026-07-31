@@ -1,6 +1,22 @@
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
+
+static READ_ONLY: AtomicBool = AtomicBool::new(false);
+static EPHEMERAL_DATA_DIR_NOTICE: Once = Once::new();
+
+/// Enable the process-wide inspection-only mode used by the CLI's
+/// `--read-only` flag. This deliberately applies to the database layer too,
+/// so a future command cannot accidentally write telemetry or schema changes.
+pub fn set_read_only(enabled: bool) {
+    READ_ONLY.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_read_only() -> bool {
+    READ_ONLY.load(Ordering::Relaxed)
+}
 
 /// Find the project root: nearest ancestor containing .git, else cwd.
 /// Nearest ancestor of `start` (inclusive) containing a `.git`, else `start`
@@ -24,16 +40,97 @@ pub fn project_root() -> Result<PathBuf> {
     Ok(git_root_from(&std::env::current_dir()?))
 }
 
+/// Resolved once per process. `data_dir` is on the hook hot path and reached
+/// several times per command (global db, project db, `project_db_path`), and
+/// resolving it writes: `ensure_writable_data_dir` does mkdir + create + unlink.
+/// Repeating that probe per call turns the documented "single stat, no DB open"
+/// hook check into a dozen syscalls. Caching is sound because neither input
+/// changes mid-process: `CONA_DATA_DIR` is read from the environment, and
+/// `--read-only` is set before any storage access.
+static DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 pub fn data_dir() -> Result<PathBuf> {
-    // CONA_DATA_DIR overrides ~/.cona (test isolation, throwaway envs)
-    let d = match std::env::var_os("CONA_DATA_DIR") {
-        Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => dirs::home_dir()
-            .ok_or_else(|| anyhow!("no home dir"))?
-            .join(".cona"),
-    };
+    if let Some(d) = DATA_DIR.get() {
+        return Ok(d.clone());
+    }
+    let d = resolve_data_dir()?;
+    // A racing thread may win; either value is equivalent, so keep the stored one.
+    Ok(DATA_DIR.get_or_init(|| d).clone())
+}
+
+/// The automatic sandbox fallback location — THE one definition. A read-only
+/// lookup that disagrees with where the fallback index was written reports "no
+/// existing index", indistinguishable from an unindexed repo, so the path must
+/// not be spelled out per call site.
+pub fn ephemeral_data_dir() -> PathBuf {
+    std::env::temp_dir().join("cona")
+}
+
+fn resolve_data_dir() -> Result<PathBuf> {
+    // CONA_DATA_DIR is explicit: never silently redirect a user's chosen
+    // storage location. The fallback below is only for the default ~/.cona,
+    // which agent sandboxes commonly make read-only.
+    if let Some(v) = std::env::var_os("CONA_DATA_DIR").filter(|v| !v.is_empty()) {
+        let d = PathBuf::from(v);
+        if !is_read_only() {
+            ensure_writable_data_dir(&d)?;
+        }
+        return Ok(d);
+    }
+
+    let preferred = dirs::home_dir()
+        .ok_or_else(|| anyhow!("no home dir; set CONA_DATA_DIR to a writable directory"))?
+        .join(".cona");
+    if is_read_only() {
+        // In read-only mode never probe by creating directories. A readable
+        // global database is the durable-storage marker: merely seeing the
+        // ~/.cona directory is not enough, because sandboxes often expose the
+        // directory but deny database access inside it.
+        return Ok(
+            if std::fs::File::open(preferred.join("global.db")).is_ok() {
+                preferred
+            } else {
+                ephemeral_data_dir()
+            },
+        );
+    }
+
+    match ensure_writable_data_dir(&preferred) {
+        Ok(()) => Ok(preferred),
+        Err(err)
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            let fallback = ephemeral_data_dir();
+            ensure_writable_data_dir(&fallback)?;
+            EPHEMERAL_DATA_DIR_NOTICE.call_once(|| {
+                    eprintln!(
+                        "warning: default cona storage is unavailable; using ephemeral {} (set CONA_DATA_DIR for persistent indexes)",
+                        fallback.display()
+                    );
+            });
+            Ok(fallback)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Creating a directory alone is not enough to establish that SQLite can put
+/// a database there: a sandbox may expose an existing `~/.cona` directory but
+/// deny new files inside it. A short-lived, PID-scoped probe catches that case
+/// before a navigation command reaches rusqlite's opaque open error.
+fn ensure_writable_data_dir(d: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(d.join("projects"))?;
-    Ok(d)
+    let probe = d.join(format!(".write-probe-{}", std::process::id()));
+    let _file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)?;
+    drop(_file);
+    let _ = std::fs::remove_file(probe);
+    Ok(())
 }
 
 /// True for paths under the OS temp roots — safe to auto-purge from the
@@ -73,6 +170,12 @@ pub fn open_project_db(root: &Path) -> Result<Connection> {
     let db_path = data_dir()?
         .join("projects")
         .join(format!("{}.db", project_hash(root)));
+    if is_read_only() {
+        return Ok(Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?);
+    }
     let conn = Connection::open(db_path)?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
@@ -110,9 +213,37 @@ pub fn open_project_db(root: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Open an already-built project index without creating files or running
+/// migrations. Prefer durable storage, but also look in the automatic
+/// sandbox fallback so `cona --read-only` can inspect an index created earlier
+/// in the same sandbox.
+pub fn open_existing_project_db(root: &Path) -> Result<Connection> {
+    let rel = PathBuf::from("projects").join(format!("{}.db", project_hash(root)));
+    [project_db_path(root), ephemeral_data_dir().join(rel)]
+        .into_iter()
+        .find_map(|path| {
+            let conn =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .ok()?;
+            // A file can exist and still be unusable (truncated, wrong schema);
+            // probing `files` is what distinguishes a real index.
+            conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0))
+                .ok()?;
+            Some(conn)
+        })
+        .ok_or_else(|| anyhow!("no existing project index"))
+}
+
 /// Open (and init) the global database (project registry + usage stats).
 pub fn open_global_db() -> Result<Connection> {
-    let conn = Connection::open(data_dir()?.join("global.db"))?;
+    let path = data_dir()?.join("global.db");
+    if is_read_only() {
+        return Ok(Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?);
+    }
+    let conn = Connection::open(path)?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
@@ -376,15 +507,25 @@ pub fn is_maintenance_cmd(cmd: &str) -> bool {
 
 /// Whether `root` already has a populated index. Never creates a DB —
 /// safe to call from hooks on arbitrary directories.
+///
+/// Routes through the same read-only-aware open as `open_indexed`: gating on
+/// `project_db_path` alone would answer "not indexed" for an index sitting in
+/// the sandbox fallback, which `open_indexed` finds and would then happily
+/// query — two callers disagreeing about whether the same repo is indexed.
 pub fn has_index(root: &Path) -> bool {
-    project_db_path(root).exists()
-        && open_project_db(root)
-            .and_then(|c| {
-                Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM files)", [], |r| {
-                    r.get::<_, bool>(0)
-                })?)
-            })
-            .unwrap_or(false)
+    let conn = if is_read_only() {
+        open_existing_project_db(root)
+    } else if project_db_path(root).exists() {
+        open_project_db(root)
+    } else {
+        return false;
+    };
+    conn.and_then(|c| {
+        Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM files)", [], |r| {
+            r.get::<_, bool>(0)
+        })?)
+    })
+    .unwrap_or(false)
 }
 
 /// Path to a project's index database.
