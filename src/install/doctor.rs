@@ -133,6 +133,41 @@ pub fn cmd_doctor(project_root: &Path) -> Result<()> {
         }
     }
 
+    // --- MCP registration ---------------------------------------------------
+    // Informational, never an "issue": the MCP server is an optional second
+    // surface (the CLI + skill work without it), and most harnesses only get
+    // it once their config directory exists.
+    {
+        use super::agents::AgentName;
+        println!("\n{}", ui::heading("mcp server (cona mcp)"));
+        let mut any = false;
+        for a in AgentName::ALL {
+            for (scope, global) in [("project", false), ("global", true)] {
+                let Some(path) = a.mcp_path(project_root, &home, global) else {
+                    continue;
+                };
+                if !super::mcp_config::registered(&path) {
+                    continue;
+                }
+                any = true;
+                println!(
+                    "  {}",
+                    ui::ok(&format!(
+                        "{} ({scope}): {}",
+                        a.slug(),
+                        super::short_path(&path)
+                    ))
+                );
+            }
+        }
+        if !any {
+            println!(
+                "  {}",
+                ui::dim("not registered anywhere — `cona agents install` adds it where a harness config exists")
+            );
+        }
+    }
+
     // --- index --- (diagnostics must not CREATE a project DB as a side effect
     // — a stray empty DB would flip the hook from Nudge to Redirect here)
     let (files, symbols) = if db::project_db_path(project_root).exists() {
