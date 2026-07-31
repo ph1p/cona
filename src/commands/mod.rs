@@ -179,11 +179,48 @@ pub mod defaults {
     pub const PATH_DEPTH: usize = 8;
 }
 
+/// THE `--path` policy for every query command (tree/find/refs/grep/…).
+///
+/// A filter matches when it is the file itself, a parent directory of it, or a
+/// literal prefix. The directory and prefix readings genuinely conflict:
+/// `--path src/commands` must EXCLUDE `src/commands_old.rs`, while
+/// `--path src/comm` must INCLUDE `src/commands/query.rs` — same string shape,
+/// opposite answers. No string rule separates them, so `dir_filter` decides,
+/// and it is the caller's job to say whether the filter names a real directory.
+/// When it does, only the `/`-boundary reading applies (no leaking into a
+/// same-prefixed sibling); when it does not, the filter is a partial name and
+/// the prefix reading applies.
+pub(crate) fn path_matches_dir(rel: &str, filter: &str, dir_filter: bool) -> bool {
+    let f = filter.trim_end_matches('/');
+    if rel == f || rel.starts_with(&format!("{f}/")) {
+        return true;
+    }
+    // An explicit trailing slash, or a filter that really is a directory,
+    // means directory-only — never widen back to a prefix match.
+    if dir_filter || filter.ends_with('/') {
+        return false;
+    }
+    rel.starts_with(filter)
+}
+
+/// `path_matches_dir` with the directory question answered by the filesystem,
+/// relative to `root`. Used by every command that takes `--path`.
+pub(crate) fn path_matches_in(root: &Path, rel: &str, filter: &str) -> bool {
+    let is_dir = root.join(filter.trim_end_matches('/')).is_dir();
+    path_matches_dir(rel, filter, is_dir)
+}
+
+/// `path_matches_in` lifted over an optional filter — `None` matches everything.
+pub(crate) fn path_ok(root: &Path, rel: &str, filter: Option<&str>) -> bool {
+    filter.is_none_or(|f| path_matches_in(root, rel, f))
+}
+
 pub(crate) fn scan_ref_sites(
     root: &Path,
     conn: &Connection,
     name: &str,
     preloaded: Option<(&str, &str)>,
+    path_filter: Option<&str>,
     mut visit: impl FnMut(&str, i64, &str, &str, &str) -> bool,
 ) -> Result<()> {
     let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
@@ -193,6 +230,12 @@ pub(crate) fn scan_ref_sites(
     // file — it may hold the definition/refs the caller already read.
     if let Some(candidates) = query::grep_prefilter(root, name, false) {
         files.retain(|f| candidates.contains(f) || preloaded.map(|(p, _)| p == f).unwrap_or(false));
+    }
+    // `--path` scoping applies AFTER the content prefilter and overrides the
+    // preloaded exemption — an explicit scope means the caller does not want
+    // out-of-scope files, defining file included.
+    if path_filter.is_some() {
+        files.retain(|f| path_ok(root, f, path_filter));
     }
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     'files: for rel in &files {
@@ -249,14 +292,54 @@ pub(crate) fn locate_fresh(
     Ok(located)
 }
 
-/// Like `locate_symbol`, optionally narrowed to a kind (`--kind struct`
-/// resolves the classic same-name struct/impl ambiguity). Still errors on
-/// ambiguity WITHIN the narrowed pool — invariant 4 stands.
-fn locate_symbol_kind(
+/// Every candidate for `symbol`, in the same priority order the ambiguity
+/// error lists them. This does NOT pick a winner — callers that use it (`show
+/// --all`) render them all, so invariant 4 ("never silently picks") holds:
+/// nothing is chosen on the user's behalf, the ambiguity is simply answered
+/// in full instead of costing a round-trip.
+pub(crate) fn locate_all(
     conn: &Connection,
     symbol: &str,
     kind: Option<&str>,
-) -> Result<(String, i64, i64, String)> {
+) -> Result<Vec<(String, i64, i64, String)>> {
+    match locate_symbol_kind(conn, symbol, kind) {
+        Ok(one) => Ok(vec![one]),
+        Err(e) => {
+            let cands = locate_candidates(conn, symbol, kind)?;
+            if cands.len() > 1 {
+                Ok(cands)
+            } else {
+                Err(e) // genuinely not found — keep the original message
+            }
+        }
+    }
+}
+
+/// Like `locate_symbol`, optionally narrowed to a kind (`--kind struct`
+/// resolves the classic same-name struct/impl ambiguity). Still errors on
+/// ambiguity WITHIN the narrowed pool — invariant 4 stands.
+/// The candidate pool for `symbol` in priority order (exact-qualified first),
+/// after `path:Name` narrowing and `--kind`. Shared by the single-result
+/// resolver and `locate_all` so the two can never disagree about what the
+/// candidates are.
+fn locate_candidates(
+    conn: &Connection,
+    symbol: &str,
+    kind: Option<&str>,
+) -> Result<Vec<(String, i64, i64, String)>> {
+    let (rows, symbol) = locate_rows(conn, symbol, kind)?;
+    let exact: Vec<(String, i64, i64, String)> =
+        rows.iter().filter(|r| r.3 == symbol).cloned().collect();
+    Ok(if exact.is_empty() { rows } else { exact })
+}
+
+/// Raw candidate rows plus the bare symbol name after stripping a `path:`
+/// prefix — the shared lookup behind `locate_candidates`/`locate_symbol_kind`.
+fn locate_rows(
+    conn: &Connection,
+    symbol: &str,
+    kind: Option<&str>,
+) -> Result<(Vec<(String, i64, i64, String)>, String)> {
     // `path:Name` narrows to symbols in that file (exact path or `/`-guarded
     // suffix) — the escape hatch for same-named top-level symbols, and exactly
     // the shape the ambiguity listing below prints.
@@ -294,13 +377,16 @@ fn locate_symbol_kind(
             .unwrap_or_default();
         bail!("symbol '{symbol}'{hint} not found — try `cona find {symbol}`");
     }
-    // exact qualified matches take priority; only unambiguous if exactly one
-    let exact: Vec<&(String, i64, i64, String)> = rows.iter().filter(|r| r.3 == symbol).collect();
-    let pool: Vec<&(String, i64, i64, String)> = if exact.is_empty() {
-        rows.iter().collect()
-    } else {
-        exact
-    };
+    Ok((rows, symbol.to_string()))
+}
+
+fn locate_symbol_kind(
+    conn: &Connection,
+    symbol: &str,
+    kind: Option<&str>,
+) -> Result<(String, i64, i64, String)> {
+    let pool = locate_candidates(conn, symbol, kind)?;
+    let symbol = symbol.rsplit_once(':').map_or(symbol, |(_, n)| n);
     if pool.len() == 1 {
         return Ok(pool[0].clone());
     }
@@ -314,8 +400,48 @@ fn locate_symbol_kind(
         .map(|(p, _, _, q)| format!("{p}:{}", db::name_tail(q)))
         .unwrap_or_default();
     bail!(
-        "ambiguous '{symbol}' ({} matches) — qualify with Parent.Name, file (`{example}`) or --kind:\n{}",
+        "ambiguous '{symbol}' ({} matches) — qualify with Parent.Name, file (`{example}`), --kind, or show them all with --all:\n{}",
         pool.len(),
         opts.join("\n")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_filter_matches_file_dir_and_prefix() {
+        // exact file
+        assert!(path_matches_dir("src/db.rs", "src/db.rs", false));
+        // real directory, with and without a trailing slash
+        assert!(path_matches_dir("src/commands/query.rs", "src/commands", true));
+        assert!(path_matches_dir("src/commands/query.rs", "src/commands/", true));
+        // the directory itself
+        assert!(path_matches_dir("src/commands", "src/commands", true));
+        // a half-typed path is not a directory → prefix reading applies
+        assert!(path_matches_dir("src/commands/query.rs", "src/comm", false));
+        assert!(path_matches_dir("src/db.rs", "src/d", false));
+    }
+
+    #[test]
+    fn path_filter_respects_directory_boundary() {
+        // THE bug this policy exists to prevent: a filter naming a real
+        // directory must not leak into a sibling whose name merely starts with
+        // it. This is the no-slash form — the trailing-slash form below can be
+        // rejected lexically, so only this case pins the `dir_filter` rule.
+        assert!(!path_matches_dir("src/commands_old.rs", "src/commands", true));
+        assert!(!path_matches_dir("src/commands_old.rs", "src/commands/", false));
+        assert!(!path_matches_dir("src/other/query.rs", "src/commands", true));
+        // …while the same string as a partial name (no such directory) does
+        // match it — the two readings genuinely disagree, hence `dir_filter`.
+        assert!(path_matches_dir("src/commands_old.rs", "src/commands", false));
+    }
+
+    #[test]
+    fn path_ok_none_matches_everything() {
+        let root = Path::new("/nonexistent-cona-test-root");
+        assert!(path_ok(root, "anything/at/all.rs", None));
+        assert!(!path_ok(root, "src/db.rs", Some("tests")));
+    }
 }

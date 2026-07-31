@@ -15,21 +15,21 @@ fn mcp_tools() -> Vec<serde_json::Value> {
         mcp_tool(
             "find",
             "Locate a symbol by name: file, line range, signature. Use instead of grepping for a definition",
-            json!({"name": s("symbol name (exact, then substring)"), "kind": s("filter: fn, struct, class, method, …")}),
+            json!({"name": s("symbol name (exact, then substring; case-insensitive)"), "kind": s("filter: fn, struct, class, method, …"), "path": s("only symbols in files under this prefix (file or directory)")}),
             &["name"],
             read_only("Find symbol"),
         ),
         mcp_tool(
             "show",
-            "Print the source of one or more symbols (Name, Parent.Name or file.rs:Name). Use instead of reading a whole file to see one function/type",
-            json!({"symbol": s("symbol name — comma-separate several to batch"), "kind": s("narrow to a kind (fn, struct, …)"), "context": json!({"type": "integer", "description": "extra context lines around the body (default 0)"}), "sig": json!({"type": "boolean", "description": "signature line only, no body — leanest peek"})}),
+            "Print the source of one or more symbols (Name, Parent.Name or file.rs:Name). Use instead of reading a whole file to see one function/type. A file path prints that file's outline",
+            json!({"symbol": s("symbol name — comma-separate several to batch; a file path yields its outline"), "kind": s("narrow to a kind (fn, struct, …)"), "context": json!({"type": "integer", "description": "extra context lines around the body (default 0)"}), "sig": json!({"type": "boolean", "description": "signature line only, no body — leanest peek"}), "all": json!({"type": "boolean", "description": "on an ambiguous name, print every candidate instead of erroring"})}),
             &["symbol"],
             read_only("Show symbol source"),
         ),
         mcp_tool(
             "refs",
             "Usage sites of a name as file:line (semantic — strings/comments don't match). Use instead of grepping for callers/usages",
-            json!({"name": s("identifier name")}),
+            json!({"name": s("identifier name"), "path": s("only references in files under this prefix (file or directory)")}),
             &["name"],
             read_only("Find references"),
         ),
@@ -49,15 +49,15 @@ fn mcp_tools() -> Vec<serde_json::Value> {
         ),
         mcp_tool(
             "grep",
-            "Code-only substring search; hits labeled with their enclosing symbol. Use instead of ripgrep/regex over the repo — it skips strings, comments, and non-code",
-            json!({"pattern": s("substring to search"), "ignore_case": {"type": "boolean"}}),
+            "Code-only substring search; hits labeled with their enclosing symbol. Use instead of ripgrep/regex over the repo — it skips strings, comments, and non-code. Matching is LITERAL, not regex",
+            json!({"pattern": s("literal substring to search — not a regex"), "ignore_case": {"type": "boolean"}, "path": s("only search files under this prefix (file or directory)")}),
             &["pattern"],
             read_only("Code grep"),
         ),
         mcp_tool(
             "context",
             "One pack: symbol source + callee signatures + call sites. Use instead of reading a symbol plus every file it touches",
-            json!({"symbol": s("symbol name")}),
+            json!({"symbol": s("symbol name"), "no_tests": {"type": "boolean", "description": "hide test call sites so production callers aren't crowded out"}}),
             &["symbol"],
             read_only("Symbol context"),
         ),
@@ -186,7 +186,15 @@ fn mcp_call(
     let (out, baseline, detail) = match name {
         "find" => {
             let n = sarg("name")?;
-            let (o, b) = cmd_find(conn, n, opt("kind"), defaults::FIND_LIMIT, false)?;
+            let (o, b) = cmd_find(
+                root,
+                conn,
+                n,
+                opt("kind"),
+                defaults::FIND_LIMIT,
+                opt("path"),
+                false,
+            )?;
             (o, b, n.to_string())
         }
         "show" => {
@@ -201,7 +209,8 @@ fn mcp_call(
                 .filter(|s| !s.is_empty())
                 .enumerate()
             {
-                let (oo, bb) = cmd_show(root, conn, one, ctx, opt("kind"), flag("sig"), false)?;
+                let (oo, bb) =
+                    cmd_show(root, conn, one, ctx, opt("kind"), flag("sig"), false, flag("all"))?;
                 if i > 0 {
                     o.push('\n');
                 }
@@ -212,13 +221,13 @@ fn mcp_call(
         }
         "refs" => {
             let n = sarg("name")?;
-            let (o, b) = cmd_refs(root, conn, n, defaults::REFS_LIMIT, false)?;
+            let (o, b) = cmd_refs(root, conn, n, defaults::REFS_LIMIT, opt("path"), false)?;
             (o, b, n.to_string())
         }
         "outline" => {
             let f = sarg("file")?;
             let sig = args.get("sig").and_then(|v| v.as_bool()).unwrap_or(false);
-            let (o, b) = cmd_outline(conn, f, sig, false)?;
+            let (o, b) = cmd_outline(conn, f, sig, false, Some(root))?;
             (o, b, f.to_string())
         }
         "tree" => {
@@ -237,13 +246,21 @@ fn mcp_call(
                 p,
                 flag("ignore_case"),
                 defaults::GREP_LIMIT,
+                opt("path"),
                 false,
             )?;
             (o, b, p.to_string())
         }
         "context" => {
             let sym = sarg("symbol")?;
-            let (o, b) = cmd_context(root, conn, sym, defaults::CONTEXT_BUDGET, false)?;
+            let (o, b) = cmd_context(
+                root,
+                conn,
+                sym,
+                defaults::CONTEXT_BUDGET,
+                flag("no_tests"),
+                false,
+            )?;
             (o, b, sym.to_string())
         }
         "diff" => {

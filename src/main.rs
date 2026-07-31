@@ -123,13 +123,20 @@ struct FindArgs {
     kind: Option<String>,
     #[arg(long, default_value_t = defaults::FIND_LIMIT)]
     limit: i64,
+    /// Only symbols in files under this path prefix (file or directory)
+    #[arg(long)]
+    path: Option<String>,
 }
 
 #[derive(clap::Args)]
 struct ShowArgs {
-    /// One or more symbol names — each printed in turn
+    /// One or more symbol names — each printed in turn. A file path prints
+    /// that file's outline instead.
     #[arg(required = true)]
     symbols: Vec<String>,
+    /// On an ambiguous name, print every candidate instead of erroring
+    #[arg(long)]
+    all: bool,
     /// Extra lines of context above and below
     #[arg(long, default_value_t = defaults::SHOW_CONTEXT)]
     context: usize,
@@ -146,6 +153,9 @@ struct RefsArgs {
     name: String,
     #[arg(long, default_value_t = defaults::REFS_LIMIT)]
     limit: usize,
+    /// Only references in files under this path prefix (file or directory)
+    #[arg(long)]
+    path: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -155,6 +165,9 @@ struct ContextArgs {
     /// Token budget for the calls/called-by sections (the source is always printed in full)
     #[arg(long, default_value_t = defaults::CONTEXT_BUDGET)]
     budget: i64,
+    /// Hide test call sites, so production callers aren't crowded out
+    #[arg(long)]
+    no_tests: bool,
 }
 
 #[derive(clap::Args)]
@@ -166,12 +179,16 @@ struct DiffArgs {
 
 #[derive(clap::Args)]
 struct GrepArgs {
+    /// Literal substring to search for — NOT a regex
     pattern: String,
     /// Case-insensitive match
     #[arg(short = 'i', long)]
     ignore_case: bool,
     #[arg(long, default_value_t = defaults::GREP_LIMIT)]
     limit: usize,
+    /// Only search files under this path prefix (file or directory)
+    #[arg(long)]
+    path: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -768,20 +785,34 @@ fn run() -> Result<()> {
         Cmd::Nav(Nav::Outline(a)) | Cmd::Outline(a) => {
             let OutlineArgs { file, sig } = a;
             let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_outline(&conn, file, *sig, cli.json)?;
+            let (out, baseline) = cmd_outline(&conn, file, *sig, cli.json, Some(&root))?;
             print!("{out}");
             finish(&root, "outline", t0, &out, baseline, file);
         }
         Cmd::Nav(Nav::Find(a)) | Cmd::Find(a) => {
-            let FindArgs { name, kind, limit } = a;
+            let FindArgs {
+                name,
+                kind,
+                limit,
+                path,
+            } = a;
             let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_find(&conn, name, kind.as_deref(), *limit, cli.json)?;
+            let (out, baseline) = cmd_find(
+                &root,
+                &conn,
+                name,
+                kind.as_deref(),
+                *limit,
+                path.as_deref(),
+                cli.json,
+            )?;
             print!("{out}");
             finish(&root, "find", t0, &out, baseline, name);
         }
         Cmd::Nav(Nav::Show(a)) | Cmd::Show(a) => {
             let ShowArgs {
                 symbols,
+                all,
                 context,
                 kind,
                 sig,
@@ -799,6 +830,7 @@ fn run() -> Result<()> {
                     kind.as_deref(),
                     *sig,
                     cli.json,
+                    *all,
                 ) {
                     Ok((o, b)) => {
                         if i > 0 && !cli.json {
@@ -823,16 +855,20 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Nav(Nav::Refs(a)) | Cmd::Refs(a) => {
-            let RefsArgs { name, limit } = a;
+            let RefsArgs { name, limit, path } = a;
             let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_refs(&root, &conn, name, *limit, cli.json)?;
+            let (out, baseline) = cmd_refs(&root, &conn, name, *limit, path.as_deref(), cli.json)?;
             print!("{out}");
             finish(&root, "refs", t0, &out, baseline, name);
         }
         Cmd::Inspect(Inspect::Context(a)) | Cmd::ContextFlat(a) => {
-            let ContextArgs { symbol, budget } = a;
+            let ContextArgs {
+                symbol,
+                budget,
+                no_tests,
+            } = a;
             let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_context(&root, &conn, symbol, *budget, cli.json)?;
+            let (out, baseline) = cmd_context(&root, &conn, symbol, *budget, *no_tests, cli.json)?;
             print!("{out}");
             finish(&root, "context", t0, &out, baseline, symbol);
         }
@@ -848,9 +884,18 @@ fn run() -> Result<()> {
                 pattern,
                 ignore_case,
                 limit,
+                path,
             } = a;
             let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_grep(&root, &conn, pattern, *ignore_case, *limit, cli.json)?;
+            let (out, baseline) = cmd_grep(
+                &root,
+                &conn,
+                pattern,
+                *ignore_case,
+                *limit,
+                path.as_deref(),
+                cli.json,
+            )?;
             print!("{out}");
             finish(&root, "grep", t0, &out, baseline, pattern);
         }

@@ -21,6 +21,10 @@ Coarse → fine: `cona tree --rank` (orient) → `cona outline <file>` (map a fi
 `<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name`. Index auto-refreshes;
 `cona index` (~1s) if a repo isn't indexed yet.
 
+Too many hits? `--path <dir>` scopes `find`/`refs`/`grep`/`tree` to a subtree.
+Ambiguous name? `cona show <Sym> --all` prints every definition instead of
+erroring. `cona grep` is a literal substring match, not a regex.
+
 Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
 `insert` `rename` `note` `check` — is listed in `cona --help`, with details per
 group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).

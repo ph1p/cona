@@ -43,10 +43,30 @@ src/commands/    cmd_* implementations, split by concern:
                  mod.rs   shared: open_indexed/finish/jout/BudgetOut/locate_*/
                           render_symbol_body/scan_ref_sites/ENCLOSING_SYMBOL_SQL;
                           `defaults` module = THE per-command limits/budgets,
-                          used by clap default_value_t AND the MCP fallbacks
-                 query.rs tree/outline/find/show (multi-symbol; --sig =
-                          index-only signature peek, no body read)/refs/context/
-                          diff/grep
+                          used by clap default_value_t AND the MCP fallbacks.
+                          path_ok/path_matches_in/path_matches_dir = THE `--path`
+                          policy (find/refs/grep/tree). Directory and prefix
+                          readings CONFLICT — `--path src/commands` must exclude
+                          `src/commands_old.rs`, `--path src/comm` must include
+                          `src/commands/query.rs`; identical string shape,
+                          opposite answers. No lexical rule separates them, so
+                          path_matches_in asks the filesystem (is_dir) and
+                          path_matches_dir (pure, tested) takes the answer as
+                          `dir_filter`: real dir → `/`-boundary only, partial
+                          name → prefix. locate_all = every candidate for
+                          `show --all` (lists, never picks — invariant 4)
+                 query.rs tree/outline (dir arg → points at `tree --path`)/find
+                          (--path over-fetches so the SQL LIMIT can't clip
+                          in-scope rows before the Rust filter; empty-but-exists-
+                          elsewhere says so instead of falling through to fuzzy)/
+                          show (multi-symbol; --sig = index-only signature peek,
+                          no body read; --all = all candidates; a file arg
+                          outlines it)/refs/context (--no-tests filters at
+                          COLLECTION time — the caller cap is first-come, so
+                          post-filtering would let test fns crowd out real
+                          callers; hidden count disclosed)/diff/grep (literal,
+                          not regex — a pattern with regex metachars gets a note
+                          naming its longest literal run)
                  mutate.rs edit / edit --range / insert (--before/--after <Sym>
                           OR --at <file> <line>, incl. new/empty file) / note /
                           rename. write_verified = THE shared syntax-verify +
@@ -346,6 +366,11 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
 - Unsupported languages fall back to textual word-boundary scan (fail-open,
   matches strings/comments there).
 - Token estimate = 4 chars ≈ 1 token (heuristic, trend metric).
+- `--path` resolves directory-vs-prefix by stat-ing the filter, so a filter that
+  names a dir which no longer exists on disk degrades to the prefix reading.
+- `grep` is a literal substring match, not a regex (no `regex` dependency — the
+  supply-chain cost isn't worth it). Metachars in a pattern trigger a note
+  naming the longest literal run to retry with.
 - `rename` semantic (identifier positions) but name-based: collision guard +
   syntax verify + all-or-nothing rollback; unparsable files only with --force.
 - `deps`: internal imports → edges; external packages counted + listed but not
