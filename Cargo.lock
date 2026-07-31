@@ -269,6 +269,7 @@ dependencies = [
  "ignore",
  "notify",
  "ratatui",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

@@ -265,7 +265,8 @@ pub(crate) fn scan_ref_sites(
     // directory scope narrows the walk itself (see grep_prefilter); dropping an
     // out-of-scope preloaded file there is consistent with the scope filter
     // below, which would discard it anyway.
-    if let Some(candidates) = query::grep_prefilter(root, name, false, pf.search_root()) {
+    let matcher = query::Matcher::literal(name);
+    if let Some(candidates) = query::grep_prefilter(root, name, &matcher, false, pf.search_root()) {
         files.retain(|f| candidates.contains(f) || preloaded.map(|(p, _)| p == f).unwrap_or(false));
     }
     // `--path` scoping applies AFTER the content prefilter and overrides the
