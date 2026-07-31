@@ -152,7 +152,7 @@ pub fn cmd_tests(
     let mut bytes = 0usize;
     let mut seen: HashSet<(String, String)> = HashSet::new();
     let mut counted_files: HashSet<String> = HashSet::new();
-    scan_ref_sites(root, conn, &name, None, |rel, ln, encl, _, fsrc| {
+    scan_ref_sites(root, conn, &name, None, None, |rel, ln, encl, _, fsrc| {
         if counted_files.insert(rel.to_string()) {
             bytes += fsrc.len();
         }
@@ -568,7 +568,7 @@ pub fn cmd_impact(
     let (path, _, _, q) = locate_fresh(root, conn, symbol, None)?;
     // refs match identifier tokens — a qualified `Parent.name` never occurs in
     // source, so scan for the bare name (q stays for calls/tests/blame)
-    let (refs, b_refs) = query::cmd_refs(root, conn, db::name_tail(&q), 100, false)?;
+    let (refs, b_refs) = query::cmd_refs(root, conn, db::name_tail(&q), 100, None, false)?;
     let (callers, _) = callgraph::cmd_calls(root, conn, &q, 1, true, false)
         .unwrap_or_else(|_| ("(not in call graph)\n".to_string(), 0));
     let (tests, _) = cmd_tests(root, conn, &q, false)?;

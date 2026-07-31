@@ -64,7 +64,7 @@ A few more you'll reach for often:
 | Command                   | Does                                                          |
 | ------------------------- | ------------------------------------------------------------- |
 | `cona find <Name>`        | Locate a symbol (file, line range, signature)                 |
-| `cona grep <pattern>`     | Code-only search, hits labeled with their symbol              |
+| `cona grep <pattern>`     | Code-only literal search, hits labeled with their symbol      |
 | `cona refs <Name>`        | Every usage site (semantic — skips strings/comments)          |
 | `cona diff [ref]`         | Changed _symbols_ vs a git ref — start code reviews here      |
 | `cona impact <Sym>`       | Blast radius before an edit: refs + callers + tests + history |
@@ -72,6 +72,11 @@ A few more you'll reach for often:
 | `cona stats`              | Tokens saved, per project and global                          |
 | `cona ui`                 | Live TUI: index status + savings                              |
 | `cona doctor`             | Check the installation                                        |
+
+Scope any of `find`/`refs`/`grep`/`tree` with `--path <dir>` when a name is too
+common to read repo-wide; `cona show <Sym> --all` prints every definition of an
+ambiguous name instead of asking you to disambiguate, and `cona context <Sym>
+--no-tests` keeps test callers from crowding out the real ones.
 
 **Full reference:** `cona --help`, or a group at a time —
 `cona nav|inspect|code|history|project|maint --help`. Every command also works

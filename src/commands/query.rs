@@ -2,10 +2,10 @@
 //! context, diff, grep.
 
 use super::{
-    jout, locate_fresh, push_numbered_lines, render_symbol_body, scan_ref_sites, BudgetOut,
+    jout, locate_fresh, path_ok, push_numbered_lines, render_symbol_body, scan_ref_sites, BudgetOut,
     ENCLOSING_SYMBOL_SQL,
 };
-use crate::{db, diffmap, fuzzy, gitmap, graph, indexer, lang, resolve};
+use crate::{db, diffmap, entries, fuzzy, gitmap, graph, indexer, lang, resolve};
 use anyhow::{bail, Result};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
@@ -222,6 +222,7 @@ pub fn cmd_outline(
     file: &str,
     show_sig: bool,
     json: bool,
+    root: Option<&Path>,
 ) -> Result<(String, i64)> {
     // suffix match only at a path-separator boundary (`db.rs` must not pull in
     // `gitdb.rs`), with LIKE metacharacters escaped so `_`/`%` in names stay literal
@@ -250,6 +251,19 @@ pub fn cmd_outline(
         .flatten()
         .collect();
     if rows.is_empty() {
+        // A directory is a natural thing to hand `outline`; answer it with the
+        // command that does cover directories instead of erroring out.
+        let is_dir = root.is_some_and(|r| r.join(file).is_dir())
+            || conn
+                .query_row(
+                    "SELECT 1 FROM files WHERE path LIKE ?1 ESCAPE '\\' LIMIT 1",
+                    [format!("{escaped}/%")],
+                    |_| Ok(()),
+                )
+                .is_ok();
+        if is_dir {
+            bail!("'{file}' is a directory — try `cona tree --path {file}`");
+        }
         bail!("no symbols for '{file}' — file not indexed or has none");
     }
     // Baseline: sum each matched file's size once (rows are path-ordered).
@@ -290,10 +304,12 @@ pub fn cmd_outline(
 }
 
 pub fn cmd_find(
+    root: &Path,
     conn: &Connection,
     name: &str,
     kind: Option<&str>,
     limit: i64,
+    path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
     let kind_clause = kind.map(|_| "AND s.kind = ?4").unwrap_or("");
@@ -306,6 +322,14 @@ pub fn cmd_find(
          ORDER BY rank, length(s.qualified), f.path LIMIT ?3"
     );
     let like = format!("%{name}%");
+    // `--path` is applied in Rust (below), so the SQL LIMIT must not clip
+    // in-scope rows before that filter runs — over-fetch when scoped, then
+    // truncate to `limit` afterwards.
+    let sql_limit = if path_filter.is_some() {
+        limit.saturating_mul(20).max(1000)
+    } else {
+        limit
+    };
     let mut stmt = conn.prepare(&sql)?;
     let mapper =
         |r: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, i64, String, i64)> {
@@ -319,15 +343,29 @@ pub fn cmd_find(
                 r.get(6)?,
             ))
         };
-    let rows: Vec<(String, String, String, i64, i64, String, i64)> = if let Some(k) = kind {
-        stmt.query_map(rusqlite::params![name, like, limit, k], mapper)?
+    let mut rows: Vec<(String, String, String, i64, i64, String, i64)> = if let Some(k) = kind {
+        stmt.query_map(rusqlite::params![name, like, sql_limit, k], mapper)?
             .flatten()
             .collect()
     } else {
-        stmt.query_map(rusqlite::params![name, like, limit], mapper)?
+        stmt.query_map(rusqlite::params![name, like, sql_limit], mapper)?
             .flatten()
             .collect()
     };
+    if path_filter.is_some() {
+        let matched_out_of_scope = !rows.is_empty();
+        rows.retain(|(p, ..)| path_ok(root, p, path_filter));
+        rows.truncate(limit.max(0) as usize);
+        // Distinguish "name exists, just not here" from "no such name" — the
+        // fuzzy fallback would misleadingly answer the second question.
+        if rows.is_empty() && matched_out_of_scope {
+            let pf = path_filter.unwrap_or("");
+            return Ok((
+                format!("no '{name}' under '{pf}' — it exists elsewhere; retry without --path\n"),
+                0,
+            ));
+        }
+    }
     if rows.is_empty() {
         return cmd_find_fuzzy(conn, name, kind, json);
     }
@@ -437,6 +475,9 @@ pub fn cmd_find_fuzzy(
     Ok((out, baseline))
 }
 
+/// `show` for one symbol. When `all` is set and the name is ambiguous, every
+/// candidate is rendered in turn instead of erroring — the ambiguity is
+/// answered rather than bounced back for another round-trip.
 pub fn cmd_show(
     root: &Path,
     conn: &Connection,
@@ -445,6 +486,59 @@ pub fn cmd_show(
     kind: Option<&str>,
     sig: bool,
     json: bool,
+    all: bool,
+) -> Result<(String, i64)> {
+    // A path handed to `show` means "map this file" — answer with the outline
+    // instead of failing on a symbol name that was never a symbol.
+    if looks_like_path(symbol) && root.join(symbol).is_file() {
+        return cmd_outline(conn, symbol, sig, json, Some(root));
+    }
+    if all {
+        let cands = super::locate_all(conn, symbol, kind)?;
+        if cands.len() > 1 {
+            let mut out = String::new();
+            let mut baseline = 0;
+            for (p, _, _, q) in &cands {
+                // address each candidate unambiguously by file:Name
+                let addr = format!("{p}:{}", db::name_tail(q));
+                match show_one(root, conn, &addr, context, kind, sig, false, false) {
+                    Ok((body, b)) => {
+                        out.push_str(&body);
+                        out.push('\n');
+                        baseline += b;
+                    }
+                    Err(e) => out.push_str(&format!("{addr}: {e}\n")),
+                }
+            }
+            if json {
+                return jout(&serde_json::json!({"symbol": symbol, "matches": cands.len(), "text": out}), baseline);
+            }
+            return Ok((out, baseline));
+        }
+    }
+    show_one(root, conn, symbol, context, kind, sig, json, true)
+}
+
+/// True when the argument reads as a bare file path rather than a symbol name.
+/// A `path:Name` locator is NOT a path — that form addresses a symbol, and
+/// `locate_symbol_kind` already handles it. A trailing `:` colon is the only
+/// thing that distinguishes them, so check for it before anything else.
+fn looks_like_path(arg: &str) -> bool {
+    let is_locator = arg
+        .rsplit_once(':')
+        .is_some_and(|(f, n)| f.contains('.') && !n.is_empty() && !n.contains('/'));
+    !is_locator && (arg.contains('/') || arg.contains('.'))
+}
+
+fn show_one(
+    root: &Path,
+    conn: &Connection,
+    symbol: &str,
+    context: usize,
+    kind: Option<&str>,
+    sig: bool,
+    json: bool,
+    disclose_others: bool,
 ) -> Result<(String, i64)> {
     let (path, s, e, q) = locate_fresh(root, conn, symbol, kind)?;
     // --sig: the signature is already in the index — print it without ever
@@ -511,7 +605,11 @@ pub fn cmd_show(
     }
     push_numbered_lines(&mut out, &lines, start, end);
     // exact-name preference may have hidden same-named candidates — disclose
-    // them in one trailer line so the agent never gets a confidently wrong body
+    // them in one trailer line so the agent never gets a confidently wrong body.
+    // Skipped under `--all`, which is already printing every candidate.
+    if !disclose_others {
+        return Ok((out, baseline));
+    }
     let others: Vec<String> = conn
         .prepare(
             "SELECT s.qualified, f.path, s.start_line
@@ -540,6 +638,7 @@ pub fn cmd_refs(
     conn: &Connection,
     name: &str,
     limit: usize,
+    path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
     let mut hits: Vec<(String, usize, String)> = Vec::new();
@@ -554,7 +653,7 @@ pub fn cmd_refs(
     // across visit calls, unlike a Vec<&str> of the lines)
     let mut cur_offsets: Vec<usize> = Vec::new();
     let mut cur_lns: Vec<usize> = Vec::new();
-    scan_ref_sites(root, conn, name, None, |rel, ln, _, _, fsrc| {
+    scan_ref_sites(root, conn, name, None, path_filter, |rel, ln, _, _, fsrc| {
         if rel != cur_file {
             if !cur_lns.is_empty() {
                 baseline += db::baseline_tokens(&cur_lens, &cur_lns);
@@ -603,7 +702,14 @@ pub fn cmd_refs(
         out.push_str("… truncated (raise --limit)\n");
     }
     if hits.is_empty() {
-        out.push_str(&format!("no references to '{name}'\n"));
+        // An empty result is a dead end unless it names the next move: in-scope
+        // misses are usually a too-narrow --path, global misses a wrong name.
+        out.push_str(&match path_filter {
+            Some(pf) => format!(
+                "no references to '{name}' under '{pf}' — try without --path, or `cona find {name}`\n"
+            ),
+            None => format!("no references to '{name}' — try `cona find {name}` or `cona grep {name}`\n"),
+        });
     }
     Ok((out, baseline))
 }
@@ -617,6 +723,7 @@ pub fn cmd_context(
     conn: &Connection,
     symbol: &str,
     budget: i64,
+    no_tests: bool,
     json: bool,
 ) -> Result<(String, i64)> {
     let (path, s, e, q) = locate_fresh(root, conn, symbol, None)?;
@@ -781,18 +888,27 @@ pub fn cmd_context(
     type Caller = (String, String, String, i64); // kind, enclosing qualified, path, line
     let mut callers: Vec<Caller> = Vec::new();
     let mut callers_capped = false;
+    let mut tests_hidden = 0usize;
     let mut seen_callers: HashSet<(String, String)> = HashSet::new();
     scan_ref_sites(
         root,
         conn,
         &name,
         Some((&path, &src)),
+        None,
         |rel, ln1, encl, kind, _| {
             if rel == path && ln1 >= s && ln1 <= e {
                 return true; // inside the symbol itself
             }
             if !seen_callers.insert((rel.to_string(), encl.to_string())) {
                 return true; // one entry per enclosing symbol and file
+            }
+            // Well-tested symbols have far more test callers than real ones, and
+            // the cap below is first-come — unfiltered, tests crowd out the
+            // production call sites that actually answer "who uses this?".
+            if no_tests && (entries::is_test_symbol(encl) || entries::is_test_path(rel)) {
+                tests_hidden += 1;
+                return true;
             }
             callers.push((kind.to_string(), encl.to_string(), rel.to_string(), ln1));
             if callers.len() >= 20 {
@@ -830,6 +946,7 @@ pub fn cmd_context(
                 serde_json::json!({"kind": k, "symbol": cq, "file": p, "line": l})
             }).collect::<Vec<_>>(),
             "called_by_capped": callers_capped,
+            "test_callers_hidden": tests_hidden,
         });
         return jout(&obj, baseline);
     }
@@ -882,6 +999,13 @@ pub fn cmd_context(
         if capped {
             bo.push_always("  … more (cap hit — use `cona refs` for the full list)\n");
         }
+    }
+    // never let a filter read as an absence — say what was withheld
+    if tests_hidden > 0 {
+        bo.push_always(&format!(
+            "  ({tests_hidden} test caller{} hidden — drop --no-tests to include)\n",
+            if tests_hidden == 1 { "" } else { "s" }
+        ));
     }
     let out = bo.finish("… truncated (raise --budget)\n");
     Ok((out, baseline))
@@ -1028,6 +1152,7 @@ pub fn cmd_grep(
     pattern: &str,
     ignore_case: bool,
     limit: usize,
+    path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
     let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
@@ -1037,6 +1162,7 @@ pub fn cmd_grep(
     if let Some(candidates) = grep_prefilter(root, pattern, ignore_case) {
         files.retain(|f| candidates.contains(f));
     }
+    files.retain(|f| path_ok(root, f, path_filter));
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     let needle = if ignore_case {
         pattern.to_lowercase()
@@ -1107,9 +1233,43 @@ pub fn cmd_grep(
         out.push_str("… truncated (raise --limit)\n");
     }
     if hits.is_empty() {
-        out.push_str(&format!("no matches for '{pattern}'\n"));
+        out.push_str(&format!("no matches for '{pattern}'"));
+        // `grep` is deliberately fixed-string. A pattern that *looks* like a
+        // regex returning zero hits is the worst failure mode — the agent
+        // concludes the code doesn't exist. Say why instead of staying silent.
+        if let Some(literal) = regexish_literal(pattern) {
+            out.push_str(&format!(
+                "\n  note: matching is literal (no regex) — '{}' was searched verbatim.",
+                pattern
+            ));
+            if !literal.is_empty() {
+                out.push_str(&format!("\n  try `cona grep {literal}`"));
+            }
+            out.push_str(" — or `rg` for a real regex");
+        } else if path_filter.is_some() {
+            out.push_str(" — try without --path");
+        }
+        out.push('\n');
     }
     Ok((out, baseline))
+}
+
+/// Regex metacharacters that make a pattern *look* like a regex. Used only to
+/// explain a zero-hit fixed-string search — never to change matching.
+fn regexish_literal(pattern: &str) -> Option<String> {
+    const META: [char; 11] = ['(', ')', '[', ']', '|', '+', '*', '?', '^', '$', '\\'];
+    if !pattern.contains(|c| META.contains(&c)) {
+        return None;
+    }
+    // The longest run of plain characters is the best literal fallback to
+    // suggest (`tokens_(out|saved)` → `tokens_`).
+    Some(
+        pattern
+            .split(|c| META.contains(&c) || c == '.' || c == '{' || c == '}')
+            .max_by_key(|s| s.len())
+            .unwrap_or("")
+            .to_string(),
+    )
 }
 
 /// Fixed-string list of files containing `pattern`, via ripgrep when
