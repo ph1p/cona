@@ -768,3 +768,81 @@ fn check_no_arg_walks_git_changes() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `--read-only` cannot refresh the index, so it must never serve stale line
+/// numbers as if they were current (invariant 2). `show` fails with a message
+/// naming the file and the fix — NOT rusqlite's "attempt to write a readonly
+/// database" — and `outline`, which still prints its indexed ranges, labels
+/// them stale. The writable run afterwards proves the refusal is scoped to
+/// read-only mode and normal use still self-heals.
+#[test]
+fn read_only_never_serves_stale_ranges_as_fresh() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("cona-ro-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let data = dir.join(".cona-data");
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let cona = |args: &[&str]| {
+        Command::new(bin)
+            .args(args)
+            .env("CONA_DATA_DIR", &data)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+    };
+
+    std::fs::write(dir.join("lib.rs"), "fn target() {\n    let _ = 1;\n}\n").unwrap();
+    cona(&["index"]);
+    // fresh index: read-only resolves the real range
+    let out = cona(&["--read-only", "show", "target"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("lib.rs:1-3"),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // shift the symbol down without reindexing — indexed 1-3, really 3-5
+    std::fs::write(
+        dir.join("lib.rs"),
+        "// added\n// added\nfn target() {\n    let _ = 1;\n}\n",
+    )
+    .unwrap();
+
+    // `show` reports per-symbol failures on stdout so one bad name cannot abort
+    // a multi-symbol batch — the message is what matters, not the stream.
+    let out = cona(&["--read-only", "show", "target"]);
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        err.contains("read-only mode") && err.contains("lib.rs"),
+        "expected a stale-file message naming the file, got: {err}"
+    );
+    assert!(
+        !err.contains("readonly database"),
+        "raw sqlite error leaked instead of an actionable message: {err}"
+    );
+    // the stale range must not be printed as if it were current
+    assert!(
+        !err.contains("lib.rs:1-3"),
+        "stale range served as fresh: {err}"
+    );
+
+    // outline still prints the indexed ranges, but discloses that they are stale
+    let out = cona(&["--read-only", "outline", "lib.rs"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("stale"), "outline hid staleness: {text}");
+
+    // writable mode is unaffected: it reindexes and reports the live range
+    let out = cona(&["show", "target"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("lib.rs:3-5"),
+        "writable mode should self-heal: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

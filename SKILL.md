@@ -26,7 +26,8 @@ Never re-read a file already in your context — including one the user pasted o
 Everything below is reference — reach for it when the four above don't cover the job.
 
 ## Commands
-- `cona index` — build/update the index (fast, incremental; auto-runs on first use); `--watch` keeps running and reindexes on file changes (debounced)
+- `cona index` — build/update the index (fast, incremental; auto-runs on first use); `--watch` keeps running and reindexes on file changes (debounced). If the default `~/.cona` is read-only (common in sandboxes), cona uses temporary storage; set `CONA_DATA_DIR` to keep an index across sessions.
+- `cona --read-only <query>` — inspect an existing index without auto-indexing, telemetry, or any source/configuration changes; use this in a strict read-only agent sandbox.
 - `cona tree --budget 2000` — compact overview of the whole codebase within a token budget
 - `cona tree --path src/api` — overview of a subdirectory
 - `cona tree --rank` — top-level symbols ranked by reference fan-in (most load-bearing first) — the fastest way to orient in an unknown codebase

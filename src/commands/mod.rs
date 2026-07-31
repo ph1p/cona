@@ -34,9 +34,24 @@ pub(crate) const ENCLOSING_SYMBOL_SQL: &str =
      ORDER BY s.start_line DESC LIMIT 1";
 
 pub fn open_indexed(root: &Path) -> Result<Connection> {
-    let conn = db::open_project_db(root)?;
+    let conn = if db::is_read_only() {
+        db::open_existing_project_db(root).map_err(|_| {
+            anyhow!(
+                "no existing index for {} in read-only mode — run `cona index` from a writable environment first",
+                root.display()
+            )
+        })?
+    } else {
+        db::open_project_db(root)?
+    };
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
     if n == 0 {
+        if db::is_read_only() {
+            bail!(
+                "the index for {} is empty in read-only mode — run `cona index` from a writable environment first",
+                root.display()
+            );
+        }
         // never silently index the whole home dir / filesystem root
         if db::is_home_or_fs_root(root) {
             bail!(
@@ -62,6 +77,9 @@ pub fn open_indexed(root: &Path) -> Result<Connection> {
 }
 
 pub fn finish(root: &Path, cmd: &str, t0: Instant, out: &str, baseline_tokens: i64, detail: &str) {
+    if db::is_read_only() {
+        return;
+    }
     let ms = t0.elapsed().as_millis() as i64;
     let tokens_out = db::est_tokens(out.len());
     // Baseline = reading only the files this query's results live in, so a
@@ -179,6 +197,42 @@ pub mod defaults {
     pub const PATH_DEPTH: usize = 8;
 }
 
+/// How `show` renders a symbol, once the symbol itself is resolved.
+///
+/// These four travel together through every `show` path (CLI dispatch, MCP
+/// dispatch, and `cmd_show` → `show_one` per candidate), so they move as one
+/// value: a new rendering knob is added here, not threaded through three
+/// signatures. `disclose_others` is deliberately NOT part of it — it is set by
+/// `cmd_show` per call, not chosen by the caller.
+#[derive(Clone, Copy)]
+pub struct ShowOpts<'a> {
+    /// Extra lines above and below the symbol body.
+    pub context: usize,
+    /// Narrow to a kind (`fn`, `struct`, …) — the same-name escape hatch.
+    pub kind: Option<&'a str>,
+    /// Signature only, no body read.
+    pub sig: bool,
+    /// On an ambiguous name, render every candidate instead of erroring.
+    pub all: bool,
+}
+
+/// How `grep` matches lines — the flags `Matcher`/`grep_prefilter` both read.
+///
+/// Kept as one value so the in-process matcher and the rg/grep prefilter can
+/// never be handed a different reading of the same pattern (a disagreeing
+/// prefilter silently drops files holding real matches).
+#[derive(Clone, Copy)]
+pub struct GrepOpts<'a> {
+    /// Case-insensitive match.
+    pub ignore_case: bool,
+    /// Treat the pattern as a Rust regex instead of a literal.
+    pub regex: bool,
+    /// Max hits reported.
+    pub limit: usize,
+    /// Restrict the search to this path prefix or directory.
+    pub path: Option<&'a str>,
+}
+
 /// THE `--path` policy for every query command (tree/find/refs/grep/…).
 ///
 /// A filter matches when it is the file itself, a parent directory of it, or a
@@ -196,7 +250,10 @@ pub(crate) fn path_matches_dir(rel: &str, filter: &str, dir_filter: bool) -> boo
         return true;
     }
     // `/`-boundary reading: `rel` sits under the directory `f`.
-    if rel.strip_prefix(f).is_some_and(|rest| rest.starts_with('/')) {
+    if rel
+        .strip_prefix(f)
+        .is_some_and(|rest| rest.starts_with('/'))
+    {
         return true;
     }
     // An explicit trailing slash, or a filter that really is a directory,
@@ -307,7 +364,11 @@ pub(crate) fn scan_ref_sites(
     Ok(())
 }
 
-pub(crate) fn locate_symbol(conn: &Connection, symbol: &str) -> Result<(String, i64, i64, String)> {
+/// A located symbol: `(path, start_line, end_line, qualified)`. The ONE shape
+/// every resolver in this module returns, so callers destructure it identically.
+pub(crate) type Located = (String, i64, i64, String);
+
+pub(crate) fn locate_symbol(conn: &Connection, symbol: &str) -> Result<Located> {
     locate_symbol_kind(conn, symbol, None)
 }
 
@@ -319,7 +380,7 @@ pub(crate) fn locate_fresh(
     conn: &Connection,
     symbol: &str,
     kind: Option<&str>,
-) -> Result<(String, i64, i64, String)> {
+) -> Result<Located> {
     let located = locate_symbol_kind(conn, symbol, kind)?;
     if indexer::is_stale(root, conn, &located.0) {
         indexer::reindex_file(root, conn, &located.0)?;
@@ -337,7 +398,7 @@ pub(crate) fn locate_all(
     conn: &Connection,
     symbol: &str,
     kind: Option<&str>,
-) -> Result<Vec<(String, i64, i64, String)>> {
+) -> Result<Vec<Located>> {
     match locate_symbol_kind(conn, symbol, kind) {
         Ok(one) => Ok(vec![one]),
         Err(e) => {
@@ -358,14 +419,9 @@ pub(crate) fn locate_all(
 /// after `path:Name` narrowing and `--kind`. Shared by the single-result
 /// resolver and `locate_all` so the two can never disagree about what the
 /// candidates are.
-fn locate_candidates(
-    conn: &Connection,
-    symbol: &str,
-    kind: Option<&str>,
-) -> Result<Vec<(String, i64, i64, String)>> {
+fn locate_candidates(conn: &Connection, symbol: &str, kind: Option<&str>) -> Result<Vec<Located>> {
     let (rows, symbol) = locate_rows(conn, symbol, kind)?;
-    let exact: Vec<(String, i64, i64, String)> =
-        rows.iter().filter(|r| r.3 == symbol).cloned().collect();
+    let exact: Vec<Located> = rows.iter().filter(|r| r.3 == symbol).cloned().collect();
     Ok(if exact.is_empty() { rows } else { exact })
 }
 
@@ -386,7 +442,7 @@ fn locate_rows(
     conn: &Connection,
     symbol: &str,
     kind: Option<&str>,
-) -> Result<(Vec<(String, i64, i64, String)>, String)> {
+) -> Result<(Vec<Located>, String)> {
     // `path:Name` narrows to symbols in that file (exact path or `/`-guarded
     // suffix) — the escape hatch for same-named top-level symbols, and exactly
     // the shape the ambiguity listing below prints.
@@ -400,7 +456,7 @@ fn locate_rows(
          WHERE (s.qualified = ?1 OR s.name = ?1) AND (?2 IS NULL OR s.kind = ?2)
          ORDER BY CASE WHEN s.qualified = ?1 THEN 0 ELSE 1 END, length(s.qualified)",
     )?;
-    let mut rows: Vec<(String, i64, i64, String)> = stmt
+    let mut rows: Vec<Located> = stmt
         .query_map(rusqlite::params![symbol, kind], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?
@@ -425,11 +481,7 @@ fn locate_rows(
     Ok((rows, symbol.to_string()))
 }
 
-fn locate_symbol_kind(
-    conn: &Connection,
-    symbol: &str,
-    kind: Option<&str>,
-) -> Result<(String, i64, i64, String)> {
+fn locate_symbol_kind(conn: &Connection, symbol: &str, kind: Option<&str>) -> Result<Located> {
     let pool = locate_candidates(conn, symbol, kind)?;
     let symbol = symbol.rsplit_once(':').map_or(symbol, |(_, n)| n);
     if pool.len() == 1 {
@@ -460,8 +512,16 @@ mod tests {
         // exact file
         assert!(path_matches_dir("src/db.rs", "src/db.rs", false));
         // real directory, with and without a trailing slash
-        assert!(path_matches_dir("src/commands/query.rs", "src/commands", true));
-        assert!(path_matches_dir("src/commands/query.rs", "src/commands/", true));
+        assert!(path_matches_dir(
+            "src/commands/query.rs",
+            "src/commands",
+            true
+        ));
+        assert!(path_matches_dir(
+            "src/commands/query.rs",
+            "src/commands/",
+            true
+        ));
         // the directory itself
         assert!(path_matches_dir("src/commands", "src/commands", true));
         // a half-typed path is not a directory → prefix reading applies
@@ -475,12 +535,28 @@ mod tests {
         // directory must not leak into a sibling whose name merely starts with
         // it. This is the no-slash form — the trailing-slash form below can be
         // rejected lexically, so only this case pins the `dir_filter` rule.
-        assert!(!path_matches_dir("src/commands_old.rs", "src/commands", true));
-        assert!(!path_matches_dir("src/commands_old.rs", "src/commands/", false));
-        assert!(!path_matches_dir("src/other/query.rs", "src/commands", true));
+        assert!(!path_matches_dir(
+            "src/commands_old.rs",
+            "src/commands",
+            true
+        ));
+        assert!(!path_matches_dir(
+            "src/commands_old.rs",
+            "src/commands/",
+            false
+        ));
+        assert!(!path_matches_dir(
+            "src/other/query.rs",
+            "src/commands",
+            true
+        ));
         // …while the same string as a partial name (no such directory) does
         // match it — the two readings genuinely disagree, hence `dir_filter`.
-        assert!(path_matches_dir("src/commands_old.rs", "src/commands", false));
+        assert!(path_matches_dir(
+            "src/commands_old.rs",
+            "src/commands",
+            false
+        ));
     }
 
     #[test]

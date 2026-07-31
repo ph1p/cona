@@ -152,7 +152,12 @@ Full tool parity with the CLI. The CLI + hook integration is still recommended
   HTML, Nix, Svelte, Vue, R, XML, GraphQL.
 - **Storage:** everything under `~/.cona/` (override with `CONA_DATA_DIR`) — one
   SQLite index per project plus a global registry + usage stats. Housekeeping
-  runs itself daily; `cona doctor` shows sizes and paths.
+  runs itself daily; `cona doctor` shows sizes and paths. If the default home
+  directory is read-only (as it often is for sandboxed agents), cona falls back
+  to temporary storage and tells you how to make it persistent.
+- **Strict sandboxes:** `cona --read-only <query>` inspects an existing index
+  without auto-indexing, telemetry, or source/configuration writes. Initialize
+  the index first from a writable environment.
 - **Incremental & scoped:** only changed files are reparsed, `.gitignore` is
   respected, heavy dirs (`node_modules`, `target`, …) and files > 512 KB are
   always skipped. Your home directory is never auto-indexed.

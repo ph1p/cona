@@ -209,8 +209,18 @@ fn mcp_call(
                 .filter(|s| !s.is_empty())
                 .enumerate()
             {
-                let (oo, bb) =
-                    cmd_show(root, conn, one, ctx, opt("kind"), flag("sig"), false, flag("all"))?;
+                let (oo, bb) = cmd_show(
+                    root,
+                    conn,
+                    one,
+                    ShowOpts {
+                        context: ctx,
+                        kind: opt("kind"),
+                        sig: flag("sig"),
+                        all: flag("all"),
+                    },
+                    false,
+                )?;
                 if i > 0 {
                     o.push('\n');
                 }
@@ -244,10 +254,12 @@ fn mcp_call(
                 root,
                 conn,
                 p,
-                flag("ignore_case"),
-                flag("regex"),
-                defaults::GREP_LIMIT,
-                opt("path"),
+                GrepOpts {
+                    ignore_case: flag("ignore_case"),
+                    regex: flag("regex"),
+                    limit: defaults::GREP_LIMIT,
+                    path: opt("path"),
+                },
                 false,
             )?;
             (o, b, p.to_string())
