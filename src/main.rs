@@ -1440,6 +1440,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
         if root.join(".git").exists() {
             install::cmd_hooks(root, "install")?;
         } else {
+            println!("{}", ui::heading("git hooks"));
             println!(
                 "{}",
                 ui::warn("no .git — skipped git hooks (run `cona hooks install` later)")
@@ -1449,7 +1450,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
 
     // --- 3. agents — pick per scope (interactive) or take every detected ---
     // `(project_agents, global_agents)`.
-    let (proj_agents, glob_agents) = if interactive {
+    let (proj_plan, glob_plan) = if interactive {
         match pick_agents(root, do_project, do_global)? {
             Some(p) => p,
             None => {
@@ -1458,61 +1459,93 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
             }
         }
     } else {
-        // non-interactive: install every detected agent in the active scopes
+        // non-interactive: install every detected agent in the active scopes.
+        // Nothing is removed — an unattended run never takes integrations away.
         let home = dirs::home_dir().unwrap_or_default();
-        let detected = |on: bool, global: bool| {
-            if on {
+        let detected = |on: bool, global: bool| ScopePlan {
+            add: if on {
                 install::detected_agents(root, &home, global)
             } else {
                 Vec::new()
-            }
+            },
+            remove: Vec::new(),
         };
         (detected(do_project, false), detected(do_global, true))
     };
 
-    let mut configured = 0usize;
-    for (global, names, label) in [
-        (false, &proj_agents, "project"),
-        (true, &glob_agents, "home configs"),
+    let (mut configured, mut removed) = (0usize, 0usize);
+    for (global, plan, label) in [
+        (false, &proj_plan, "project"),
+        (true, &glob_plan, "home configs"),
     ] {
-        if names.is_empty() {
+        if plan.add.is_empty() && plan.remove.is_empty() {
             continue;
         }
         println!("\n{}", ui::heading(&format!("agents — {label}")));
-        install::cmd_agents(root, "install", names, false, global)?;
-        configured += names.len();
+        // Remove first: an agent can only be in one of the two lists, but
+        // removing before installing keeps the printed order readable.
+        if !plan.remove.is_empty() {
+            install::cmd_agents(root, "uninstall", &plan.remove, false, global)?;
+            removed += plan.remove.len();
+        }
+        if !plan.add.is_empty() {
+            install::cmd_agents(root, "install", &plan.add, false, global)?;
+            configured += plan.add.len();
+        }
     }
 
     // --- 4. summary --------------------------------------------------------
-    println!(
-        "\n{}",
-        ui::ok(&ui::bold(&format!(
-            "setup complete — {configured} agent{} configured",
-            if configured == 1 { "" } else { "s" }
-        )))
+    let mut summary = format!(
+        "setup complete — {configured} agent{} configured",
+        if configured == 1 { "" } else { "s" }
     );
-    println!(
+    if removed > 0 {
+        summary.push_str(&format!(", {removed} removed"));
+    }
+    println!("\n{}", ui::ok(&ui::bold(&summary)));
+
+    // Lead with what to DO now (the payoff), then how to manage what was just
+    // wired. Aligned table, same shape as `install`'s next-steps block.
+    println!("\n{}", ui::heading("try it"));
+    print!(
         "{}",
-        ui::dim("`cona agents status` shows what's configured · `cona agents` toggles any agent")
-    );
-    println!(
-        "{}",
-        ui::dim("`cona doctor` verifies the installation any time")
+        ui::cmd_table(&[
+            (
+                "cona tree --rank",
+                "orient — symbols by how often referenced"
+            ),
+            ("cona show <Symbol>", "read one symbol, not the whole file"),
+            ("cona agents status", "what's configured, per scope"),
+            ("cona agents", "interactive checklist — toggle any agent"),
+            ("cona doctor", "verify the installation any time"),
+        ])
     );
     Ok(())
 }
 
+/// The agents to add and to remove within ONE scope, as decided by the picker.
+#[derive(Default)]
+struct ScopePlan {
+    add: Vec<install::AgentName>,
+    remove: Vec<install::AgentName>,
+}
+
 /// The one interactive agent picker: a single checklist spanning both scopes
-/// (PROJECT + HOME sections), each agent pre-checked when detected on disk.
-/// Returns `(project_agents, global_agents)` chosen, or `None` if cancelled.
-type ScopedPicks = (Vec<install::AgentName>, Vec<install::AgentName>);
+/// (PROJECT + HOME sections). A row starts checked when the agent is already
+/// installed in that scope, else when it is merely detected on disk (the
+/// first-run suggestion). Unchecking an installed agent is a REMOVAL — the
+/// picker doubles as the manage surface, so setup must be able to take
+/// integrations away, not only add them. Returns the `(project, home)` plans,
+/// or `None` if cancelled.
+type ScopedPicks = (ScopePlan, ScopePlan);
 fn pick_agents(root: &Path, do_project: bool, do_global: bool) -> Result<Option<ScopedPicks>> {
     let home = dirs::home_dir().unwrap_or_default();
 
-    // `items[ordinal]` = the (agent, global) that item row maps back to; the
-    // ordinal is exactly what `multiselect` hands back for checked rows.
+    // `items[ordinal]` = the (agent, global, was_installed) that item row maps
+    // back to; the ordinal is exactly what `multiselect` hands back for
+    // checked rows.
     let mut rows: Vec<ui::Row> = Vec::new();
-    let mut items: Vec<(install::AgentName, bool)> = Vec::new();
+    let mut items: Vec<(install::AgentName, bool, bool)> = Vec::new();
     for (global, header) in [
         (false, "PROJECT — this repo"),
         (true, "HOME — global configs (~/.claude, ~/.codex, …)"),
@@ -1529,22 +1562,27 @@ fn pick_agents(root: &Path, do_project: bool, do_global: bool) -> Result<Option<
         }
         rows.push(ui::Row::Header(header));
         for a in scoped {
-            let on = a.detected(root, &home, global);
+            let was = a.installed(root, &home, global);
+            let on = was || a.detected(root, &home, global);
             rows.push(ui::Row::Item(a.slug(), a.desc(), on));
-            items.push((a, global));
+            items.push((a, global, was));
         }
     }
 
     match ui::multiselect("configure cona agents", &rows)? {
         None => Ok(None),
         Some(picked) => {
-            let (mut proj, mut glob) = (Vec::new(), Vec::new());
-            for ord in picked {
-                let (agent, global) = items[ord];
-                if global {
-                    glob.push(agent);
-                } else {
-                    proj.push(agent);
+            // Diff checked-now against installed-before: newly on → add,
+            // newly off → remove. Still-on agents are re-installed too —
+            // idempotent, and it refreshes marker blocks after a version bump.
+            let now_on: std::collections::HashSet<usize> = picked.into_iter().collect();
+            let (mut proj, mut glob) = (ScopePlan::default(), ScopePlan::default());
+            for (i, &(agent, global, was)) in items.iter().enumerate() {
+                let plan = if global { &mut glob } else { &mut proj };
+                if now_on.contains(&i) {
+                    plan.add.push(agent);
+                } else if was {
+                    plan.remove.push(agent);
                 }
             }
             Ok(Some((proj, glob)))

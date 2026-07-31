@@ -218,7 +218,11 @@ src/dashboard.rs `cona ui` — ratatui live TUI, read-only. DBs opened ONCE (not
                  panic)
 src/ui.rs        ANSI styling (zero deps): NO_COLOR/CLICOLOR_FORCE/TERM=dumb +
                  IsTerminal — piped output stays plain (agents!). All CLI colors
-                 run through here; clap help styles in main.rs. ui::select = THE
+                 run through here; clap help styles in main.rs. ui::cmd_table =
+                 THE two-column `command  description` table (install's next
+                 steps, setup's try-it, `agents status`'s manage list) — one
+                 alignment + dim/highlight decision, padded BEFORE coloring.
+                 ui::select = THE
                  raw-mode single-select; ui::multiselect = THE raw-mode
                  checklist over ui::Row (Header|Item) — headers/spacers skipped
                  by the cursor, `a` toggles all, returns a bool-per-row mask;
@@ -236,7 +240,20 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                  mod.rs   SKILL_MD = include_str!("../../SKILL.md") (single
                           source); marker-block + write_if_changed primitives;
                           idempotent writes (Change: Created/Updated/Unchanged),
-                          upsert_block/remove_block (tested); GITHUB_REPO/
+                          upsert_block/remove_block (tested); Mark is DATA
+                          ({label, verb, path}), never pre-rendered text —
+                          changed()/render() are methods, so grouping + "did a
+                          claude target move?" read fields and a quiet run that
+                          records 100+ marks and prints none pays nothing for
+                          display (the auto-refresh path is the query hot path);
+                          short_path (tested) = THE display path rule
+                          (cwd → ./…, $HOME → ~/…, else absolute), symlink-
+                          tolerant in 3 attempts cheapest-first — as-spelled
+                          (0 syscalls, the common case since paths are built by
+                          joining onto the anchor), then both sides canonicalized
+                          (macOS /tmp vs /private/tmp), then as-spelled under the
+                          resolved anchor (anchor via symlink whose subtree holds
+                          a further symlink); GITHUB_REPO/
                           USER_AGENT + fetch_release_archive = THE release
                           download/extract path (self-upgrade AND helper fetch)
                  upgrade.rs cmd_install/upgrade/uninstall/hooks; ONE git-hook
@@ -272,9 +289,15 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           mechanism; sync_subagents reads each file ONCE (gate +
                           splice share it; upsert_block_file would re-read) and
                           patches only YAML-frontmatter defs (never README/
-                          runbook prose), uninstall strips any marked .md;
+                          runbook prose), uninstall strips any marked .md.
+                          **Output prints only marks that MOVED**; unchanged
+                          ones collapse to one per-label tally line — a big
+                          ~/.claude/agents tree is 113 "subagent unchanged"
+                          rows that would scroll the real result away;
+                          the tally is a linear scan, not a map: the label set is
+                          closed (≤8) and first-seen order = touch order;
                           cmd_agents (thin) + cmd_agents_q (fully
-                          silent, reports changes via per-mark Mark.changed —
+                          silent, reports changes via per-mark Mark::changed() —
                           no output-string scanning); claude_hooks (settings.json
                           via serde_json); AgentName ValueEnum + AgentSel::want =
                           THE selection rule: named/--all override detection,
@@ -282,8 +305,9 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           AgentName::config_paths = THE per-scope file list an
                           agent's integration lives in (Pi empty at project
                           scope); installed() probes it for real markers/skill/
-                          hook — feeds cmd_agents_status (per-agent×scope ✓/–/
-                          n/a table + copy-paste manage hints) and
+                          hook — feeds cmd_agents_status (ONE row per agent:
+                          name + ✓on/–off/n-a per scope + desc; pad BEFORE
+                          coloring or ANSI breaks every column) and
                           cmd_agents_interactive (pre-checked checklist; diff of
                           before/after → install added, uninstall removed).
                           Restart-note gated on a claude-labeled mark actually
@@ -357,9 +381,21 @@ progress reported — no silent partial state). edit runs through cmd_edit_code
 `cona setup` always indexes + (project scope) installs git hooks, then picks
 agents. Interactive = no `-y`, no explicit scope arg, TTY → pick_agents shows
 ONE ui::multiselect across BOTH scopes (PROJECT + HOME sections via Row::Header,
-items pre-checked by AgentName::detected). Non-interactive (`-y`, an explicit
+items pre-checked by `installed() || detected()` — reality first, detection only
+as the first-run suggestion). **Setup is also the manage surface: unchecking an
+installed agent REMOVES it.** pick_agents diffs checked-now vs installed-before
+into a per-scope ScopePlan{add,remove}; cmd_setup uninstalls then installs
+(still-checked agents are re-installed — idempotent, refreshes stale marker
+blocks after a version bump). Non-interactive (`-y`, an explicit
 `project|global|all`, or non-TTY) installs every detected agent in the active
-scopes, no prompt. SetupScope still gates which sections/hooks run.
+scopes and removes NOTHING — there is no checklist to diff against, so nothing
+expresses "I want this gone", and `-y` must never delete files under ~/.claude.
+Not a special case: the same ScopePlan with an empty `remove` half.
+SetupScope still gates which sections/hooks run.
+**Every user-facing command prints its OWN title** (banner or `▸ heading`) —
+never the dispatch site, never the caller. `cmd_hooks` prints `▸ git hooks`
+itself, so `cona hooks` and setup's section both get it and a third caller
+cannot forget it.
 `cona uninstall` mirrors this: interactive (no `-y`, TTY) → ui::multiselect of
 agents/binary/data (a UninstallPlan); non-interactive/`-y` → full teardown
 (agents + binary), `~/.cona` only with `--purge`. Data removal is always
@@ -439,7 +475,14 @@ Coarse → fine: `cona tree --rank` (orient) → `cona outline <file>` (map a fi
 `cona show <Sym>` (read one symbol) → `cona edit <Sym>` (syntax-verified write).
 
 `<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name`. Index auto-refreshes;
-`cona index` (~1s) if a repo isn't indexed yet.
+`cona index` (~1s) if a repo isn't indexed yet. In a sandbox where `~/.cona`
+is not writable, cona falls back to temporary storage; set `CONA_DATA_DIR` when
+you need a persistent index. Use `--read-only` to inspect an existing index
+without writing code, indexes, or usage stats.
+
+Too many hits? `--path <dir>` scopes `find`/`refs`/`grep`/`tree` to a subtree.
+Ambiguous name? `cona show <Sym> --all` prints every definition instead of
+erroring. `cona grep` matches literally; add `--regex` for a real regex.
 
 Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
 `insert` `rename` `note` `check` — is listed in `cona --help`, with details per

@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 /// `cona hooks install|uninstall` — project git hooks that re-index after
 /// commit/merge/checkout (the self-upgrade variant is refresh_upgrade_hooks).
 pub fn cmd_hooks(root: &Path, action: &str) -> Result<()> {
+    // Every other user-facing command prints its own title; this one does too,
+    // so a caller can never forget it. `cona hooks` adds a banner above it.
+    println!("{}", ui::heading("git hooks"));
     let hooks_dir = root.join(".git").join("hooks");
     if !hooks_dir.exists() {
         bail!("no .git/hooks directory — is this a git repository?");
@@ -25,8 +28,11 @@ pub fn cmd_hooks(root: &Path, action: &str) -> Result<()> {
                 append_hook_line(&hooks_dir.join(n), &line, "index --quiet")?;
             }
             println!(
-                "git hooks installed: {} — index stays fresh automatically",
-                names.join(", ")
+                "{}",
+                ui::ok(&format!(
+                    "installed {} — index stays fresh automatically",
+                    names.join(", ")
+                ))
             );
         }
         "uninstall" => {
@@ -261,28 +267,27 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
 /// Post-install guidance: what to run next and what it does.
 fn print_next_steps() {
     println!("\n{}", ui::heading("next steps"));
-    let rows: [(&str, &str); 4] = [
-        (
-            "cona setup",
-            "interactive setup — index this project + wire agent integration",
-        ),
-        (
-            "cona setup project",
-            "project only (git hooks, .claude/, CLAUDE.md, AGENTS.md, …)",
-        ),
-        (
-            "cona setup global",
-            "global only (~/.claude, ~/.codex, … home configs)",
-        ),
-        (
-            "cona doctor",
-            "verify the installation (binary, PATH, hooks, skill, index)",
-        ),
-    ];
-    let width = rows.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
-    for (c, desc) in rows {
-        println!("  {}  {desc}", ui::cmd(&format!("{c:<width$}")));
-    }
+    print!(
+        "{}",
+        ui::cmd_table(&[
+            (
+                "cona setup",
+                "interactive setup — index this project + wire agent integration",
+            ),
+            (
+                "cona setup project",
+                "project only (git hooks, .claude/, CLAUDE.md, AGENTS.md, …)",
+            ),
+            (
+                "cona setup global",
+                "global only (~/.claude, ~/.codex, … home configs)",
+            ),
+            (
+                "cona doctor",
+                "verify the installation (binary, PATH, hooks, skill, index)",
+            ),
+        ])
+    );
     println!(
         "\n{}",
         ui::dim(
