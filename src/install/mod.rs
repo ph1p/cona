@@ -15,7 +15,7 @@
 use crate::ui;
 use anyhow::{anyhow, bail, Result};
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 pub const BLOCK_BEGIN: &str = "<!-- cona:begin -->";
 pub const BLOCK_END: &str = "<!-- cona:end -->";
@@ -321,32 +321,123 @@ pub(crate) fn write_if_changed(path: &Path, content: &str) -> Result<Change> {
     })
 }
 
-/// One recorded status line: its rendered text plus whether it denotes a real
-/// change (created/updated/installed/removed) vs an already-current no-op. The
-/// flag lets callers decide "did anything move?" without re-parsing the text.
+/// One recorded status line, kept as DATA (never as pre-rendered text): what
+/// was touched, what happened to it, where. Every question a caller asks —
+/// "did anything move?", "group by label", "did a claude target move?" — reads
+/// a field, so no caller ever parses a colored/padded string back apart.
+/// Rendering happens once, in `render`, at print time; a quiet run that records
+/// 100+ marks and prints none pays nothing for display.
 pub(crate) struct Mark {
-    pub line: String,
-    pub changed: bool,
+    pub label: &'static str,
+    pub verb: &'static str,
+    pub path: PathBuf,
 }
 
-/// Append a uniformly formatted status line: `label   verb   path`.
-/// Pad BEFORE coloring — ANSI escapes would break the column width.
-pub(crate) fn mark(done: &mut Vec<Mark>, label: &str, verb: &str, path: &Path) {
-    let padded = format!("{verb:<9}");
-    let (verb_col, changed) = match verb {
-        "created" | "updated" | "installed" => (ui::green(&padded), true),
-        "removed" => (ui::yellow(&padded), true),
-        _ => (ui::dim(&padded), false),
+impl Mark {
+    /// Does this denote a real change, vs an already-current no-op?
+    pub fn changed(&self) -> bool {
+        matches!(self.verb, "created" | "updated" | "installed" | "removed")
+    }
+
+    /// `label   verb   path` — the one status-line format.
+    /// Pad BEFORE coloring — ANSI escapes would break the column width.
+    pub fn render(&self) -> String {
+        let padded = format!("{:<9}", self.verb);
+        let verb_col = match self.verb {
+            "created" | "updated" | "installed" => ui::green(&padded),
+            "removed" => ui::yellow(&padded),
+            _ => ui::dim(&padded),
+        };
+        format!("{:<14} {verb_col} {}", self.label, short_path(&self.path))
+    }
+}
+
+/// Shorten `path` for display: under the cwd → `./…`, under `$HOME` → `~/…`,
+/// else unchanged. A full absolute path per line is mostly noise — the
+/// interesting part is the tail, and long temp/checkout prefixes push it off
+/// the screen.
+///
+/// Matching is symlink-tolerant, in three attempts, cheapest first:
+/// 1. as spelled — the common case (the path was *built* by joining onto the
+///    anchor), and it costs zero syscalls;
+/// 2. both sides fully resolved — on macOS the cwd reports as `/private/tmp/x`
+///    while a path built from args is `/tmp/x` (or vice versa), which a plain
+///    `strip_prefix` misses;
+/// 3. as spelled under the resolved anchor — an anchor reached via symlink
+///    whose subtree contains a *further* symlink, so the resolved path leaves
+///    the subtree entirely and (2) fails.
+///
+/// Canonicalization is lazy: attempt 1 short-circuits before any of it. For a
+/// path that no longer exists (a just-removed file) `canonicalize` fails and
+/// the resolved value is the original, collapsing (2) and (3).
+/// Falls back to the absolute path — never to a wrong relative one.
+pub(crate) fn short_path(path: &Path) -> String {
+    let rel_to = |base: &Path| -> Option<String> {
+        let strip = |p: &Path, b: &Path| {
+            p.strip_prefix(b)
+                .ok()
+                .filter(|rel| !rel.as_os_str().is_empty())
+                .map(|rel| rel.display().to_string())
+        };
+        if let Some(rel) = strip(path, base) {
+            return Some(rel);
+        }
+        let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let base_real = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+        strip(&real, &base_real).or_else(|| strip(path, &base_real))
     };
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(rel) = rel_to(&cwd) {
+            return format!("./{rel}");
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        if let Some(rel) = rel_to(&home) {
+            return format!("~/{rel}");
+        }
+    }
+    path.display().to_string()
+}
+
+/// Record what happened to one target. Pure — no formatting, no filesystem;
+/// display is `Mark::render`'s job, and a quiet caller never pays for it.
+pub(crate) fn mark(done: &mut Vec<Mark>, label: &'static str, verb: &'static str, path: &Path) {
     done.push(Mark {
-        line: format!("{label:<14} {verb_col} {}", path.display()),
-        changed,
+        label,
+        verb,
+        path: path.to_path_buf(),
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_path_shortens_home_and_leaves_foreign_paths_absolute() {
+        let home = dirs::home_dir().expect("home");
+        assert_eq!(
+            short_path(&home.join("some/where.md")),
+            "~/some/where.md",
+            "a path under $HOME should render as ~/…"
+        );
+        // The home dir itself has an empty tail — nothing to shorten to, so it
+        // must stay absolute rather than become a bare "~/".
+        assert_eq!(short_path(&home), home.display().to_string());
+        // A path under neither anchor stays fully qualified: better a long line
+        // than a relative path pointing somewhere else.
+        let foreign = Path::new("/definitely/not/here/x.md");
+        assert_eq!(short_path(foreign), "/definitely/not/here/x.md");
+    }
+
+    #[test]
+    fn short_path_prefers_cwd_over_home() {
+        // cona runs from inside the repo, so cwd is the more specific anchor;
+        // a file below it must read ./… even when it is also under $HOME.
+        let cwd = std::env::current_dir().expect("cwd");
+        let got = short_path(&cwd.join("Cargo.toml"));
+        assert_eq!(got, "./Cargo.toml", "cwd-relative should win, got {got}");
+    }
 
     #[test]
     fn upsert_appends_then_replaces() {

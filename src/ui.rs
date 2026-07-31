@@ -93,6 +93,18 @@ pub fn item(s: &str) -> String {
     format!("{} {}", dim("·"), s)
 }
 
+/// THE two-column `command   description` table: every "what to run next"
+/// block (install's next-steps, setup's try-it, `agents status`'s manage list)
+/// renders through here, so the alignment and the dim/highlight choice are one
+/// decision instead of one per call site.
+/// Pad BEFORE coloring — ANSI escapes would break the column width.
+pub fn cmd_table(rows: &[(&str, &str)]) -> String {
+    let width = rows.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+    rows.iter()
+        .map(|(c, desc)| format!("  {}  {}\n", cmd(&format!("{c:<width$}")), dim(desc)))
+        .collect()
+}
+
 /// Yes/no confirmation prompt (default No). Returns `false` — the safe
 /// answer — whenever stdin/stdout is not a terminal, so scripted/piped runs
 /// never block or accidentally destroy data.

@@ -265,6 +265,31 @@ pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
     println!("{}\n", ui::bold("cona agents"));
 
+    // One row per agent: name, the two scope cells, description. A table scans
+    // in one glance where a block-per-agent needs scrolling — and `▸` stays a
+    // section marker instead of doubling as a row bullet.
+    // Pad BEFORE coloring — ANSI escapes would break every column width.
+    let name_w = AgentName::ALL
+        .iter()
+        .map(|a| a.slug().len())
+        .max()
+        .unwrap_or(0);
+    let cell = |installed: bool, na: bool| {
+        // Widest cell text is "– off"/"✓ on"/"n/a" → pad to 5 chars.
+        if na {
+            ui::dim(&format!("{:<5}", "n/a"))
+        } else if installed {
+            ui::green(&format!("{:<5}", "✓ on"))
+        } else {
+            ui::dim(&format!("{:<5}", "– off"))
+        }
+    };
+    println!(
+        "  {}  {}  {}",
+        ui::dim(&format!("{:<name_w$}", "agent")),
+        ui::dim("project  global"),
+        ui::dim("target")
+    );
     let mut any_installed = false;
     for a in AgentName::ALL {
         let proj = a.installed(project_root, &home, false);
@@ -273,41 +298,31 @@ pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
         // does this agent even have a target in each scope?
         let proj_na = a.config_paths(project_root, &home, false).is_empty();
         let glob_na = a.config_paths(project_root, &home, true).is_empty();
-        let cell = |installed: bool, na: bool| {
-            if na {
-                ui::dim("n/a")
-            } else if installed {
-                ui::green("✓ on")
-            } else {
-                ui::dim("– off")
-            }
-        };
-        println!("{}", ui::heading(a.slug()));
-        println!("  {}", ui::dim(a.desc()));
         println!(
-            "  project {}    global {}",
+            "  {}  {}    {}  {}",
+            ui::bold(&format!("{:<name_w$}", a.slug())),
             cell(proj, proj_na),
-            cell(glob, glob_na)
+            cell(glob, glob_na),
+            ui::dim(a.desc())
         );
-        println!();
     }
+    println!();
 
     println!("{}", ui::heading("manage"));
-    println!(
-        "  {}",
-        ui::dim("cona agents add <name>            configure one agent (this project)")
-    );
-    println!(
-        "  {}",
-        ui::dim("cona agents add <name> --global   configure one agent (home configs)")
-    );
-    println!(
-        "  {}",
-        ui::dim("cona agents remove <name>         remove one agent")
-    );
-    println!(
-        "  {}",
-        ui::dim("cona agents                       interactive checklist (toggle any)")
+    print!(
+        "{}",
+        ui::cmd_table(&[
+            (
+                "cona agents add <name>",
+                "configure one agent (this project)"
+            ),
+            (
+                "cona agents add <name> --global",
+                "configure one agent (home configs)"
+            ),
+            ("cona agents remove <name>", "remove one agent"),
+            ("cona agents", "interactive checklist (toggle any)"),
+        ])
     );
     if !any_installed {
         println!(
@@ -637,15 +652,49 @@ pub fn cmd_agents_q(
         }
         return Ok(false);
     }
-    // Did anything actually move? Read the per-mark flag — no text scanning.
-    let changed = done.iter().any(|d| d.changed);
+    // Did anything actually move? Read the per-mark data — no text scanning.
+    let changed = done.iter().any(|d| d.changed());
     // Quiet auto-refresh stays fully silent unless (and even when) something
     // moved: it runs on the query hot path, so it must never print.
     if quiet {
         return Ok(changed);
     }
-    for d in &done {
-        println!("{}", d.line);
+    // Print what MOVED, one line each; collapse the already-current ones into a
+    // per-label tally. A big ~/.claude/agents tree yields 100+ "unchanged"
+    // subagent lines, which scroll the real result off the screen — the user
+    // needs to see what this run did, not an inventory of what it touched.
+    let (moved, same): (Vec<_>, Vec<_>) = done.iter().partition(|d| d.changed());
+    for d in &moved {
+        println!("{}", d.render());
+    }
+    if !same.is_empty() {
+        // Linear scan, not a map: the label set is closed (≤ 8 values) and
+        // first-seen order matches the order the targets were touched, which a
+        // hash/btree map would replace with an arbitrary/alphabetical one.
+        let mut tally: Vec<(&str, usize)> = Vec::new();
+        for d in &same {
+            match tally.iter_mut().find(|(l, _)| *l == d.label) {
+                Some((_, n)) => *n += 1,
+                None => tally.push((d.label, 1)),
+            }
+        }
+        // One label → name it ("claude skill"); several → just the total.
+        let detail = if tally.len() == 1 {
+            format!("{} already current", tally[0].0)
+        } else {
+            let parts: Vec<String> = tally
+                .iter()
+                .map(|(l, n)| {
+                    if *n == 1 {
+                        l.to_string()
+                    } else {
+                        format!("{l} ×{n}")
+                    }
+                })
+                .collect();
+            format!("{} already current: {}", same.len(), parts.join(", "))
+        };
+        println!("{}", ui::item(&ui::dim(&detail)));
     }
     println!(
         "{}",
@@ -655,9 +704,12 @@ pub fn cmd_agents_q(
             if global { "global" } else { "project" }
         ))
     );
-    // Only relevant when a Claude hook/skill actually moved (labels start with
-    // "claude ") — no reason to nag about a restart for a Cursor/Gemini-only edit.
-    let claude_moved = done.iter().any(|d| d.changed && d.line.contains("claude "));
+    // Only relevant when a Claude hook/skill actually moved — no reason to nag
+    // about a restart for a Cursor/Gemini-only edit. Reads the raw label field,
+    // never the colored/padded rendered line.
+    let claude_moved = done
+        .iter()
+        .any(|d| d.changed() && d.label.starts_with("claude"));
     if install && claude_moved {
         // Claude Code snapshots hooks + skills at startup for security, so a
         // running session won't see fresh changes until it reloads them.
