@@ -192,7 +192,11 @@ pub mod defaults {
 /// the prefix reading applies.
 pub(crate) fn path_matches_dir(rel: &str, filter: &str, dir_filter: bool) -> bool {
     let f = filter.trim_end_matches('/');
-    if rel == f || rel.starts_with(&format!("{f}/")) {
+    if rel == f {
+        return true;
+    }
+    // `/`-boundary reading: `rel` sits under the directory `f`.
+    if rel.strip_prefix(f).is_some_and(|rest| rest.starts_with('/')) {
         return true;
     }
     // An explicit trailing slash, or a filter that really is a directory,
@@ -203,16 +207,45 @@ pub(crate) fn path_matches_dir(rel: &str, filter: &str, dir_filter: bool) -> boo
     rel.starts_with(filter)
 }
 
-/// `path_matches_dir` with the directory question answered by the filesystem,
-/// relative to `root`. Used by every command that takes `--path`.
-pub(crate) fn path_matches_in(root: &Path, rel: &str, filter: &str) -> bool {
-    let is_dir = root.join(filter.trim_end_matches('/')).is_dir();
-    path_matches_dir(rel, filter, is_dir)
+/// A `--path` filter with the directory question answered ONCE.
+///
+/// The dir-vs-prefix reading depends only on `(root, filter)` — both
+/// loop-invariant — while every consumer applies the filter per candidate row
+/// (up to thousands). Resolving it at construction keeps the hot path a pure
+/// string compare: no syscall, no allocation. A struct rather than a closure so
+/// it holds only these two fields instead of pinning a caller's scope alive.
+pub(crate) struct PathFilter<'a> {
+    filter: Option<&'a str>,
+    dir_filter: bool,
 }
 
-/// `path_matches_in` lifted over an optional filter — `None` matches everything.
-pub(crate) fn path_ok(root: &Path, rel: &str, filter: Option<&str>) -> bool {
-    filter.is_none_or(|f| path_matches_in(root, rel, f))
+impl<'a> PathFilter<'a> {
+    /// Resolve `filter` against the filesystem — THE one stat.
+    pub(crate) fn new(root: &Path, filter: Option<&'a str>) -> Self {
+        let dir_filter = filter.is_some_and(|f| root.join(f.trim_end_matches('/')).is_dir());
+        PathFilter { filter, dir_filter }
+    }
+    /// Does this repo-relative path pass? A `None` filter matches everything.
+    pub(crate) fn ok(&self, rel: &str) -> bool {
+        self.filter
+            .is_none_or(|f| path_matches_dir(rel, f, self.dir_filter))
+    }
+    /// True when a filter is set at all (scoped-vs-global messaging).
+    pub(crate) fn is_scoped(&self) -> bool {
+        self.filter.is_some()
+    }
+    /// The raw filter, for error messages that quote what the user typed.
+    pub(crate) fn as_str(&self) -> &'a str {
+        self.filter.unwrap_or("")
+    }
+    /// The scope to hand an external search tool (rg/grep) as its search root,
+    /// so a scoped query WALKS less instead of merely reporting less. Only a
+    /// real directory is safe here — a partial name is not a path.
+    pub(crate) fn search_root(&self) -> Option<&'a str> {
+        self.filter
+            .filter(|_| self.dir_filter)
+            .map(|f| f.trim_end_matches('/'))
+    }
 }
 
 pub(crate) fn scan_ref_sites(
@@ -223,20 +256,22 @@ pub(crate) fn scan_ref_sites(
     path_filter: Option<&str>,
     mut visit: impl FnMut(&str, i64, &str, &str, &str) -> bool,
 ) -> Result<()> {
+    let pf = PathFilter::new(root, path_filter);
     let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let mut files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
     // Prefilter to files that literally contain the name (fail-open); a name
     // absent as a substring can't be a semantic ref. Always keep the preloaded
-    // file — it may hold the definition/refs the caller already read.
-    if let Some(candidates) = query::grep_prefilter(root, name, false) {
+    // file — it may hold the definition/refs the caller already read. A
+    // directory scope narrows the walk itself (see grep_prefilter); dropping an
+    // out-of-scope preloaded file there is consistent with the scope filter
+    // below, which would discard it anyway.
+    if let Some(candidates) = query::grep_prefilter(root, name, false, pf.search_root()) {
         files.retain(|f| candidates.contains(f) || preloaded.map(|(p, _)| p == f).unwrap_or(false));
     }
     // `--path` scoping applies AFTER the content prefilter and overrides the
     // preloaded exemption — an explicit scope means the caller does not want
     // out-of-scope files, defining file included.
-    if path_filter.is_some() {
-        files.retain(|f| path_ok(root, f, path_filter));
-    }
+    files.retain(|f| pf.ok(f));
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     'files: for rel in &files {
         let owned;
@@ -333,6 +368,17 @@ fn locate_candidates(
     Ok(if exact.is_empty() { rows } else { exact })
 }
 
+/// THE `file.rs:Name` locator grammar — the ONE rule deciding whether an
+/// argument is a path-qualified symbol (`Some((path, name))`) or a plain symbol
+/// (`None`). Shared so the resolver and `show`'s path sniffing can't disagree
+/// about what a locator looks like.
+pub(crate) fn split_locator(arg: &str) -> Option<(&str, &str)> {
+    match arg.rsplit_once(':') {
+        Some((f, n)) if f.contains('.') && !n.is_empty() && !n.contains('/') => Some((f, n)),
+        _ => None,
+    }
+}
+
 /// Raw candidate rows plus the bare symbol name after stripping a `path:`
 /// prefix — the shared lookup behind `locate_candidates`/`locate_symbol_kind`.
 fn locate_rows(
@@ -343,11 +389,9 @@ fn locate_rows(
     // `path:Name` narrows to symbols in that file (exact path or `/`-guarded
     // suffix) — the escape hatch for same-named top-level symbols, and exactly
     // the shape the ambiguity listing below prints.
-    let (file_filter, symbol) = match symbol.rsplit_once(':') {
-        Some((f, n)) if f.contains('.') && !n.is_empty() && !n.contains('/') => {
-            (Some(f.to_string()), n)
-        }
-        _ => (None, symbol),
+    let (file_filter, symbol) = match split_locator(symbol) {
+        Some((f, n)) => (Some(f.to_string()), n),
+        None => (None, symbol),
     };
     let mut stmt = conn.prepare(
         "SELECT f.path, s.start_line, s.end_line, s.qualified
@@ -439,9 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn path_ok_none_matches_everything() {
+    fn path_filter_none_matches_everything() {
         let root = Path::new("/nonexistent-cona-test-root");
-        assert!(path_ok(root, "anything/at/all.rs", None));
-        assert!(!path_ok(root, "src/db.rs", Some("tests")));
+        assert!(PathFilter::new(root, None).ok("anything/at/all.rs"));
+        assert!(!PathFilter::new(root, Some("tests")).ok("src/db.rs"));
     }
 }

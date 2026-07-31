@@ -770,7 +770,7 @@ fn run() -> Result<()> {
             let (out, baseline) = if *rank {
                 cmd_tree_rank(&root, &conn, *budget, path.as_deref(), cli.json)?
             } else {
-                cmd_tree(&conn, *budget, path.as_deref(), cli.json)?
+                cmd_tree(&root, &conn, *budget, path.as_deref(), cli.json)?
             };
             print!("{out}");
             finish(
@@ -785,7 +785,7 @@ fn run() -> Result<()> {
         Cmd::Nav(Nav::Outline(a)) | Cmd::Outline(a) => {
             let OutlineArgs { file, sig } = a;
             let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_outline(&conn, file, *sig, cli.json, Some(&root))?;
+            let (out, baseline) = cmd_outline(&root, &conn, file, *sig, cli.json)?;
             print!("{out}");
             finish(&root, "outline", t0, &out, baseline, file);
         }
