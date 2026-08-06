@@ -111,7 +111,25 @@ fn write_verified(
             );
         }
     }
-    std::fs::write(abs, new_src)?;
+    // Atomic replace: write a sibling temp file, then rename over the target.
+    // A crash or ENOSPC mid-write must never leave a truncated source file —
+    // the rename either fully lands or the original survives intact.
+    let tmp = abs.with_extension(format!(
+        "{}.cona-tmp",
+        abs.extension().and_then(|e| e.to_str()).unwrap_or("")
+    ));
+    std::fs::write(&tmp, new_src)
+        .and_then(|()| {
+            // carry over the original's permissions (exec bits etc.) — the temp
+            // file was created with defaults
+            if let Ok(meta) = std::fs::metadata(&abs) {
+                let _ = std::fs::set_permissions(&tmp, meta.permissions());
+            }
+            std::fs::rename(&tmp, &abs)
+        })
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
     Ok(())
 }
 
