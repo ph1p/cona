@@ -1295,6 +1295,13 @@ fn read_only_command(cmd: &Cmd) -> bool {
             | Cmd::BlameFlat(_)
             | Cmd::HotFlat(_)
             | Cmd::CouplingFlat(_)
+            // stats/projects only read: telemetry writes are already suppressed
+            // by the read-only DB layer, and SKILL.md sells --read-only as safe
+            // for all inspection
+            | Cmd::Project(Project::Stats(_))
+            | Cmd::Project(Project::Projects)
+            | Cmd::StatsFlat(_)
+            | Cmd::ProjectsFlat
     )
 }
 
