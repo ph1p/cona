@@ -479,6 +479,7 @@ pub fn cmd_check(
     let mut out = String::new();
     let mut baseline = 0i64;
     let mut total_errors = 0usize;
+    let mut checked = 0usize;
     for path in &files {
         let abs = root.join(path);
         let Some(language) = lang::detect_lang(path) else {
@@ -490,9 +491,15 @@ pub fn cmd_check(
         baseline += db::est_tokens(src.len());
         let errors = lang::syntax_errors(language, &src)?;
         total_errors += errors.len();
+        checked += 1;
         if !json {
             if errors.is_empty() {
-                out.push_str(&format!("{path}: ok\n"));
+                // Per-file "ok" lines only for an explicit single-file check;
+                // the changed-files sweep summarizes instead of printing one
+                // no-op line per clean file.
+                if file.is_some() {
+                    out.push_str(&format!("{path}: ok\n"));
+                }
             } else {
                 out.push_str(&format!("{path}: {} syntax error(s)\n", errors.len()));
                 for line in &errors {
@@ -514,6 +521,15 @@ pub fn cmd_check(
     }
     if files.is_empty() && !json {
         out.push_str("no changed files to check\n");
+    } else if file.is_none() && !json {
+        // one-line verdict for the sweep — replaces N "path: ok" no-op lines
+        if total_errors == 0 {
+            out.push_str(&format!("{checked} changed file(s) parse clean\n"));
+        } else {
+            out.push_str(&format!(
+                "{total_errors} syntax error(s) across {checked} changed file(s)\n"
+            ));
+        }
     }
     if json {
         return jout(
