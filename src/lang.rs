@@ -176,10 +176,13 @@ fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, bool, &'static
             "class_definition" => Some(("class", true, "name")),
             _ => None,
         },
+        // NOTE: `const foo = () => …` (the dominant modern form) is handled
+        // structurally in walk() — the symbol is the declarator, not a node
+        // kind classify() can see.
         "javascript" | "typescript" | "tsx" => match node_kind {
             "function_declaration" => Some(("fn", false, "name")),
             "generator_function_declaration" => Some(("fn*", false, "name")),
-            "class_declaration" => Some(("class", true, "name")),
+            "class_declaration" | "abstract_class_declaration" => Some(("class", true, "name")),
             "method_definition" => Some(("method", false, "name")),
             "interface_declaration" => Some(("interface", true, "name")),
             "type_alias_declaration" => Some(("type", false, "name")),
@@ -259,11 +262,19 @@ fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, bool, &'static
             "function_declaration" => Some(("fn", false, "name")),
             _ => None,
         },
-        // struct/enum/extension all parse as class_declaration — labeled "class"
+        // struct/enum/extension/actor all parse as class_declaration — walk()
+        // relabels from the declaration keyword so `cona find --kind struct` works
         "swift" => match node_kind {
             "class_declaration" => Some(("class", true, "name")),
             "protocol_declaration" => Some(("protocol", true, "name")),
-            "function_declaration" => Some(("func", false, "name")),
+            "function_declaration" | "protocol_function_declaration" => {
+                Some(("func", false, "name"))
+            }
+            "init_declaration" => Some(("init", false, FIXED_NAME)),
+            "deinit_declaration" => Some(("deinit", false, FIXED_NAME)),
+            "typealias_declaration" => Some(("type", false, "name")),
+            "associatedtype_declaration" => Some(("type", false, "name")),
+            "subscript_declaration" => Some(("subscript", false, FIXED_NAME)),
             _ => None,
         },
         // name is the first `word` child — FIRST_CHILD grabs it
@@ -435,6 +446,10 @@ const DOCKER_FROM: &str = "\0dockerfrom";
 /// (`resource "aws_instance" "web"` → `resource.aws_instance.web`). Blocks
 /// without labels (`locals {}`, `terraform {}`) yield just the type.
 const HCL_BLOCK: &str = "\0hclblock";
+/// Sentinel for anonymous declarations whose kind IS their name (Swift
+/// `init`/`deinit`/`subscript`): the name is the node kind minus
+/// `_declaration`, so `Foo.init` stays addressable without a name field.
+const FIXED_NAME: &str = "\0fixedname";
 
 /// Resolves names for the NESTED sentinel: grammars where the identifier is a
 /// known child kind buried past keywords/wrappers. Returns None → symbol skipped.
@@ -616,6 +631,9 @@ fn node_name(node: Node, src: &str, field: &str, lang: &str) -> Option<String> {
         let t = n.utf8_text(src.as_bytes()).ok()?.trim();
         return (!t.is_empty()).then(|| t.to_string());
     }
+    if field == FIXED_NAME {
+        return node.kind().strip_suffix("_declaration").map(str::to_string);
+    }
     if field == FIRST_CHILD {
         let n = node.named_child(0)?;
         let text = n.utf8_text(src.as_bytes()).ok()?;
@@ -741,10 +759,110 @@ pub fn first_param_is_receiver(sig: &str) -> bool {
         || first.starts_with("this ")
 }
 
+/// JS/TS: a `variable_declarator` (or class field) whose value is a function —
+/// `const foo = () => …`, `bar = function …` — is a function definition in all
+/// but node kind. Returns the value node so walk() can descend for nested defs.
+fn fn_valued_declarator<'a>(decl: Node<'a>, src: &str) -> Option<(String, Node<'a>)> {
+    let value = decl.child_by_field_name("value")?;
+    if !matches!(
+        value.kind(),
+        "arrow_function" | "function_expression" | "function" | "generator_function"
+    ) {
+        return None;
+    }
+    // `name` (TS fields) or `property` (JS field_definition); destructuring
+    // patterns are skipped — there is no single name to index.
+    let name_node = decl
+        .child_by_field_name("name")
+        .or_else(|| decl.child_by_field_name("property"))?;
+    if !name_node.kind().ends_with("identifier") && name_node.kind() != "property_identifier" {
+        return None;
+    }
+    let name = name_node.utf8_text(src.as_bytes()).ok()?.trim().to_string();
+    (!name.is_empty()).then_some((name, value))
+}
+
+/// Swift folds struct/enum/extension/actor into `class_declaration`; the real
+/// kind is the declaration keyword, exposed so labels stay truthful.
+fn swift_class_label(node: Node, src: &str) -> &'static str {
+    let mut cursor = node.walk();
+    for c in node.children(&mut cursor) {
+        match c.kind() {
+            "struct" => return "struct",
+            "enum" => return "enum",
+            "extension" => return "extension",
+            "actor" => return "actor",
+            "class" => return "class",
+            _ => {}
+        }
+        // stop scanning once we're past the intro keywords
+        if c.kind() == "type_identifier" || c.kind() == "user_type" {
+            break;
+        }
+    }
+    let _ = src;
+    "class"
+}
+
 fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<Sym>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
+        // js/ts: function-valued bindings — the declarator, not a classifiable
+        // statement kind, carries the symbol
+        if matches!(lang, "javascript" | "typescript" | "tsx") {
+            let declish = matches!(
+                child.kind(),
+                "lexical_declaration"
+                    | "variable_declaration"
+                    | "public_field_definition"
+                    | "field_definition"
+            );
+            if declish {
+                let mut c2 = child.walk();
+                let decls: Vec<Node> = if child.kind().ends_with("_definition") {
+                    vec![child]
+                } else {
+                    child
+                        .named_children(&mut c2)
+                        .filter(|d| d.kind() == "variable_declarator")
+                        .collect()
+                };
+                let mut emitted = false;
+                for decl in decls {
+                    if let Some((name, value)) = fn_valued_declarator(decl, src) {
+                        let label = if child.kind().ends_with("_definition") {
+                            "method"
+                        } else {
+                            "fn"
+                        };
+                        let qualified = match parent {
+                            Some(p) => format!("{}.{}", p, name),
+                            None => name.clone(),
+                        };
+                        out.push(Sym {
+                            name,
+                            qualified: qualified.clone(),
+                            kind: label,
+                            parent: parent.map(|s| s.to_string()),
+                            start_line: decl.start_position().row + 1,
+                            end_line: decl.end_position().row + 1,
+                            signature: first_line_sig(decl, src),
+                        });
+                        walk(value, src, lang, Some(&qualified), out);
+                        emitted = true;
+                    }
+                }
+                if emitted {
+                    continue;
+                }
+            }
+        }
         if let Some((label, _is_container, name_field)) = classify(lang, child.kind()) {
+            let label = if lang == "swift" && child.kind() == "class_declaration" {
+                swift_class_label(child, src)
+            } else {
+                label
+            };
             if needs_body(child.kind()) && child.child_by_field_name("body").is_none() {
                 walk(child, src, lang, parent, out);
                 continue;
@@ -1124,7 +1242,17 @@ fn ref_lines_textual(src: &str, name: &str) -> Vec<usize> {
 /// Kind taxonomy — the labels minted by `classify()`. Which kinds are types
 /// and which are callable is language knowledge and lives HERE; commands
 /// consume the predicates instead of hardcoding label lists.
-pub const TYPE_KINDS: &[&str] = &["struct", "enum", "trait", "type", "class", "interface"];
+pub const TYPE_KINDS: &[&str] = &[
+    "struct",
+    "enum",
+    "trait",
+    "type",
+    "class",
+    "interface",
+    "record",
+    "actor",
+    "extension",
+];
 
 pub fn is_type_kind(kind: &str) -> bool {
     TYPE_KINDS.contains(&kind)

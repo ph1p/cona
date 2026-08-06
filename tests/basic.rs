@@ -178,6 +178,49 @@ fn swift_classes_protocols_functions() {
 }
 
 #[test]
+fn swift_declaration_kinds_and_members() {
+    let src = "struct S {\n  init() {}\n  subscript(i: Int) -> Int { i }\n}\n\
+               extension S {\n  func ext() {}\n}\nactor A {}\ntypealias T = Int\n\
+               enum E {}\nclass C {\n  deinit {}\n}\n";
+    let syms = lang::extract_symbols("swift", src).unwrap();
+    let kind_of = |q: &str| syms.iter().find(|s| s.qualified == q).map(|s| s.kind);
+    // struct/enum/extension/actor relabeled from the declaration keyword
+    assert_eq!(kind_of("S"), Some("struct"), "{syms:?}");
+    assert_eq!(kind_of("E"), Some("enum"), "{syms:?}");
+    assert_eq!(kind_of("A"), Some("actor"), "{syms:?}");
+    assert_eq!(kind_of("C"), Some("class"), "{syms:?}");
+    assert!(
+        syms.iter().any(|s| s.name == "S" && s.kind == "extension"),
+        "extension S must be captured as its own kind: {syms:?}"
+    );
+    // anonymous members addressable via the FIXED_NAME sentinel
+    assert_eq!(kind_of("S.init"), Some("init"), "{syms:?}");
+    assert_eq!(kind_of("S.subscript"), Some("subscript"), "{syms:?}");
+    assert_eq!(kind_of("C.deinit"), Some("deinit"), "{syms:?}");
+    assert_eq!(kind_of("S.ext"), Some("func"), "{syms:?}");
+    assert_eq!(kind_of("T"), Some("type"), "{syms:?}");
+}
+
+#[test]
+fn ts_function_valued_consts_are_indexed() {
+    let src = "export const handler = async (req: Request) => {\n  return null\n}\n\
+               const legacy = function () {}\n\
+               class C {\n  onClick = () => {}\n}\n\
+               const nested = () => {\n  const inner = () => {}\n}\n\
+               const notAFn = 42\nconst { destructured } = mod\n";
+    let syms = lang::extract_symbols("typescript", src).unwrap();
+    let kind_of = |q: &str| syms.iter().find(|s| s.qualified == q).map(|s| s.kind);
+    assert_eq!(kind_of("handler"), Some("fn"), "{syms:?}");
+    assert_eq!(kind_of("legacy"), Some("fn"), "{syms:?}");
+    assert_eq!(kind_of("C.onClick"), Some("method"), "{syms:?}");
+    // nested arrow inside an arrow body is qualified under its parent
+    assert_eq!(kind_of("nested.inner"), Some("fn"), "{syms:?}");
+    // non-function bindings and destructuring stay unindexed
+    assert!(syms.iter().all(|s| s.name != "notAFn"), "{syms:?}");
+    assert!(syms.iter().all(|s| s.name != "destructured"), "{syms:?}");
+}
+
+#[test]
 fn bash_functions() {
     let src = "foo() {\n  echo hi\n}\nfunction bar {\n  echo yo\n}\n";
     let quals = quals("bash", src);
