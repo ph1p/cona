@@ -180,7 +180,11 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
 
     // phase 3: single write transaction. The guard rolls back automatically
     // if any upsert, symbol insert, or cleanup operation fails.
-    let tx = conn.unchecked_transaction()?;
+    // IMMEDIATE takes the write lock at BEGIN, so a concurrent writer waits out
+    // busy_timeout instead of hitting the deferred-upgrade SQLITE_BUSY (which
+    // SQLite returns instantly, timeout ignored) — the watch+hook combination
+    // makes two simultaneous writers a normal occurrence, not an edge case.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     {
         let mut upsert = tx.prepare(
             "INSERT INTO files(path, mtime, size, lang) VALUES(?1,?2,?3,?4)
@@ -407,8 +411,10 @@ pub fn reindex_file(root: &Path, conn: &Connection, rel: &str) -> Result<usize> 
     let src = std::fs::read_to_string(&abs)?;
     let symbols = lang::extract_symbols(language, &src)?;
     // one transaction: a crash between the files upsert and the symbol inserts
-    // must not leave a "fresh" file with missing symbols
-    let tx = conn.unchecked_transaction()?;
+    // must not leave a "fresh" file with missing symbols. IMMEDIATE so a
+    // concurrent writer (watch vs. hook) waits instead of failing — see
+    // index_project's phase-3 note.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     tx.execute(
         "INSERT INTO files(path, mtime, size, lang) VALUES(?1,?2,?3,?4)
          ON CONFLICT(path) DO UPDATE SET mtime=?2, size=?3, lang=?4",
