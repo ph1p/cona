@@ -1283,6 +1283,12 @@ pub fn cmd_grep(
             }
         } else if path_filter.is_some() {
             out.push_str(" — try without --path");
+        } else {
+            // Plain identifier, no filter, zero hits: a typo or a half-remembered
+            // name is the likeliest cause — point at the recovery that handles it.
+            out.push_str(&format!(
+                "\n  try `cona find {pattern}` — symbol search with a typo-tolerant fallback"
+            ));
         }
         out.push('\n');
     }
