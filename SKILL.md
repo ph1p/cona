@@ -71,7 +71,7 @@ Everything below is reference — reach for it when the four above don't cover t
 - Prefer qualified names (`UserService.login`) to disambiguate.
 - Use `--json` when you need to parse output programmatically.
 - Line numbers in the index can go stale after manual edits — `cona index` refreshes in ms (or install git hooks: `cona hooks install`).
-- `--json` works on find, outline, show, tree, refs, grep, diff, context, stats, entries, tests, blame, hot, coupling, callers, callees, path, shape, deps.
+- `--json` works on find, outline, show, tree, refs, grep, diff, context, stats, entries, tests, blame, hot, coupling, callers, callees, path, shape, deps, check, impact.
 - Orientation in an unknown repo: `entries` → `tree --rank` → `deps` → `hot`. Before editing: `context`/`shape` + `tests` + `blame`. Leave `note`s for the next agent.
 - `cona setup` = index + git hooks + agent integration in one shot.
 - `cona stats` (per-project + global: savings, top targets, recent) shows how many tokens you've saved.
