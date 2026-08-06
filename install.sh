@@ -79,6 +79,30 @@ echo "cona v${ver} (${target}) -> ${BIN_DIR}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 dl "$url" "$tmp/cona.tar.gz" || err "download failed: $url"
+
+# Verify against the release's checksum sidecar — the Rust self-upgrade path
+# refuses unverified binaries, and this path must not be weaker. Mismatch is
+# fatal; a missing sidecar (older release) or missing hash tool only warns.
+if dl "$url.sha256" "$tmp/cona.tar.gz.sha256" 2>/dev/null; then
+    want="$(awk '{print $1}' "$tmp/cona.tar.gz.sha256")"
+    if command -v sha256sum >/dev/null 2>&1; then
+        got="$(sha256sum "$tmp/cona.tar.gz" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        got="$(shasum -a 256 "$tmp/cona.tar.gz" | awk '{print $1}')"
+    elif command -v openssl >/dev/null 2>&1; then
+        got="$(openssl dgst -sha256 -r "$tmp/cona.tar.gz" | awk '{print $1}')"
+    else
+        got=""
+        echo "warn: no sha256 tool found — skipping checksum verification"
+    fi
+    if [ -n "$got" ]; then
+        [ "$got" = "$want" ] || err "checksum mismatch for $url"
+        echo "checksum ok"
+    fi
+else
+    echo "warn: no checksum sidecar for this release — skipping verification"
+fi
+
 tar -xf "$tmp/cona.tar.gz" -C "$tmp" || err "extract failed"
 [ -f "$tmp/cona" ] || err "binary not found in archive"
 

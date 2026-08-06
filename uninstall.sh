@@ -16,9 +16,10 @@ else
     rm -fv "$HOME/.local/bin/cona"
     rm -rfv "$HOME/.claude/skills/cona" "$HOME/.claude/CONA.md" \
         "$HOME/.cursor/rules/cona.mdc" 2>/dev/null || true
-    for f in "$1"; do
-        if [ "$f" = "--purge" ]; then rm -rfv "$HOME/.cona"; fi
-    done
+    # scan ALL args (not just $1), and stay safe under `set -eu`
+    case " $* " in
+        *" --purge "*) rm -rfv "$HOME/.cona" ;;
+    esac
     echo "left for manual review (marker blocks / hook entries):"
     echo "  ~/.claude/CLAUDE.md, ~/.claude/settings.json, ~/.codex/AGENTS.md,"
     echo "  ~/.gemini/GEMINI.md, and .git/hooks in your project checkouts"
