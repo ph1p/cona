@@ -430,14 +430,18 @@ fn try_read(v: &serde_json::Value) -> Result<()> {
     };
 
     // Is it indexed? Only open the DB if one already exists; never create a
-    // project DB from a hook (mirrors try_grep's has_index gate).
-    if !db::project_db_path(&root).exists() {
-        return Ok(());
-    }
-    let conn = db::open_project_db(&root)?;
-    let indexed: bool = conn
-        .query_row("SELECT 1 FROM files WHERE path = ?1", [&rel], |_| Ok(true))
-        .unwrap_or(false);
+    // project DB from a hook (mirrors try_grep's has_index gate). A missing DB
+    // is NOT an early exit — the Nudge tier exists precisely for repos with no
+    // index yet, so we fall through with indexed=false and let decide_read run.
+    let conn = if db::project_db_path(&root).exists() {
+        Some(db::open_project_db(&root)?)
+    } else {
+        None
+    };
+    let indexed: bool = conn.as_ref().is_some_and(|c| {
+        c.query_row("SELECT 1 FROM files WHERE path = ?1", [&rel], |_| Ok(true))
+            .unwrap_or(false)
+    });
 
     // Log every full read of an indexed source file: re-read detection and the
     // read-volume streak are both size-blind, so this must happen even for files
@@ -490,8 +494,11 @@ fn try_read(v: &serde_json::Value) -> Result<()> {
         }
         Decision::Redirect => {
             // refresh a stale index entry so line ranges we point at are correct
-            if indexer::is_stale(&root, &conn, &rel) {
-                let _ = indexer::reindex_file(&root, &conn, &rel);
+            // (Redirect implies indexed, so the connection is always present here)
+            if let Some(conn) = &conn {
+                if indexer::is_stale(&root, conn, &rel) {
+                    let _ = indexer::reindex_file(&root, conn, &rel);
+                }
             }
             let reason = format!(
                 "{rel} is {size_desc}. cona can take you straight to \
