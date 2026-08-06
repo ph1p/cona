@@ -93,6 +93,19 @@ impl AgentName {
         }
     }
 
+    /// Picker row description annotated with the row's state — THE state
+    /// wording, shared by `cona setup` and `cona agents` so "uncheck removes"
+    /// reads the same everywhere.
+    pub fn state_desc(self, installed: bool, checked: bool) -> String {
+        if installed {
+            format!("{} · installed — uncheck to remove", self.desc())
+        } else if checked {
+            format!("{} · detected", self.desc())
+        } else {
+            self.desc().to_string()
+        }
+    }
+
     /// Is this agent's config present on disk? Claude Code + (project) AGENTS.md
     /// are always considered present — they are the unconditional core. THE one
     /// detection source, shared by cmd_agents' gating and the setup picker.
@@ -140,6 +153,10 @@ impl AgentName {
         let mut paths = self.config_paths(project_root, home, global);
         if let Some(p) = self.mcp_path(project_root, home, global) {
             paths.push((p, Presence::McpServer));
+        }
+        if self == AgentName::Claude {
+            let base = if global { home } else { project_root };
+            paths.push((base.join(".claude/agents"), Presence::SubagentDefs));
         }
         paths
     }
@@ -244,6 +261,10 @@ pub enum Presence {
     /// An MCP server entry (`mcpServers.cona` in JSON, a marked
     /// `[mcp_servers.cona]` table in TOML) — probed by `mcp_config`.
     McpServer,
+    /// A `.claude/agents` tree with at least one marked subagent definition —
+    /// per-def marker blocks are the only Claude footprint a fixed path list
+    /// can't name, so the probe scans the dir (recursive, bounded).
+    SubagentDefs,
 }
 
 impl Presence {
@@ -253,6 +274,11 @@ impl Presence {
             Presence::Needle => std::fs::read_to_string(p).is_ok_and(|c| c.contains("cona")),
             Presence::Marker => has_marker(p),
             Presence::McpServer => mcp_config::registered(p),
+            Presence::SubagentDefs => {
+                let mut defs = Vec::new();
+                subagent_defs(p, 0, &mut defs);
+                defs.iter().any(|d| has_marker(d))
+            }
         }
     }
 }
@@ -289,6 +315,17 @@ pub fn detected_agents(project_root: &Path, home: &Path, global: bool) -> Vec<Ag
     AgentName::ALL
         .into_iter()
         .filter(|a| a.detected(project_root, home, global))
+        .collect()
+}
+
+/// The agents that already carry cona config in this scope — THE refresh
+/// target set. Upgrades re-sync what IS installed, never what merely COULD be
+/// (the rustup/brew model: updating refreshes installed components only) — a
+/// detected-but-never-selected agent must not gain config from an upgrade.
+pub fn installed_agents(project_root: &Path, home: &Path, global: bool) -> Vec<AgentName> {
+    AgentName::ALL
+        .into_iter()
+        .filter(|a| a.installed(project_root, home, global))
         .collect()
 }
 
@@ -429,7 +466,7 @@ pub fn cmd_agents_interactive(project_root: &Path, global: bool) -> Result<()> {
     let rows: Vec<ui::Row> = choices
         .iter()
         .zip(&before)
-        .map(|(a, on)| ui::Row::Item(a.slug(), a.desc(), *on))
+        .map(|(a, on)| ui::Row::Item(a.slug(), a.state_desc(*on, *on).into(), *on))
         .collect();
 
     let title = if global {
@@ -872,22 +909,11 @@ pub fn cmd_agents_q(
 pub fn project_has_cona(project_root: &Path) -> bool {
     // The per-agent probe is THE source of which files carry an install; reuse
     // it (project scope never reads home, so passing project_root as `home` is
-    // inert). `installed()` covers skill/cursor/marker files + settings.json.
-    if AgentName::ALL
+    // inert). Claude's footprint includes the subagent-defs probe, so a scope
+    // whose only trace is a marked nested subagent definition still counts.
+    AgentName::ALL
         .iter()
         .any(|a| a.installed(project_root, project_root, false))
-    {
-        return true;
-    }
-    // Extra target `config_paths` doesn't enumerate (a glob has no place in its
-    // fixed path list): subagent definitions carrying the marker block. Shares
-    // the recursive enumerator with the writer — a flat scan would miss the
-    // nested definitions install actually patches, so uninstall and the
-    // version-gated re-sync would both skip a scope whose only footprint is
-    // there.
-    let mut paths = Vec::new();
-    subagent_defs(&project_root.join(".claude/agents"), 0, &mut paths);
-    paths.iter().any(|p| has_marker(p))
 }
 
 /// Add/remove cona hooks in a Claude Code settings.json.
@@ -1146,6 +1172,63 @@ mod tests {
         // global scope: only Claude is unconditional; nothing else present in home.
         let got_global = detected_agents(&proj, &home, true);
         assert_eq!(got_global, vec![AgentName::Claude]);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The upgrade refresh path targets `installed_agents` — an agent that is
+    /// merely DETECTED (its dir exists) but never got cona config must not be
+    /// in the set, or every upgrade would install config the user never chose.
+    #[test]
+    fn installed_agents_refresh_set_excludes_detected_but_unconfigured() {
+        let tmp = std::env::temp_dir().join(format!("cona-installedset-{}", std::process::id()));
+        let proj = tmp.join("proj");
+        let home = tmp.join("home");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(proj.join(".cursor")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+
+        // .cursor exists (detected) but carries no cona rule; AGENTS.md holds
+        // the marker block (installed).
+        std::fs::write(
+            proj.join("AGENTS.md"),
+            format!("{}\nguide\n", super::super::BLOCK_BEGIN),
+        )
+        .unwrap();
+
+        let got = installed_agents(&proj, &home, false);
+        assert_eq!(got, vec![AgentName::Agents]);
+        // sanity: detection WOULD have pulled in Claude + Cursor too
+        assert!(detected_agents(&proj, &home, false).contains(&AgentName::Cursor));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A scope whose only Claude footprint is a marked subagent definition
+    /// still counts Claude as installed — else the version-gated re-sync would
+    /// leave exactly those defs stale.
+    #[test]
+    fn installed_agents_counts_subagent_only_claude_footprint() {
+        let tmp = std::env::temp_dir().join(format!("cona-installedsub-{}", std::process::id()));
+        let proj = tmp.join("proj");
+        let home = tmp.join("home");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(proj.join(".claude/agents/engineering")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+
+        assert!(installed_agents(&proj, &home, false).is_empty());
+        std::fs::write(
+            proj.join(".claude/agents/engineering/dev.md"),
+            format!(
+                "---\nname: dev\n---\nbody\n{}\nguide\n",
+                super::super::BLOCK_BEGIN
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            installed_agents(&proj, &home, false),
+            vec![AgentName::Claude]
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

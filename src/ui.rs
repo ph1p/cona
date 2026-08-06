@@ -192,8 +192,9 @@ pub enum Row<'a> {
     /// A group heading — skipped by the cursor, rendered bold. Blank name = a
     /// spacer line.
     Header(&'a str),
-    /// A toggleable choice: display name, dim description, initial checked state.
-    Item(&'a str, &'a str, bool),
+    /// A toggleable choice: display name, dim description, initial checked
+    /// state. `Cow` so callers can pass static strs or built strings alike.
+    Item(&'a str, std::borrow::Cow<'a, str>, bool),
 }
 
 /// Raw-mode multi-select checklist over mixed header/item `rows`. Returns the

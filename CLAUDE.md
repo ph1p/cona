@@ -263,12 +263,18 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           last_remote_check) → fetches release binary from
                           GitHub, so upgrade works without source_dir
                           (cargo-install users). After ANY binary swap,
-                          cmd_upgrade → refresh_config: re-runs idempotent
-                          `agents install` (quiet) globally + in every
-                          registered project (db::registered_project_paths)
-                          that has cona config — SKILL/guide/hooks
+                          cmd_upgrade → refresh_config: ONE loop over global +
+                          every registered project (db::registered_project_paths)
+                          re-runs idempotent `agents install`, targeting ONLY
+                          installed_agents (explicit names — a bare install
+                          autodetects and would ADD agents the user never
+                          selected; refresh = rustup model, update what IS
+                          installed; empty scope → just stamped, no pre-gate —
+                          installed_agents IS the gate) — SKILL/guide/hooks
                           (include_str!, baked at build) never lag the binary —
                           and stamps config_ver:<path>=CARGO_PKG_VERSION.
+                          Non-quiet prints one dim `path — agents` line per
+                          refreshed scope under a lazy heading.
                           Freshness VERSION-keyed, not timed: maybe_auto_update
                           → maybe_refresh_project_config compares
                           config_ver:<root> to env!("CARGO_PKG_VERSION") FIRST
@@ -279,10 +285,11 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                  agents.rs GUIDE_MD; subagent_defs = THE .claude/agents
                           enumeration, RECURSIVE (collections nest by category:
                           design/, engineering/, …; a flat read_dir misses every
-                          def) — consumed by BOTH sync_subagents and
-                          project_has_cona, so a nested-only footprint still
-                          counts as installed (else uninstall + the version-gated
-                          re-sync skip the scope). Bounded: SUBAGENT_MAX_DEPTH +
+                          def) — consumed by sync_subagents AND Claude's
+                          Presence::SubagentDefs footprint probe, so a
+                          nested-only footprint still counts as installed (else
+                          uninstall + the version-gated re-sync skip the
+                          scope). Bounded: SUBAGENT_MAX_DEPTH +
                           file_type() (no symlink follow). Subagents can't be
                           reached by one shared file — they run on their own
                           system prompt — so per-def marker blocks are the only
@@ -306,10 +313,19 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           config_paths = the guide/skill/hook targets a scope can
                           ACT on (Pi empty at project scope) → agents_in_scope +
                           the n/a cells; footprint_paths = those PLUS the MCP
-                          entry = "is cona installed here?" → installed() /
-                          project_has_cona / the ✓ cells. Merging them would let
-                          an MCP-only scope be offered in the picker and then
-                          receive nothing. mcp_registrations = THE single
+                          entry (Presence::McpServer) + Claude's subagent-defs
+                          probe (Presence::SubagentDefs) = "is cona installed
+                          here?" → installed() / project_has_cona (a thin
+                          any(installed) over ALL) / the ✓ cells. Merging them
+                          would let an MCP-only scope be offered in the picker
+                          and then receive nothing. installed_agents = THE
+                          refresh target set (plain installed() filter) —
+                          upgrade.rs sync_scope_config feeds it as explicit
+                          names so refresh never autodetects. state_desc = THE
+                          picker state wording (`· installed — uncheck to
+                          remove` / `· detected`), shared by setup's pick_agents
+                          and cmd_agents_interactive.
+                          mcp_registrations = THE single
                           traversal of ALL × scopes × mcp_path, shared by
                           cmd_agents_status (folds to one cell) and doctor
                           (prints registered rows).
@@ -424,7 +440,8 @@ path from agent_exe(). Skipped when the parent dir does not exist (except the pr
 failure there warns instead of aborting the install. Interactive = no `-y`, no explicit scope arg, TTY → pick_agents shows
 ONE ui::multiselect across BOTH scopes (PROJECT + HOME sections via Row::Header,
 items pre-checked by `installed() || detected()` — reality first, detection only
-as the first-run suggestion). **Setup is also the manage surface: unchecking an
+as the first-run suggestion; descriptions state the row's state via
+AgentName::state_desc, so remove-on-uncheck is visible before enter). **Setup is also the manage surface: unchecking an
 installed agent REMOVES it.** pick_agents diffs checked-now vs installed-before
 into a per-scope ScopePlan{add,remove}; cmd_setup uninstalls then installs
 (still-checked agents are re-installed — idempotent, refreshes stale marker

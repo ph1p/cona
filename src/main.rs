@@ -1550,7 +1550,9 @@ fn pick_agents(root: &Path, do_project: bool, do_global: bool) -> Result<Option<
 
     // `items[ordinal]` = the (agent, global, was_installed) that item row maps
     // back to; the ordinal is exactly what `multiselect` hands back for
-    // checked rows.
+    // checked rows. Descriptions carry the row's current state — a pre-checked
+    // box alone can't tell "already installed (uncheck = remove)" apart from
+    // "detected, suggested".
     let mut rows: Vec<ui::Row> = Vec::new();
     let mut items: Vec<(install::AgentName, bool, bool)> = Vec::new();
     for (global, header) in [
@@ -1564,14 +1566,14 @@ fn pick_agents(root: &Path, do_project: bool, do_global: bool) -> Result<Option<
         if scoped.is_empty() {
             continue;
         }
-        if !items.is_empty() {
+        if !rows.is_empty() {
             rows.push(ui::Row::Header("")); // spacer between sections
         }
         rows.push(ui::Row::Header(header));
         for a in scoped {
             let was = a.installed(root, &home, global);
             let on = was || a.detected(root, &home, global);
-            rows.push(ui::Row::Item(a.slug(), a.desc(), on));
+            rows.push(ui::Row::Item(a.slug(), a.state_desc(was, on).into(), on));
             items.push((a, global, was));
         }
     }

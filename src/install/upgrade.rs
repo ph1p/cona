@@ -519,19 +519,33 @@ fn refresh_config(quiet: bool) {
         None => return,
     };
     let mut refreshed = 0usize;
-
-    // global scope (~/.claude): refresh only if it already has cona config
-    if crate::install::agents::project_has_cona(&home) && sync_scope_config(&home, true, quiet) {
-        refreshed += 1;
-    }
-
-    // every registered project that carries cona config
-    for p in db::registered_project_paths() {
-        let root = Path::new(&p);
-        if root.is_dir()
-            && crate::install::agents::project_has_cona(root)
-            && sync_scope_config(root, false, quiet)
-        {
+    // ONE loop over every scope: the global (~/.claude) scope, then every
+    // registered project. `sync_scope_config` itself decides whether a scope
+    // has anything installed — no pre-gate, that would double the fs scan.
+    let projects = db::registered_project_paths();
+    let scopes = std::iter::once((home.clone(), true))
+        .chain(projects.into_iter().map(|p| (PathBuf::from(p), false)));
+    for (root, global) in scopes {
+        if !global && !root.is_dir() {
+            continue;
+        }
+        if let Some(names) = sync_scope_config(&root, &home, global, quiet) {
+            if !quiet {
+                // heading prints lazily, only once something actually refreshes
+                // — a run where every scope is empty stays silent
+                if refreshed == 0 {
+                    println!("\n{}", ui::heading("config refresh"));
+                }
+                let list: Vec<&str> = names.iter().map(|n| n.slug()).collect();
+                println!(
+                    "  {}",
+                    ui::dim(&format!(
+                        "{} — {}",
+                        super::short_path(&root),
+                        list.join(", ")
+                    ))
+                );
+            }
             refreshed += 1;
         }
     }
@@ -539,20 +553,33 @@ fn refresh_config(quiet: bool) {
     if !quiet && refreshed > 0 {
         println!(
             "{}",
-            ui::ok(&format!("config re-synced in {refreshed} scope(s)"))
+            ui::ok(&format!("config refreshed in {refreshed} scope(s)"))
         );
     }
 }
 
 /// Re-run the idempotent `agents install` in one scope and stamp it with the
-/// running version. Returns whether the scope was targeted (regardless of
-/// whether files actually moved) so callers can count. Errors are surfaced only
-/// when not `quiet`.
-fn sync_scope_config(root: &Path, global: bool, quiet: bool) -> bool {
-    match crate::install::agents::cmd_agents_q(root, "install", &[], false, global, quiet) {
+/// running version. Targets ONLY the agents already installed there
+/// (`installed_agents`) — a bare install would autodetect and add config for
+/// agents the user never selected. Returns the refreshed agent set, `None`
+/// when the scope had nothing installed or the install failed (surfaced only
+/// when not `quiet`).
+fn sync_scope_config(
+    root: &Path,
+    home: &Path,
+    global: bool,
+    quiet: bool,
+) -> Option<Vec<crate::install::agents::AgentName>> {
+    let names = crate::install::agents::installed_agents(root, home, global);
+    if names.is_empty() {
+        // nothing installed here — stamp so the version-gated probe stays cheap
+        let _ = db::meta_set(&config_ver_key(root), env!("CARGO_PKG_VERSION"));
+        return None;
+    }
+    match crate::install::agents::cmd_agents_q(root, "install", &names, false, global, quiet) {
         Ok(_) => {
             let _ = db::meta_set(&config_ver_key(root), env!("CARGO_PKG_VERSION"));
-            true
+            Some(names)
         }
         Err(e) => {
             if !quiet {
@@ -564,7 +591,7 @@ fn sync_scope_config(root: &Path, global: bool, quiet: bool) -> bool {
                     ))
                 );
             }
-            false
+            None
         }
     }
 }
@@ -714,13 +741,13 @@ pub fn cmd_uninstall(purge: bool, yes: bool) -> Result<()> {
         let rows = vec![
             ui::Row::Item(
                 "agents",
-                "cona from all agent configs + git hooks",
+                "cona from all agent configs + git hooks".into(),
                 has_agents,
             ),
-            ui::Row::Item("binary", "the installed cona executable", has_binary),
+            ui::Row::Item("binary", "the installed cona executable".into(), has_binary),
             ui::Row::Item(
                 "data",
-                "delete ~/.cona (indexes + stats, irreversible)",
+                "delete ~/.cona (indexes + stats, irreversible)".into(),
                 false,
             ),
         ];
@@ -931,28 +958,27 @@ fn maybe_refresh_project_config(project_root: &Path) {
     // outside `cona upgrade` (cargo-install, manual copy) never runs refresh_config,
     // so without a passive global heal ~/.claude stays pinned to the old version
     // until the user manually re-runs setup/upgrade.
-    maybe_refresh_scope(project_root, false);
-    if let Some(home) = dirs::home_dir() {
-        if home != project_root {
-            maybe_refresh_scope(&home, true);
-        }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    maybe_refresh_scope(project_root, &home, false);
+    if home != project_root {
+        maybe_refresh_scope(&home, &home, true);
     }
 }
 
 /// Version-gated passive re-sync of ONE scope's config to the running binary.
 /// Cheap sqlite read + string compare on the hot path; fs scan + write only on
 /// the rare version mismatch. Fully silent (query path never speaks).
-fn maybe_refresh_scope(root: &Path, global: bool) {
+fn maybe_refresh_scope(root: &Path, home: &Path, global: bool) {
     let recorded = db::meta_get(&config_ver_key(root)).ok().flatten();
     if recorded.as_deref() == Some(env!("CARGO_PKG_VERSION")) {
         return; // already in sync with this binary — one sqlite read, done
     }
-    // Version differs (or never recorded): only touch a scope the user opted
-    // into. project_has_cona's fs scan runs at most once per version change.
-    if !crate::install::agents::project_has_cona(root) {
-        return;
-    }
-    let _ = sync_scope_config(root, global, true);
+    // Version differs (or never recorded): sync_scope_config scans the scope
+    // itself (installed_agents) and touches only what's already installed —
+    // an empty scope just gets stamped so the probe stays one sqlite read.
+    let _ = sync_scope_config(root, home, global, true);
 }
 
 fn remote_check_due() -> bool {
