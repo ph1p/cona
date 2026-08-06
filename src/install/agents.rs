@@ -1059,7 +1059,10 @@ mod tests {
 
     #[test]
     fn quiet_reinstall_is_a_noop_when_already_current() {
-        let dir = std::env::temp_dir().join("cona-quiet-reinstall-test");
+        // pid-suffixed so concurrent test invocations (e.g. `cargo test` in two
+        // checkouts) can't race on one shared directory
+        let dir =
+            std::env::temp_dir().join(format!("cona-quiet-reinstall-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // seed a Claude project so the install has a target
@@ -1071,15 +1074,18 @@ mod tests {
         // Second install with identical baked content → no change. The MCP
         // entry bakes in `agent_exe()`, which reads `install_path` from the
         // SHARED global.db that a concurrently running lib test may rewrite
-        // between the two calls; that would flip the entry's command and make
-        // this a change for a reason the test isn't about. Re-run until the
-        // resolved exe holds still across the pair.
+        // between installs; that flips the entry's command and makes a rerun
+        // report a change for a reason this test isn't about. Retry until an
+        // install reports no change — each rerun re-bakes the currently
+        // resolved exe, so it converges once the flipping stops, while a real
+        // "reinstall always reports change" bug still exhausts the retries.
+        // (Comparing agent_exe() before/after one call is NOT enough: the flip
+        // can land between the previous install and the `before` sample.)
         let mut second = true;
         for _ in 0..5 {
-            let before = agent_exe();
             second =
                 cmd_agents_q(&dir, "install", &[AgentName::Claude], false, false, true).unwrap();
-            if agent_exe() == before {
+            if !second {
                 break;
             }
         }
