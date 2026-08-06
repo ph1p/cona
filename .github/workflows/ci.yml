@@ -22,6 +22,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - run: cargo test --locked
+      # resolve-helper is its own workspace under src/ — root cargo skips it.
+      # Without this it is first compiled during release, where failure is
+      # swallowed by continue-on-error and ships a release with no helper.
+      - run: cargo check --locked --manifest-path src/resolve-helper/Cargo.toml
 
   lint:
     name: fmt + clippy
