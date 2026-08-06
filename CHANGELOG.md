@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.16](https://github.com/ph1p/cona/compare/v0.0.15...v0.0.16) - 2026-08-06
+
+### Added
+
+- *(grep)* point zero-hit searches at find
+- *(lang)* index fn-valued JS/TS bindings and Swift declaration kinds
+
+### Fixed
+
+- *(install)* refresh only installed agents on upgrade
+- *(install)* verify the release checksum in install.sh
+- honour --read-only for stats and projects
+- *(check)* count checked files in the sweep summary
+- *(edit)* replace files atomically in write_verified
+- *(hook)* nudge on cold open in unindexed repos
+- *(indexer)* take immediate transactions for index writes
+
+### Other
+
+- *(install)* deflake the quiet-reinstall no-op check
+- *(skill)* list check and impact under --json
+
 ## [0.0.15](https://github.com/ph1p/cona/compare/v0.0.14...v0.0.15) - 2026-08-06
 
 ### Added
