@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/ph1p/cona/compare/v0.0.14...v0.0.15) - 2026-08-06
+
+### Added
+
+- *(mcp)* register the server in harness configs on agents install
+
+### Other
+
+- *(install)* drive MCP registration from one enumeration
+
 ## [0.0.14](https://github.com/ph1p/cona/compare/v0.0.13...v0.0.14) - 2026-07-31
 
 ### Added
