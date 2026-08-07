@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/ph1p/cona/compare/v0.0.16...v0.0.17) - 2026-08-07
+
+### Fixed
+
+- *(skill)* list pi in the agents install targets
+- *(show)* render --all candidates from located rows
+
 ## [0.0.16](https://github.com/ph1p/cona/compare/v0.0.15...v0.0.16) - 2026-08-06
 
 ### Added
