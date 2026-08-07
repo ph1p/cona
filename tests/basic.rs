@@ -722,6 +722,57 @@ fn edit_range_and_insert_roundtrip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// `show --all` renders every candidate of an ambiguous name — including the
+// same-file enum + impl pair, where the `file:Name` escape hatch cannot
+// disambiguate. Pins the guide/skill/MCP promise ("--all prints every
+// definition instead of erroring") and the honest ambiguity message: hatches
+// that cannot separate the pool (file/Parent.Name for a same-file pair) are
+// not suggested.
+#[test]
+fn show_all_renders_same_file_enum_impl_pair() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("cona-showall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("s.rs"),
+        "pub enum Thing { A }\nimpl Thing {\n    pub fn go(&self) {}\n}\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let run = |args: &[&str]| -> (bool, String) {
+        let o = Command::new(bin)
+            .args(args)
+            .env("CONA_DATA_DIR", dir.join(".cona-data"))
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr),
+        )
+    };
+
+    run(&["index"]);
+    // --all prints BOTH definitions, no ambiguity error
+    let (ok, out) = run(&["show", "Thing", "--all"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("enum Thing"), "{out}");
+    assert!(out.contains("impl Thing"), "{out}");
+    assert!(!out.contains("ambiguous"), "{out}");
+    // without --all the pair still errors (invariant 4), but the message only
+    // offers hatches that work here: --kind and --all — not file/Parent.Name
+    let (ok, msg) = run(&["show", "Thing"]);
+    assert!(!ok, "expected ambiguity error, got: {msg}");
+    assert!(msg.contains("--kind") && msg.contains("--all"), "{msg}");
+    assert!(
+        !msg.contains("file (`") && !msg.contains("Parent.Name"),
+        "{msg}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // Grouped subcommands (`nav show`) and their flat aliases (`show`) dispatch to
 // the same operation and produce identical output. Pins the CLI grouping
 // contract: flat forms stay backward-compatible forever.

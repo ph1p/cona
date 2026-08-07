@@ -533,18 +533,28 @@ pub fn cmd_show(
     if all {
         let cands = super::locate_all(conn, symbol, kind)?;
         if cands.len() > 1 {
+            // Render each candidate from the row locate_all already resolved —
+            // re-resolving by `file:Name` would re-hit the ambiguity whenever
+            // the candidates share one file (enum + impl, struct + impl). The
+            // rows carry index line ranges, so refresh stale candidate files
+            // first (invariant 2) and re-run the ONE lookup if anything moved.
+            let refreshed =
+                indexer::refresh_files(root, conn, cands.iter().map(|(p, ..)| p.as_str()));
+            let cands = if refreshed.any_refreshed {
+                super::locate_all(conn, symbol, kind)?
+            } else {
+                cands
+            };
             let mut out = String::new();
             let mut baseline = 0;
-            for (p, _, _, q) in &cands {
-                // address each candidate unambiguously by file:Name
-                let addr = format!("{p}:{}", db::name_tail(q));
-                match show_one(root, conn, &addr, opts, false, false) {
+            for c in &cands {
+                match show_located(root, conn, c, opts, false, false) {
                     Ok((body, b)) => {
                         out.push_str(&body);
                         out.push('\n');
                         baseline += b;
                     }
-                    Err(e) => out.push_str(&format!("{addr}: {e}\n")),
+                    Err(e) => out.push_str(&format!("{}:{}: {e}\n", c.0, db::name_tail(&c.3))),
                 }
             }
             if json {
@@ -567,10 +577,24 @@ fn show_one(
     json: bool,
     disclose_others: bool,
 ) -> Result<(String, i64)> {
-    let ShowOpts {
-        context, kind, sig, ..
-    } = opts;
-    let (path, s, e, q) = locate_fresh(root, conn, symbol, kind)?;
+    let located = locate_fresh(root, conn, symbol, opts.kind)?;
+    show_located(root, conn, &located, opts, json, disclose_others)
+}
+
+/// Render one already-located symbol. Split from `show_one` so `--all` can
+/// print candidates it holds — resolving them again by name would re-raise
+/// the very ambiguity `--all` exists to bypass. Callers own freshness: the
+/// located row's line range is used as-is (invariant 2).
+fn show_located(
+    root: &Path,
+    conn: &Connection,
+    located: &super::Located,
+    opts: ShowOpts<'_>,
+    json: bool,
+    disclose_others: bool,
+) -> Result<(String, i64)> {
+    let ShowOpts { context, sig, .. } = opts;
+    let (path, s, e, q) = located.clone();
     // --sig: the signature is already in the index — print it without ever
     // reading the file body. The leanest possible peek (one line, not the span).
     if sig {

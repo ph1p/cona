@@ -492,13 +492,26 @@ fn locate_symbol_kind(conn: &Connection, symbol: &str, kind: Option<&str>) -> Re
         .take(8)
         .map(|(p, s, _, q)| format!("  {q}  {p}:{s}"))
         .collect();
-    let example = pool
-        .first()
-        .map(|(p, _, _, q)| format!("{p}:{}", db::name_tail(q)))
-        .unwrap_or_default();
+    // Suggest only escape hatches that can separate THIS pool: a same-file
+    // enum + impl pair shares one path and one qualified name, so `file:Name`
+    // and `Parent.Name` would re-raise the same error — recommending them
+    // sends an agent down two dead ends before it tries `--kind`.
+    let mut hatches = Vec::new();
+    if pool.windows(2).any(|w| w[0].3 != w[1].3) {
+        hatches.push("Parent.Name".to_string());
+    }
+    if pool.windows(2).any(|w| w[0].0 != w[1].0) {
+        let example = pool
+            .first()
+            .map(|(p, _, _, q)| format!("{p}:{}", db::name_tail(q)))
+            .unwrap_or_default();
+        hatches.push(format!("file (`{example}`)"));
+    }
+    hatches.push("--kind".to_string());
     bail!(
-        "ambiguous '{symbol}' ({} matches) — qualify with Parent.Name, file (`{example}`), --kind, or show them all with --all:\n{}",
+        "ambiguous '{symbol}' ({} matches) — qualify with {}, or show them all with --all:\n{}",
         pool.len(),
+        hatches.join(", "),
         opts.join("\n")
     )
 }
