@@ -32,7 +32,17 @@ pub fn parse_gitmodules(body: &str) -> Vec<String> {
             // path or one climbing out with `..` would make the walk index a
             // tree outside the project root, whose files then can't be stored
             // as project-relative paths.
-            !p.is_empty() && !Path::new(p).is_absolute() && !p.split('/').any(|c| c == "..")
+            //
+            // Judged LEXICALLY, not via `Path::is_absolute`: .gitmodules is git
+            // config, so its paths are `/`-separated and host-independent, while
+            // `is_absolute` follows the host's rules — on Windows it calls
+            // `/etc` relative (no drive prefix) and would let it through. Both
+            // separators are rejected because a Windows checkout can hold
+            // `C:\x`, which `/`-splitting alone would not catch.
+            let abs = p.starts_with('/')
+                || p.starts_with('\\')
+                || p.as_bytes().get(1).is_some_and(|&c| c == b':');
+            !p.is_empty() && !abs && !p.split(['/', '\\']).any(|c| c == "..")
         })
         .collect()
 }
@@ -540,8 +550,16 @@ mod tests {
     #[test]
     fn gitmodules_rejects_paths_escaping_the_root() {
         // These would make the walk index a tree outside the project root,
-        // whose files cannot be stored as project-relative paths.
+        // whose files cannot be stored as project-relative paths. Rejection is
+        // lexical, so it must hold on every host: `Path::is_absolute` would call
+        // `/etc` relative on Windows, and a drive path relative on unix.
         let body = "path = /etc\npath = ../outside\npath = a/../../b\npath =\npath = ok/here\n";
         assert_eq!(parse_gitmodules(body), vec!["ok/here"]);
+        let win = "path = C:\\Windows\npath = \\\\server\\share\npath = a\\..\\..\\b\n";
+        assert!(
+            parse_gitmodules(win).is_empty(),
+            "{:?}",
+            parse_gitmodules(win)
+        );
     }
 }
