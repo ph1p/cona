@@ -586,6 +586,10 @@ fn mcp_stdio_handshake_and_tools_list() {
                 "\n",
                 r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
                 "\n",
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"more","arguments":{}}}"#,
+                "\n",
+                r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"find","arguments":{"name":"hello"}}}"#,
+                "\n",
             )
             .as_bytes(),
         )
@@ -598,7 +602,7 @@ fn mcp_stdio_handshake_and_tools_list() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 2); // notification gets no reply
+    assert_eq!(lines.len(), 4); // notification gets no reply
     assert_eq!(lines[0]["result"]["serverInfo"]["name"], "cona");
     // a supported protocol version is echoed back verbatim (negotiation)
     assert_eq!(lines[0]["result"]["protocolVersion"], "2025-03-26");
@@ -621,7 +625,27 @@ fn mcp_stdio_handshake_and_tools_list() {
         tools.contains(&"find") && tools.contains(&"edit"),
         "{tools:?}"
     );
-    // parity: callgraph + insight + knowledge tools are exposed over MCP too
+    // Progressive disclosure: tools/list carries the core tier plus the `more`
+    // gate, NOT the full set — the schemas are re-sent on every request, so the
+    // advanced tail is disclosed on demand instead.
+    assert!(tools.contains(&"more"), "missing disclosure gate: {tools:?}");
+    assert!(
+        tools.len() < 12,
+        "tools/list should stay small, got {}: {tools:?}",
+        tools.len()
+    );
+
+    // Parity is still total — the callgraph/insight/knowledge tools live behind
+    // `more`, so its payload (not tools/list) is what must list them.
+    let more = lines[2]["result"]["content"][0]["text"].as_str().unwrap();
+    let gated: serde_json::Value =
+        serde_json::from_str(&more[more.find('[').unwrap()..]).unwrap();
+    let gated: Vec<&str> = gated
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
     for t in [
         "insert",
         "batch_edit",
@@ -636,22 +660,56 @@ fn mcp_stdio_handshake_and_tools_list() {
         "tests",
         "note",
     ] {
-        assert!(tools.contains(&t), "missing MCP tool {t}: {tools:?}");
+        assert!(gated.contains(&t), "missing MCP tool {t}: {gated:?}");
     }
-    // behaviour annotations: read-only queries vs writing tools
+    // A tool is disclosed by exactly one tier, never both.
+    for t in &tools {
+        assert!(!gated.contains(t), "tool {t} disclosed twice");
+    }
+
+    // behaviour annotations: read-only queries vs writing tools. Core tools come
+    // from tools/list, gated ones from the `more` payload — annotations must
+    // survive disclosure, since that is the only place a client ever sees them.
     let ann = |name: &str| -> serde_json::Value {
-        lines[1]["result"]["tools"]
+        let from_list = lines[1]["result"]["tools"]
             .as_array()
             .unwrap()
             .iter()
             .find(|t| t["name"] == name)
-            .unwrap()["annotations"]
-            .clone()
+            .cloned();
+        let from_more = || {
+            serde_json::from_str::<serde_json::Value>(&more[more.find('[').unwrap()..])
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .cloned()
+                .unwrap()
+        };
+        from_list.unwrap_or_else(from_more)["annotations"].clone()
     };
     assert_eq!(ann("show")["readOnlyHint"], true);
     assert_eq!(ann("edit")["readOnlyHint"], false);
     assert_eq!(ann("edit")["destructiveHint"], true);
     assert_eq!(ann("insert")["destructiveHint"], false);
+
+    // A declared outputSchema is a contract: the tool must return matching
+    // structuredContent, so schema and payload are asserted together.
+    let find_tool = lines[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "find")
+        .unwrap()
+        .clone();
+    assert_eq!(find_tool["outputSchema"]["type"], "object");
+    assert!(find_tool["outputSchema"]["properties"]["symbols"].is_object());
+    assert!(
+        lines[3]["result"]["structuredContent"]["symbols"].is_array(),
+        "find must return structuredContent: {:?}",
+        lines[3]["result"]
+    );
 }
 
 // Drive the real binary against a real temp repo — matches the recovery-bug

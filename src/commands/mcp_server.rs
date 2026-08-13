@@ -3,21 +3,55 @@
 //! schemas and routes tools/call to the command implementations.
 
 use super::*;
-use crate::mcp::{read_only, tool_annotated as mcp_tool, writes};
+use crate::mcp::{
+    read_only, rows_schema, tool_annotated as mcp_tool, with_output_schema, writes, ToolOut,
+};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 
-fn mcp_tools() -> Vec<serde_json::Value> {
+/// Wrap a text result with the structured form parsed from the same command's
+/// `--json` render, under `field`.
+///
+/// `json_out` is what the cmd_* function produced with `json = true`: a JSON
+/// array (or object) as a string. It is parsed rather than re-queried so the
+/// structured payload and the text can never describe different index states.
+/// A parse failure degrades to text-only instead of failing the call — a
+/// missing `structuredContent` is a lost optimisation, a failed tool call is a
+/// lost answer.
+fn structured(text: String, json_out: &str, field: &str) -> ToolOut {
+    match serde_json::from_str::<serde_json::Value>(json_out) {
+        Ok(v) => ToolOut::structured(text, serde_json::json!({field: v})),
+        Err(_) => ToolOut::text(text),
+    }
+}
+
+/// Names of the always-exposed core tools, in tools/list order. The rest are
+/// reachable only after `more` discloses them (see `mcp_tools`).
+pub const CORE_TOOLS: &[&str] = &[
+    "find", "show", "refs", "outline", "tree", "grep", "context", "edit",
+];
+
+/// Every tool schema cona defines, core and extended alike. `mcp_tools`
+/// filters this for tools/list; `more` renders the extended tail from it, so
+/// the two can never disagree about a schema.
+fn all_tools() -> Vec<serde_json::Value> {
     use serde_json::json;
     let s = |d: &str| json!({"type": "string", "description": d});
     vec![
-        mcp_tool(
-            "find",
-            "Locate a symbol by name: file, line range, signature. Use instead of grepping for a definition",
-            json!({"name": s("symbol name (exact, then substring; case-insensitive)"), "kind": s("filter: fn, struct, class, method, …"), "path": s("only symbols in files under this prefix (file or directory)")}),
-            &["name"],
-            read_only("Find symbol"),
+        with_output_schema(
+            mcp_tool(
+                "find",
+                "Locate a symbol by name: file, line range, signature. Use instead of grepping for a definition",
+                json!({"name": s("symbol name (exact, then substring; case-insensitive)"), "kind": s("filter: fn, struct, class, method, …"), "path": s("only symbols in files under this prefix (file or directory)")}),
+                &["name"],
+                read_only("Find symbol"),
+            ),
+            rows_schema(
+                "symbols",
+                json!({"file": s("path relative to project root"), "kind": s("symbol kind"), "symbol": s("qualified name"), "start": {"type": "integer"}, "end": {"type": "integer"}, "sig": s("signature")}),
+                "matching symbols, best match first",
+            ),
         ),
         mcp_tool(
             "show",
@@ -26,19 +60,33 @@ fn mcp_tools() -> Vec<serde_json::Value> {
             &["symbol"],
             read_only("Show symbol source"),
         ),
-        mcp_tool(
-            "refs",
-            "Usage sites of a name as file:line (semantic — strings/comments don't match). Use instead of grepping for callers/usages",
-            json!({"name": s("identifier name"), "path": s("only references in files under this prefix (file or directory)")}),
-            &["name"],
-            read_only("Find references"),
+        with_output_schema(
+            mcp_tool(
+                "refs",
+                "Usage sites of a name as file:line (semantic — strings/comments don't match). Use instead of grepping for callers/usages",
+                json!({"name": s("identifier name"), "path": s("only references in files under this prefix (file or directory)")}),
+                &["name"],
+                read_only("Find references"),
+            ),
+            rows_schema(
+                "refs",
+                json!({"file": s("path relative to project root"), "line": {"type": "integer"}, "text": s("the source line")}),
+                "usage sites",
+            ),
         ),
-        mcp_tool(
-            "outline",
-            "All symbols of one file with line ranges. Use instead of reading a file to see what's in it, then show the one you need",
-            json!({"file": s("path relative to the project root"), "sig": {"type": "boolean", "description": "include full signatures (default: names + ranges only)"}}),
-            &["file"],
-            read_only("Outline file"),
+        with_output_schema(
+            mcp_tool(
+                "outline",
+                "All symbols of one file with line ranges. Use instead of reading a file to see what's in it, then show the one you need",
+                json!({"file": s("path relative to the project root"), "sig": {"type": "boolean", "description": "include full signatures (default: names + ranges only)"}}),
+                &["file"],
+                read_only("Outline file"),
+            ),
+            rows_schema(
+                "symbols",
+                json!({"file": s("path relative to project root"), "kind": s("symbol kind"), "symbol": s("qualified name"), "start": {"type": "integer"}, "end": {"type": "integer"}, "sig": s("signature"), "stale": {"type": "boolean", "description": "index line range may be out of date"}}),
+                "symbols in file order",
+            ),
         ),
         mcp_tool(
             "tree",
@@ -162,12 +210,71 @@ fn mcp_tools() -> Vec<serde_json::Value> {
     ]
 }
 
+/// Is this tool part of the always-visible core tier?
+fn is_core(t: &serde_json::Value) -> bool {
+    t.get("name")
+        .and_then(|n| n.as_str())
+        .is_some_and(|n| CORE_TOOLS.contains(&n))
+}
+
+/// The tools/list payload: the core tier plus one `more` gate.
+///
+/// Progressive disclosure. The full set is 21 tools ≈ 2.6k tokens of schema
+/// re-sent on EVERY request, spent whether or not the agent calls a single one
+/// — a real cost for a tool whose whole purpose is spending fewer tokens. The
+/// core eight answer the overwhelming majority of navigation (locate, read,
+/// search, orient, edit); the other thirteen are deliberate follow-ups an agent
+/// reaches for only once it knows what it wants, which is exactly when it can
+/// afford one extra call to `more` to fetch their schemas.
+///
+/// Extended tools stay CALLABLE the whole time — `mcp_call` dispatches on name
+/// and never consults this list. `more` only reveals schemas; it does not
+/// unlock anything, so a client that already knows a name (or reconnects
+/// mid-session) can call it directly and a disclosure step is never a
+/// prerequisite for correctness.
+fn mcp_tools() -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let all = all_tools();
+    let extended: Vec<&str> = all
+        .iter()
+        .filter(|t| !is_core(t))
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+        .collect();
+    let mut out: Vec<serde_json::Value> = all.iter().filter(|t| is_core(t)).cloned().collect();
+    out.push(mcp_tool(
+        "more",
+        &format!(
+            "Full schemas for cona's {} advanced tools — call once, then call them by name. \
+             Analysis: {}",
+            extended.len(),
+            extended.join(", ")
+        ),
+        json!({}),
+        &[],
+        read_only("More tools"),
+    ));
+    out
+}
+
+/// `more`'s body: the extended tools' schemas as JSON. Returned as text
+/// because MCP tool results are content blocks; the agent reads them the same
+/// way it reads tools/list.
+fn mcp_more() -> Result<String> {
+    let extended: Vec<serde_json::Value> =
+        all_tools().into_iter().filter(|t| !is_core(t)).collect();
+    Ok(format!(
+        "{} advanced cona tools — call any of them by name like a normal tool:\n\n{}",
+        extended.len(),
+        serde_json::to_string_pretty(&extended)?
+    ))
+}
+
 fn mcp_call(
     root: &Path,
     conn: &Connection,
     name: &str,
     args: &serde_json::Value,
-) -> Result<String> {
+) -> Result<ToolOut> {
     let t0 = Instant::now();
     let sarg = |k: &str| -> Result<&str> {
         args.get(k)
@@ -401,10 +508,58 @@ fn mcp_call(
             let words: Vec<String> = text.split_whitespace().map(String::from).collect();
             (cmd_note(conn, Some(sym), &words, None)?, 0, sym.to_string())
         }
+        // Schema disclosure, not a query: no index needed, nothing to bill a
+        // baseline against.
+        "more" => (mcp_more()?, 0, String::new()),
         other => bail!("unknown tool '{other}'"),
     };
     finish(root, &format!("mcp:{name}"), t0, &out, baseline, &detail);
-    Ok(out)
+
+    // Tools that declare an outputSchema must return matching
+    // structuredContent. The JSON render is produced by re-running the same
+    // query with json = true: the cmd_* functions return ONE string, either
+    // text or JSON, so there is no single call that yields both. The repeat is
+    // an indexed SQLite read against a connection already open and warm — far
+    // cheaper than the tokens the agent saves by not re-parsing a text render —
+    // and it is skipped entirely for tools without a schema.
+    //
+    // Errors here are swallowed into text-only: structuredContent is an
+    // optimisation, so a hiccup on the second pass must not fail a call whose
+    // answer is already in hand.
+    let structured_out = |field: &str, r: Result<(String, i64)>| match r {
+        Ok((j, _)) => structured(out.clone(), &j, field),
+        Err(_) => ToolOut::text(out.clone()),
+    };
+    Ok(match name {
+        "find" => structured_out(
+            "symbols",
+            cmd_find(
+                root,
+                conn,
+                sarg("name")?,
+                opt("kind"),
+                defaults::FIND_LIMIT,
+                opt("path"),
+                true,
+            ),
+        ),
+        "refs" => structured_out(
+            "refs",
+            cmd_refs(
+                root,
+                conn,
+                sarg("name")?,
+                defaults::REFS_LIMIT,
+                opt("path"),
+                true,
+            ),
+        ),
+        "outline" => structured_out(
+            "symbols",
+            cmd_outline(root, conn, sarg("file")?, flag("sig"), true),
+        ),
+        _ => ToolOut::text(out),
+    })
 }
 
 /// Server preamble echoed in the initialize result. Clients that lack
@@ -430,9 +585,12 @@ Typical flow, coarse to fine — pull the smallest slice that answers the questi
   3. show <Symbol> — the source of exactly ONE symbol (not the whole file)
   4. context <Symbol> — that symbol plus its callee signatures and call sites
 
-Before changing code: deps / callers / callees / path map imports and call \
-chains; impact / tests / shape scope a change first. edit / batch_edit / insert \
-are syntax-verified and roll back on a parse error.
+The tools listed here are the core set. Thirteen more — insert, batch_edit, \
+check, impact, callers, callees, path, deps, shape, entries, tests, note — \
+exist and are callable by name at any time; call `more` once for their full \
+schemas. Before changing code: deps / callers / callees / path map imports and \
+call chains; impact / tests / shape scope a change first. edit / batch_edit / \
+insert are syntax-verified and roll back on a parse error.
 
 Paths are relative to the project root. Only fall back to reading a whole file \
 when it is not indexed or you truly need every line.";
@@ -456,6 +614,12 @@ pub fn cmd_mcp(root: &Path) -> Result<()> {
         &mcp_tools(),
         Some(MCP_INSTRUCTIONS),
         |name, args| {
+            // `more` only reflects over static schemas — opening (and possibly
+            // building) the index for it would make schema discovery as
+            // expensive as a query, and fail in an unindexed tree.
+            if name == "more" {
+                return Ok(ToolOut::text(mcp_more()?));
+            }
             let conn = match conn.get() {
                 Some(c) => c,
                 None => {

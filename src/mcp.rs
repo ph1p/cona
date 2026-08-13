@@ -46,6 +46,67 @@ pub fn tool_annotated(
     v
 }
 
+/// One tool's result: the human/agent-readable text plus, when the tool
+/// declares an `outputSchema`, the machine-readable form echoed as
+/// `structuredContent`.
+///
+/// Text is never optional. The MCP spec keeps `content` authoritative and
+/// treats `structuredContent` as an addition for clients that want to skip
+/// re-parsing a render, so a structured tool must emit BOTH — dropping the text
+/// would break every client that only reads content blocks.
+pub struct ToolOut {
+    pub text: String,
+    pub structured: Option<Value>,
+}
+
+impl ToolOut {
+    /// Text-only result (no `outputSchema` on this tool).
+    pub fn text(text: String) -> Self {
+        Self {
+            text,
+            structured: None,
+        }
+    }
+
+    /// Text plus the structured payload matching the tool's `outputSchema`.
+    pub fn structured(text: String, structured: Value) -> Self {
+        Self {
+            text,
+            structured: Some(structured),
+        }
+    }
+}
+
+impl From<String> for ToolOut {
+    fn from(text: String) -> Self {
+        Self::text(text)
+    }
+}
+
+/// Attach an `outputSchema` to a tool entry built by `tool`/`tool_annotated`.
+///
+/// A declared schema is a CONTRACT: per spec the server must then return
+/// `structuredContent` conforming to it, so only wrap tools whose dispatch
+/// actually produces the matching payload.
+pub fn with_output_schema(mut tool: Value, schema: Value) -> Value {
+    tool["outputSchema"] = schema;
+    tool
+}
+
+/// `outputSchema` for the tools that return a list of rows. MCP requires the
+/// top level of an output schema to be an object, so the array rides in a
+/// named field rather than being the root.
+pub fn rows_schema(field: &str, item_props: Value, desc: &str) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            field: {"type": "array", "description": desc,
+                    "items": {"type": "object", "properties": item_props}}
+        },
+        "required": [field]
+    })
+}
+
 /// Read-only tool annotation: safe to call, no side effects, repeatable.
 pub fn read_only(title: &str) -> Option<Value> {
     Some(
@@ -71,7 +132,7 @@ pub fn serve<R: BufRead, W: Write>(
     mut writer: W,
     tools: &[Value],
     instructions: Option<&str>,
-    mut call: impl FnMut(&str, &Value) -> Result<String>,
+    mut call: impl FnMut(&str, &Value) -> Result<ToolOut>,
 ) -> Result<()> {
     let reply = |w: &mut W, id: Value, body: Result<Value, (i64, String)>| -> Result<()> {
         let msg = match body {
@@ -133,7 +194,13 @@ pub fn serve<R: BufRead, W: Write>(
                     .cloned()
                     .unwrap_or_else(|| json!({}));
                 let result = match call(name, &args) {
-                    Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
+                    Ok(out) => {
+                        let mut r = json!({"content": [{"type": "text", "text": out.text}]});
+                        if let Some(sc) = out.structured {
+                            r["structuredContent"] = sc;
+                        }
+                        r
+                    }
                     Err(e) => json!({
                         "content": [{"type": "text", "text": format!("error: {e}")}],
                         "isError": true
@@ -170,7 +237,9 @@ mod tests {
             instructions,
             |name, args| {
                 if name == "echo" {
-                    Ok(args["text"].as_str().unwrap_or("").to_string())
+                    Ok(ToolOut::text(
+                        args["text"].as_str().unwrap_or("").to_string(),
+                    ))
                 } else {
                     Err(anyhow!("unknown tool '{name}'"))
                 }
