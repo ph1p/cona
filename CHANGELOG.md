@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.18](https://github.com/ph1p/cona/compare/v0.0.17...v0.0.18) - 2026-08-13
+
+### Added
+
+- *(plugin)* ship a Claude Code plugin
+- *(index)* walk registered git submodules
+- *(mcp)* progressive tool disclosure + outputSchema on row tools
+- *(agents)* support 6 more harnesses
+
+### Fixed
+
+- *(index)* reject escaping submodule paths lexically
+- *(mcp)* disclose gated tools via tools/list_changed
+
+### Other
+
+- apply cargo fmt
+- move per-module rationale to docs/architecture.md
+
 ## [0.0.17](https://github.com/ph1p/cona/compare/v0.0.16...v0.0.17) - 2026-08-07
 
 ### Fixed
