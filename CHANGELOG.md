@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.19](https://github.com/ph1p/cona/compare/v0.0.18...v0.0.19) - 2026-08-13
+
+### Added
+
+- *(plugin)* ship the plugin for Codex as well
+- *(hook)* intercept reads and greps issued through a shell tool
+
+### Other
+
+- *(hook)* derive the PreToolUse matcher from one tool-name list
+
 ## [0.0.18](https://github.com/ph1p/cona/compare/v0.0.17...v0.0.18) - 2026-08-13
 
 ### Added
