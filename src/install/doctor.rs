@@ -98,7 +98,10 @@ pub fn cmd_doctor(project_root: &Path) -> Result<()> {
         };
         println!("\n{}", ui::heading(&format!("claude {label}")));
         println!("  {}", tag(idx, "index hook (PostToolUse/SessionStart)"));
-        println!("  {}", tag(read, "read-guard hook (PreToolUse Read|Grep)"));
+        println!(
+            "  {}",
+            tag(read, "read-guard hook (PreToolUse read/grep/shell)")
+        );
         println!(
             "  {}",
             tag(skill.exists(), &format!("skill: {}", skill.display()))

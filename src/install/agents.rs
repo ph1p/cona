@@ -1212,6 +1212,19 @@ pub fn project_has_cona(project_root: &Path) -> bool {
 }
 
 /// Add/remove cona hooks in a Claude Code settings.json.
+/// Tool names the read/grep redirect listens on.
+///
+/// The shell tools are here because a harness whose ONLY file tool is a shell
+/// (Codex runs `cat f` / `rg Foo` as `tool_name: "Bash"`) never emits a Read or
+/// Grep call — hook.rs classifies the command line instead and stays silent on
+/// anything that is not a whole-file read or a broad grep. Listing a tool cona
+/// then ignores costs one no-op hook run, missing one costs the whole tier.
+///
+/// `plugin/hooks/hooks.json` declares the SAME matcher for the plugin
+/// distribution path; `plugin_hook_matcher_matches_the_installer` pins them
+/// equal.
+pub const PRETOOL_MATCHER: &str = "Read|Grep|Bash|Shell|shell|exec|run_command|local_shell";
+
 /// Returns Ok(true) if the file was changed.
 fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
     let existing = std::fs::read_to_string(settings_path).unwrap_or_else(|_| "{}".into());
@@ -1251,7 +1264,7 @@ fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
         // identifier greps toward cona
         (
             "PreToolUse",
-            Some("Read|Grep"),
+            Some(PRETOOL_MATCHER),
             &pretool_cmd,
             "hook PreToolUse",
         ),

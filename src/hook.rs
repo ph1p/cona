@@ -166,6 +166,330 @@ pub fn decide_grep(f: &GrepFacts) -> Decision {
     }
 }
 
+/// What a shell command turns out to be, once normalized. Harnesses that run
+/// every file operation through a shell tool (Codex: `tool_name = "Bash"`,
+/// `tool_input.command = "sed -n '1,240p' main.rs"`) never emit a `Read`/`Grep`
+/// tool call, so without this the whole PreToolUse tier is dead there.
+///
+/// Deliberately narrow. Anything not recognised is `Other` and passes through —
+/// this hook may never block work it does not fully understand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellIntent {
+    /// A read of `path` starting at line 1. `upto` is the last line the command
+    /// asks for (`None` = to the end, as with `cat` or `sed -n '1,$p'`).
+    ///
+    /// A numeric bound is NOT automatically a partial read: `sed -n '1,240p'` is
+    /// exactly how an agent spells "show me the file" — it picks a bound it
+    /// expects to exceed the length. The caller compares `upto` against the real
+    /// line count and only treats it as partial when the file is genuinely
+    /// longer, so a capped read of a longer file still passes through.
+    Read { path: String, upto: Option<i64> },
+    /// A read the agent already narrowed (line range, `head -n`, …) — the
+    /// shell-side equivalent of Read with offset/limit. Never intercepted, but
+    /// distinguished from `Other` so the intent is explicit.
+    PartialRead,
+    /// A broad content search for `pattern` under an optional path.
+    Grep {
+        pattern: String,
+        path: Option<String>,
+    },
+    /// Not a read or a search we recognise.
+    Other,
+}
+
+/// Split ONE simple command into words, honouring single/double quotes.
+/// Returns `None` on anything that makes the words untrustworthy: an
+/// unterminated quote, a redirect, a substitution (`$(`, backticks) or a
+/// backslash escape. Chaining operators are handled by `split_segments` before
+/// this ever runs, so reaching one here is also a bail.
+pub fn shell_words(cmd: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut had = false;
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    had = true;
+                }
+                ';' | '|' | '&' | '>' | '<' | '`' | '\n' => return None,
+                '$' if chars.peek() == Some(&'(') => return None,
+                '\\' => return None,
+                c if c.is_whitespace() => {
+                    if !cur.is_empty() || had {
+                        words.push(std::mem::take(&mut cur));
+                        had = false;
+                    }
+                }
+                c => cur.push(c),
+            },
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !cur.is_empty() || had {
+        words.push(cur);
+    }
+    Some(words)
+}
+
+/// Split a command line on the chaining operators `&&`, `||`, `;` and `|`,
+/// respecting quotes. Compound commands are the NORM in a shell-tool harness
+/// (`wc -l f && sed -n '1,500p' f`), so refusing them outright would leave the
+/// intercept dead; instead each segment is classified on its own and the caller
+/// only acts when every one of them is a read.
+///
+/// `None` when quoting is unbalanced — we cannot tell where a segment ends.
+pub fn split_segments(cmd: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                cur.push(c);
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    cur.push(c);
+                }
+                ';' | '\n' => out.push(std::mem::take(&mut cur)),
+                '&' | '|' => {
+                    // `&&`/`||` collapse to one separator; a bare `&`
+                    // (background) or `|` (pipe) separates just the same.
+                    if chars.peek() == Some(&c) {
+                        chars.next();
+                    }
+                    out.push(std::mem::take(&mut cur));
+                }
+                c => cur.push(c),
+            },
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    out.push(cur);
+    Some(
+        out.into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
+}
+
+/// Peel a `sh -c "…"` / `bash -lc "…"` / `zsh -lc "…"` wrapper off a command
+/// line, returning the inner script. Codex issues every tool call as
+/// `/bin/zsh -lc "<script>"`, so without this the classifier only ever sees the
+/// shell itself. Returns `None` when the command is not such a wrapper.
+pub fn unwrap_shell_wrapper(cmd: &str) -> Option<String> {
+    let words = shell_words(cmd)?;
+    let (prog, args) = words.split_first()?;
+    let prog = Path::new(prog.as_str()).file_name()?.to_string_lossy();
+    if !matches!(prog.as_ref(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
+        return None;
+    }
+    // The script follows the flag bundle that contains `c` (`-c`, `-lc`, …);
+    // anything after it is `$0`/positional args and irrelevant here.
+    let mut it = args.iter();
+    let flag = it.find(|a| a.starts_with('-') && a.contains('c'))?;
+    let _ = flag;
+    it.next().cloned()
+}
+
+/// Classify a whole command line, wrapper and chaining included.
+///
+/// A line is a read/search only when EVERY segment is one — a single
+/// unrecognised segment (an edit, a build, a `rm`) makes the whole line
+/// `Other`, because blocking it would block that segment too. Among the
+/// recognised segments the strongest intent wins: a full `Read` outranks a
+/// `Grep`, which outranks a `PartialRead`, so `wc -l f && sed -n '1,500p' f`
+/// is judged on the read.
+pub fn classify_shell(cmd: &str) -> ShellIntent {
+    let inner = unwrap_shell_wrapper(cmd);
+    let line = inner.as_deref().unwrap_or(cmd);
+    let Some(segments) = split_segments(line) else {
+        return ShellIntent::Other;
+    };
+    let mut best = ShellIntent::Other;
+    for seg in &segments {
+        match classify_command(seg) {
+            // One segment we don't understand poisons the whole line.
+            ShellIntent::Other => return ShellIntent::Other,
+            intent => {
+                if rank(&intent) > rank(&best) {
+                    best = intent;
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Precedence among recognised intents (see `classify_shell`).
+fn rank(i: &ShellIntent) -> u8 {
+    match i {
+        ShellIntent::Other => 0,
+        ShellIntent::PartialRead => 1,
+        ShellIntent::Grep { .. } => 2,
+        ShellIntent::Read { .. } => 3,
+    }
+}
+
+/// Classify ONE simple command (no chaining, no wrapper). Pure and unit-tested:
+/// the risky half (what does this command *do*) is decided by testable code,
+/// and the decision half is the one already shared with the native Read/Grep
+/// path.
+pub fn classify_command(cmd: &str) -> ShellIntent {
+    let Some(words) = shell_words(cmd) else {
+        return ShellIntent::Other;
+    };
+    // Skip leading `VAR=value` assignments (`LC_ALL=C grep …`) — they change the
+    // environment, not what the command does.
+    let words: Vec<String> = words
+        .iter()
+        .skip_while(|w| {
+            w.split_once('=')
+                .is_some_and(|(k, _)| !k.is_empty() && !k.starts_with('-'))
+        })
+        .cloned()
+        .collect();
+    let Some((prog, args)) = words.split_first() else {
+        return ShellIntent::Other;
+    };
+    // `/bin/cat` and `cat` are the same program.
+    let prog = Path::new(prog.as_str())
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| prog.clone());
+
+    match prog.as_str() {
+        // Whole-file dumps. Exactly one operand and no flags = a full read.
+        "cat" | "bat" | "less" | "more" => match args {
+            [one] if !one.starts_with('-') => ShellIntent::Read {
+                path: one.clone(),
+                upto: None,
+            },
+            _ => ShellIntent::Other,
+        },
+        // head/tail are line-bounded by definition — always partial.
+        "head" | "tail" => ShellIntent::PartialRead,
+        // Metadata probes: they pull no file content into context, and an agent
+        // routinely pairs one with the read it is about to do (`wc -l f &&
+        // sed -n '1,500p' f`). Treated as harmless company so they cannot
+        // poison an otherwise-recognised line.
+        "wc" | "ls" | "pwd" | "file" | "stat" | "basename" | "dirname" | "echo" => {
+            ShellIntent::PartialRead
+        }
+        // `sed -n '<range>p' FILE`. A range that starts past line 1 or stops
+        // early is a partial read; `1,$p` / `1,99999p` over a shorter file is
+        // how agents spell "read it all", so those fall through to Read.
+        "sed" => classify_sed(args),
+        "rg" | "grep" | "ag" | "ack" => classify_grep(&prog, args),
+        _ => ShellIntent::Other,
+    }
+}
+
+/// `sed -n '1,240p' FILE` → the read half of `classify_shell`. Only the
+/// print-range idiom is understood; every other sed script is `Other` (it may
+/// be an edit, and we must not touch it).
+fn classify_sed(args: &[String]) -> ShellIntent {
+    let mut script: Option<&str> = None;
+    let mut files: Vec<&String> = Vec::new();
+    let mut quiet = false;
+    for a in args {
+        if a == "-n" || a == "--quiet" || a == "--silent" {
+            quiet = true;
+        } else if a.starts_with('-') {
+            return ShellIntent::Other; // -i, -e, -E … not ours
+        } else if script.is_none() {
+            script = Some(a);
+        } else {
+            files.push(a);
+        }
+    }
+    let (Some(script), [file]) = (script, files.as_slice()) else {
+        return ShellIntent::Other;
+    };
+    if !quiet {
+        return ShellIntent::Other;
+    }
+    let Some(range) = script.strip_suffix('p') else {
+        return ShellIntent::Other;
+    };
+    let (start, end) = match range.split_once(',') {
+        Some((s, e)) => (s, e),
+        // A single-line script (`sed -n '5p'`) is as partial as it gets.
+        None => return ShellIntent::PartialRead,
+    };
+    // Only a read that starts at line 1 can be a full read; `sed -n '40,80p'`
+    // is the agent already narrowing.
+    if start.trim() != "1" {
+        return ShellIntent::PartialRead;
+    }
+    match end.trim() {
+        "$" => ShellIntent::Read {
+            path: (*file).clone(),
+            upto: None,
+        },
+        n => match n.parse::<i64>() {
+            Ok(n) if n > 0 => ShellIntent::Read {
+                path: (*file).clone(),
+                upto: Some(n),
+            },
+            _ => ShellIntent::Other,
+        },
+    }
+}
+
+/// `rg PATTERN [PATH]` → the grep half of `classify_shell`. Any narrowing flag
+/// (`-g`, `-t`, `--files`, `-m`, …) makes it surgical and therefore `Other`;
+/// only a bare broad search is a candidate for the semantic redirect.
+fn classify_grep(prog: &str, args: &[String]) -> ShellIntent {
+    let mut positional: Vec<&String> = Vec::new();
+    for a in args {
+        if let Some(flag) = a.strip_prefix('-') {
+            // `-r`/`-R`/`-n`/`-i` and friends only affect presentation or
+            // recursion; anything else narrows the search or changes its shape
+            // (a file list, a count, a context window) and is not ours.
+            let plain = flag.trim_start_matches('-');
+            let harmless = matches!(plain, "r" | "R" | "n" | "i" | "rn" | "nr" | "ri" | "ir")
+                || plain.is_empty();
+            if !harmless {
+                return ShellIntent::Other;
+            }
+        } else {
+            positional.push(a);
+        }
+    }
+    // grep needs an explicit path to recurse; rg defaults to cwd.
+    let (pattern, path) = match (prog, positional.as_slice()) {
+        (_, [p]) => (p, None),
+        (_, [p, dir]) => (p, Some((*dir).clone())),
+        _ => return ShellIntent::Other,
+    };
+    ShellIntent::Grep {
+        pattern: (*pattern).clone(),
+        path,
+    }
+}
+
 /// Read an i64 tuning knob from the environment, ignoring anything unparseable
 /// or below `min` so a typo falls back to the default instead of disabling a
 /// tier silently. Every `CONA_*` threshold goes through here.
@@ -215,9 +539,51 @@ fn try_pretooluse() -> Result<()> {
     let v: serde_json::Value = serde_json::from_str(&buf)?;
 
     match v["tool_name"].as_str() {
-        Some("Read") => try_read(&v),
-        Some("Grep") => try_grep(&v),
+        Some("Read") => {
+            let input = &v["tool_input"];
+            let Some(file_path) = input["file_path"].as_str() else {
+                return Ok(());
+            };
+            let partial = !input["offset"].is_null() || !input["limit"].is_null();
+            try_read(&v, file_path, partial, None)
+        }
+        Some("Grep") => {
+            let input = &v["tool_input"];
+            let Some(pattern) = input["pattern"].as_str() else {
+                return Ok(());
+            };
+            // any narrowing signal = surgical, pass through untouched
+            let path = input["path"].as_str();
+            let surgical = !input["glob"].is_null()
+                || !input["type"].is_null()
+                || !input["head_limit"].is_null()
+                || path.map(|p| Path::new(p).is_file()).unwrap_or(false);
+            try_grep(&v, pattern, path, surgical)
+        }
+        // Harnesses whose only file tool is a shell (Codex runs `sed -n
+        // '1,240p' f` / `rg Foo` through `tool_name = "Bash"`) never emit a
+        // Read or Grep call. Recover the intent from the command line so the
+        // same two intercepts work there; anything unrecognised passes.
+        Some("Bash" | "Shell" | "shell" | "exec" | "run_command" | "local_shell") => {
+            let Some(cmd) = v["tool_input"]["command"].as_str() else {
+                return Ok(());
+            };
+            try_shell(&v, cmd)
+        }
         _ => Ok(()),
+    }
+}
+
+/// Route a shell command through the same two intercepts as native Read/Grep.
+/// Fails open on every intent we do not recognise.
+fn try_shell(v: &serde_json::Value, cmd: &str) -> Result<()> {
+    match classify_shell(cmd) {
+        ShellIntent::Read { path, upto } => try_read(v, &path, false, upto),
+        ShellIntent::Grep { pattern, path } => {
+            let surgical = path.as_deref().map(|p| Path::new(p).is_file()) == Some(true);
+            try_grep(v, &pattern, path.as_deref(), surgical)
+        }
+        ShellIntent::PartialRead | ShellIntent::Other => Ok(()),
     }
 }
 
@@ -225,19 +591,31 @@ fn renudge_every() -> i64 {
     env_i64("CONA_RENUDGE_EVERY", DEFAULT_RENUDGE_EVERY, 0)
 }
 
-/// Path of a per-(project, session) marker file under `data_dir/<kind>/`.
-///
-/// Session identity comes from `CLAUDE_SESSION_ID` when the agent exports it;
-/// without it we fall back to a per-day key so a long-lived shell buckets by
-/// day rather than churning a new marker every call. Both session-scoped hook
-/// mechanisms (`nudge_once`, `tick_toolcall`) share this so the identity rule
-/// stays in ONE place — they only differ in `<kind>` and what they store.
-/// `None` when the data dir is unavailable; each caller picks its own fallback.
-fn session_marker_path(root: &Path, kind: &str) -> Option<PathBuf> {
-    let session = std::env::var("CLAUDE_SESSION_ID")
+/// Session identity for the per-session markers, in preference order:
+/// `CLAUDE_SESSION_ID` (exported by some harnesses), then the `session_id`
+/// carried in the payload itself (Codex sends one and exports nothing), then a
+/// per-day key so a long-lived shell buckets by day rather than churning a new
+/// marker every call.
+fn session_id(v: &serde_json::Value) -> String {
+    std::env::var("CLAUDE_SESSION_ID")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("day-{}", db::now() / 86_400));
+        .or_else(|| {
+            v["session_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("day-{}", db::now() / 86_400))
+}
+
+/// Path of a per-(project, session) marker file under `data_dir/<kind>/`.
+///
+/// Both session-scoped hook mechanisms (`nudge_once`, `tick_toolcall`) share
+/// this so the identity rule stays in ONE place — they only differ in `<kind>`
+/// and what they store. `None` when the data dir is unavailable; each caller
+/// picks its own fallback.
+fn session_marker_path(root: &Path, kind: &str, session: &str) -> Option<PathBuf> {
     let dir = db::data_dir().ok()?;
     Some(
         dir.join(kind)
@@ -260,8 +638,8 @@ pub fn fires_on_cadence(count: i64, every: i64) -> bool {
 ///
 /// Best-effort like every other hook side effect: if the data dir is unavailable
 /// we report "not a re-read" and stay silent rather than guessing.
-fn note_read(root: &Path, rel: &str) -> (bool, i64) {
-    let Some(log) = session_marker_path(root, "reads") else {
+fn note_read(root: &Path, rel: &str, session: &str) -> (bool, i64) {
+    let Some(log) = session_marker_path(root, "reads", session) else {
         return (false, 0);
     };
     let (mut seen, mut count) = (false, 0i64);
@@ -322,7 +700,7 @@ fn try_posttooluse() -> Result<()> {
     if !db::project_db_path(&root).exists() {
         return Ok(());
     }
-    let count = tick_toolcall(&root);
+    let count = tick_toolcall(&root, &session_id(&v));
     if !fires_on_cadence(count, every) || !db::has_index(&root) {
         return Ok(());
     }
@@ -344,8 +722,8 @@ fn try_posttooluse() -> Result<()> {
 /// `session_marker_path`, so the session-identity rule is shared with
 /// `nudge_once`). Best-effort: any IO failure returns 0 so the caller simply
 /// doesn't re-nudge this call.
-fn tick_toolcall(root: &Path) -> i64 {
-    let Some(counter) = session_marker_path(root, "toolcalls") else {
+fn tick_toolcall(root: &Path, session: &str) -> i64 {
+    let Some(counter) = session_marker_path(root, "toolcalls", session) else {
         return 0;
     };
     let prev = std::fs::read_to_string(&counter)
@@ -360,17 +738,25 @@ fn tick_toolcall(root: &Path) -> i64 {
     next
 }
 
-fn try_read(v: &serde_json::Value) -> Result<()> {
-    let input = &v["tool_input"];
-    let Some(file_path) = input["file_path"].as_str() else {
-        return Ok(());
+/// The shared read intercept. `partial` is the caller's "the agent already
+/// narrowed this" signal; `upto` is a shell-side upper line bound (see
+/// `ShellIntent::Read`) that only counts as narrowing once we know the file is
+/// actually longer than it.
+fn try_read(
+    v: &serde_json::Value,
+    file_path: &str,
+    partial: bool,
+    upto: Option<i64>,
+) -> Result<()> {
+    // A relative path (`sed -n '1,240p' main.rs`) resolves against the tool
+    // call's cwd, not ours — the hook runs wherever the harness launched it.
+    let cwd = v["cwd"].as_str().map(PathBuf::from);
+    let file_abs = match (Path::new(file_path).is_absolute(), &cwd) {
+        (false, Some(c)) => c.join(file_path),
+        _ => PathBuf::from(file_path),
     };
-    let partial = !input["offset"].is_null() || !input["limit"].is_null();
-
-    let file_abs = PathBuf::from(file_path);
     let dir = file_abs.parent().unwrap_or(Path::new("."));
     // prefer the git root the agent is working in
-    let cwd = v["cwd"].as_str().map(PathBuf::from);
     let root = cwd
         .filter(|c| file_abs.starts_with(c))
         .map(|c| db::git_root_from(&c))
@@ -422,6 +808,11 @@ fn try_read(v: &serde_json::Value) -> Result<()> {
     } else {
         (max_lines + 1, db::est_tokens(byte_len as usize))
     };
+    // A shell-side upper bound only narrows the read if the file actually runs
+    // past it. `sed -n '1,240p'` over a 30-line file read the whole thing.
+    if upto.is_some_and(|n| n < lines) {
+        return Ok(());
+    }
     // Never print a line count we did not actually measure.
     let size_desc = if measured {
         format!("{lines} lines (~{tokens} tokens)")
@@ -453,7 +844,7 @@ fn try_read(v: &serde_json::Value) -> Result<()> {
     let streak_every = read_streak_every();
     let tracking_reads = advise_min_lines > 0 || streak_every > 0;
     let (reread, read_count) = if indexed && callable && tracking_reads {
-        note_read(&root, &rel)
+        note_read(&root, &rel, &session_id(v))
     } else {
         (false, 0)
     };
@@ -507,15 +898,15 @@ fn try_read(v: &serde_json::Value) -> Result<()> {
                  those lines. To understand a symbol (its body + what it calls + who calls it) \
                  in ONE call, prefer `cona context <Symbol>`; before changing one, \
                  `cona impact <Symbol>` shows its blast radius. (Also `cona find <Name>` \
-                 / `cona refs <Name>`.) If you genuinely need the whole file, re-issue Read \
-                 with an explicit offset/limit."
+                 / `cona refs <Name>`.) If you genuinely need the whole file, re-issue the \
+                 read in explicit chunks (Read offset/limit, or `sed -n` over line ranges)."
             );
             deny(&root, "hook:read-block", &rel, &reason)
         }
         Decision::Nudge => {
             // Fresh repo, large code file — indexing unlocks the fast path.
             // One hint per session so it never nags on subsequent reads.
-            if !nudge_once(&root) {
+            if !nudge_once(&root, &session_id(v)) {
                 return Ok(());
             }
             let reason = format!(
@@ -529,17 +920,15 @@ fn try_read(v: &serde_json::Value) -> Result<()> {
     }
 }
 
-fn try_grep(v: &serde_json::Value) -> Result<()> {
-    let input = &v["tool_input"];
-    let Some(pattern) = input["pattern"].as_str() else {
-        return Ok(());
-    };
-    let path = input["path"].as_str();
-    // any narrowing signal = surgical, pass through untouched
-    let surgical = !input["glob"].is_null()
-        || !input["type"].is_null()
-        || !input["head_limit"].is_null()
-        || path.map(|p| Path::new(p).is_file()).unwrap_or(false);
+/// The shared grep intercept. `surgical` is the caller's "already narrowed"
+/// signal — the native path derives it from glob/type/head_limit, the shell
+/// path from the command's own flags.
+fn try_grep(
+    v: &serde_json::Value,
+    pattern: &str,
+    path: Option<&str>,
+    surgical: bool,
+) -> Result<()> {
     // cheap gates first — only a broad identifier search pays for the DB check
     if surgical || !lang::is_valid_ident(pattern) {
         return Ok(());
@@ -569,13 +958,13 @@ fn try_grep(v: &serde_json::Value) -> Result<()> {
                  and labels every hit with its enclosing symbol, and `cona refs {pattern}` \
                  gives semantic usage sites (strings/comments never match). cona grep also \
                  does regex: `cona grep <pattern> --regex`. If you need to search \
-                 non-code files too, re-issue Grep with a glob, type, path or head_limit \
-                 filter."
+                 non-code files too, re-issue the search narrowed to a glob, type, single \
+                 file or result limit."
             );
             deny(&root, "hook:grep-block", pattern, &reason)
         }
         Decision::Nudge => {
-            if !nudge_once(&root) {
+            if !nudge_once(&root, &session_id(v)) {
                 return Ok(());
             }
             let reason = format!(
@@ -629,8 +1018,8 @@ fn allow_with_reason(root: &Path, cmd: &str, target: &str, reason: &str) -> Resu
 /// Session identity comes from `CLAUDE_SESSION_ID` when the agent exports it;
 /// without it we fall back to a per-day key so a long-lived shell still only
 /// nags occasionally rather than on every read.
-fn nudge_once(root: &Path) -> bool {
-    let Some(marker) = session_marker_path(root, "nudged") else {
+fn nudge_once(root: &Path, session: &str) -> bool {
+    let Some(marker) = session_marker_path(root, "nudged", session) else {
         return true; // can't track → don't suppress the (useful) first hint
     };
     if marker.exists() {
@@ -985,5 +1374,187 @@ mod tests {
             }),
             Decision::Allow
         );
+    }
+
+    // ---- shell-command normalization (harnesses whose only file tool is a
+    // shell: Codex sends `tool_name = "Bash"` with a command line) ----
+
+    fn read_of(cmd: &str) -> Option<(String, Option<i64>)> {
+        match classify_shell(cmd) {
+            ShellIntent::Read { path, upto } => Some((path, upto)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn shell_words_splits_quotes() {
+        assert_eq!(
+            shell_words("sed -n '1,240p' main.rs").unwrap(),
+            vec!["sed", "-n", "1,240p", "main.rs"]
+        );
+        assert_eq!(
+            shell_words("cat \"my file.rs\"").unwrap(),
+            vec!["cat", "my file.rs"]
+        );
+    }
+
+    #[test]
+    fn shell_words_refuses_untrustworthy_commands() {
+        for cmd in [
+            "cat a.rs > out",
+            "cat $(ls)",
+            "cat `ls`",
+            "cat 'unterminated",
+            "cat a\\ b.rs",
+        ] {
+            assert!(shell_words(cmd).is_none(), "should refuse: {cmd}");
+        }
+    }
+
+    #[test]
+    fn splits_chained_commands() {
+        assert_eq!(
+            split_segments("wc -l f && sed -n '1,500p' f").unwrap(),
+            vec!["wc -l f", "sed -n '1,500p' f"]
+        );
+        assert_eq!(
+            split_segments("a; b | c || d").unwrap(),
+            vec!["a", "b", "c", "d"]
+        );
+        // A separator inside quotes is data, not a separator.
+        assert_eq!(
+            split_segments("grep 'a;b' src").unwrap(),
+            vec!["grep 'a;b' src"]
+        );
+        assert!(split_segments("cat 'oops").is_none());
+    }
+
+    #[test]
+    fn unwraps_shell_invocations() {
+        // The shape Codex actually emits.
+        assert_eq!(
+            unwrap_shell_wrapper("/bin/zsh -lc \"sed -n '1,240p' big.rs\"").as_deref(),
+            Some("sed -n '1,240p' big.rs")
+        );
+        assert_eq!(
+            unwrap_shell_wrapper("bash -c 'cat a.rs'").as_deref(),
+            Some("cat a.rs")
+        );
+        assert_eq!(unwrap_shell_wrapper("cat a.rs"), None);
+    }
+
+    #[test]
+    fn a_chain_is_judged_on_its_strongest_read() {
+        // The real Codex line: a metadata probe next to a whole-file read.
+        assert_eq!(
+            classify_shell("/bin/zsh -lc \"wc -l big.rs && cat big.rs\""),
+            ShellIntent::Read {
+                path: "big.rs".into(),
+                upto: None
+            }
+        );
+    }
+
+    #[test]
+    fn one_unrecognised_segment_passes_the_whole_line() {
+        // Blocking this line would block the build too — always fail open.
+        assert_eq!(
+            classify_shell("cat a.rs && cargo build"),
+            ShellIntent::Other
+        );
+        assert_eq!(classify_shell("cat a.rs | rm -rf x"), ShellIntent::Other);
+    }
+
+    #[test]
+    fn leading_env_assignments_are_skipped() {
+        assert_eq!(
+            classify_shell("LC_ALL=C grep -rn UserService src"),
+            ShellIntent::Grep {
+                pattern: "UserService".into(),
+                path: Some("src".into())
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_whole_file_dumps() {
+        assert_eq!(
+            read_of("cat src/main.rs"),
+            Some(("src/main.rs".into(), None))
+        );
+        assert_eq!(
+            read_of("/bin/cat src/main.rs"),
+            Some(("src/main.rs".into(), None))
+        );
+        assert_eq!(read_of("sed -n '1,$p' a.rs"), Some(("a.rs".into(), None)));
+    }
+
+    #[test]
+    fn classifies_bounded_sed_as_a_read_with_a_bound() {
+        // The idiom Codex actually emits: a bound the agent expects to exceed
+        // the file length. Only the caller (which knows the real line count)
+        // can tell that apart from a genuine partial read.
+        assert_eq!(
+            read_of("sed -n '1,240p' main.rs"),
+            Some(("main.rs".into(), Some(240)))
+        );
+    }
+
+    #[test]
+    fn narrowed_shell_reads_are_partial() {
+        for cmd in [
+            "sed -n '40,80p' a.rs",
+            "sed -n '5p' a.rs",
+            "head -n 50 a.rs",
+            "tail -n 50 a.rs",
+        ] {
+            assert_eq!(classify_shell(cmd), ShellIntent::PartialRead, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn unrecognised_commands_pass_through() {
+        for cmd in [
+            "sed -i 's/a/b/' a.rs", // an EDIT — must never be touched
+            "cat a.rs b.rs",        // multiple files
+            "rm -rf /",
+            "cargo test",
+            "sed -n '1,240p'", // no file operand
+        ] {
+            assert_eq!(classify_shell(cmd), ShellIntent::Other, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn classifies_broad_shell_greps() {
+        assert_eq!(
+            classify_shell("rg UserService"),
+            ShellIntent::Grep {
+                pattern: "UserService".into(),
+                path: None
+            }
+        );
+        assert_eq!(
+            classify_shell("grep -rn UserService src"),
+            ShellIntent::Grep {
+                pattern: "UserService".into(),
+                path: Some("src".into())
+            }
+        );
+    }
+
+    #[test]
+    fn narrowed_shell_greps_pass_through() {
+        // Every one of these narrows the search; only a bare broad search is a
+        // candidate for the semantic redirect.
+        for cmd in [
+            "rg -g '*.rs' UserService",
+            "rg --files -g 'AGENTS.md' .",
+            "rg -t rust UserService",
+            "rg -m 5 UserService",
+            "rg -l UserService",
+        ] {
+            assert_eq!(classify_shell(cmd), ShellIntent::Other, "{cmd}");
+        }
     }
 }
