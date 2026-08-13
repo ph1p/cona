@@ -8,6 +8,48 @@ use std::path::{Path, PathBuf};
 /// Files larger than this are skipped (minified bundles, generated code, blobs).
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 
+/// Submodule paths declared in a `.gitmodules` body, in declaration order.
+///
+/// Pure so it can be tested without a git tree. Deliberately a line parser
+/// rather than a real INI/config reader: `.gitmodules` is git config syntax and
+/// only the `path =` entries matter here, so a `submodule.<name>.path` lookup
+/// would pull in a config-parsing dependency to answer a question three lines
+/// of string handling already answer. Values are taken verbatim except for
+/// surrounding whitespace — git does not quote or escape paths in this file.
+pub fn parse_gitmodules(body: &str) -> Vec<String> {
+    body.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            // Skip comments before splitting: `# path = x` is not a declaration.
+            if l.starts_with('#') || l.starts_with(';') {
+                return None;
+            }
+            let (k, v) = l.split_once('=')?;
+            (k.trim() == "path").then(|| v.trim().to_string())
+        })
+        .filter(|p| {
+            // A submodule path must stay inside the superproject. An absolute
+            // path or one climbing out with `..` would make the walk index a
+            // tree outside the project root, whose files then can't be stored
+            // as project-relative paths.
+            !p.is_empty() && !Path::new(p).is_absolute() && !p.split('/').any(|c| c == "..")
+        })
+        .collect()
+}
+
+/// Registered submodule directories that exist on disk, relative to `root`.
+/// Missing entries (a submodule that was never `git submodule update`d) are
+/// dropped — adding a non-existent walk root would surface as a walk error.
+fn submodule_dirs(root: &Path) -> Vec<String> {
+    let Ok(body) = std::fs::read_to_string(root.join(".gitmodules")) else {
+        return Vec::new();
+    };
+    parse_gitmodules(&body)
+        .into_iter()
+        .filter(|p| root.join(p).is_dir())
+        .collect()
+}
+
 /// Directory names always pruned from the walk, regardless of git status. Keeps
 /// the index (and ~/.cona) from ballooning when run in non-git trees.
 const EXCLUDED_DIRS: &[&str] = &[
@@ -86,7 +128,18 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
     // phase 1: walk, collect changed/new candidates
     let mut seen: HashSet<String> = HashSet::new();
     let mut candidates: Vec<Candidate> = Vec::new();
-    let walker = WalkBuilder::new(root)
+    // Git submodules are real project source, but `ignore` treats a nested
+    // `.git` as a separate repository and skips its contents — so a submodule's
+    // code is invisible to find/refs/grep from the superproject root, silently
+    // (an empty result, not an error). Registered submodules are opted back in;
+    // an unregistered nested repo (vendored clone, a stray checkout) stays
+    // excluded, which is the reading that matches .gitmodules.
+    let submodules = submodule_dirs(root);
+    let mut builder = WalkBuilder::new(root);
+    for sub in &submodules {
+        builder.add(root.join(sub));
+    }
+    let walker = builder
         .hidden(true)
         .git_ignore(true)
         .git_exclude(true)
@@ -95,9 +148,23 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
         // Always prune heavy vendor/build/cache dirs by name — even in non-git
         // trees where .gitignore doesn't apply (prevents indexing e.g. all of
         // node_modules when run outside a repo).
-        .filter_entry(|e| {
-            !e.file_type().is_some_and(|t| t.is_dir())
-                || !is_excluded_dir(e.file_name().to_str().unwrap_or(""))
+        // A submodule registered at e.g. `vendor/sdk` must survive the name
+        // prune that `vendor` would otherwise trigger: it was declared as
+        // project source, so an EXCLUDED_DIRS name along its path can't be
+        // read as "generated/vendored". Only the submodule's own path segments
+        // are spared — node_modules INSIDE it still prunes.
+        .filter_entry({
+            let subs: Vec<PathBuf> = submodules.iter().map(|s| root.join(s)).collect();
+            move |e| {
+                if !e.file_type().is_some_and(|t| t.is_dir()) {
+                    return true;
+                }
+                let p = e.path();
+                if subs.iter().any(|s| s.starts_with(p) || s == p) {
+                    return true;
+                }
+                !is_excluded_dir(e.file_name().to_str().unwrap_or(""))
+            }
         })
         .build();
     for entry in walker.flatten() {
@@ -442,4 +509,38 @@ pub fn reindex_file(root: &Path, conn: &Connection, rel: &str) -> Result<usize> 
     }
     tx.commit()?;
     Ok(symbols.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gitmodules_paths_are_parsed_in_order() {
+        let body = "\
+[submodule \"vendor/sdk\"]
+\tpath = vendor/sdk
+\turl = https://example.com/sdk.git
+[submodule \"libs/core\"]
+\tpath = libs/core
+\turl = ../core
+";
+        assert_eq!(parse_gitmodules(body), vec!["vendor/sdk", "libs/core"]);
+    }
+
+    #[test]
+    fn gitmodules_ignores_comments_and_other_keys() {
+        // `url`/`branch` must not be mistaken for paths, and a commented-out
+        // declaration is not a submodule.
+        let body = "# path = not/real\n; path = also/not\nurl = x\nbranch = main\npath = real/one\n";
+        assert_eq!(parse_gitmodules(body), vec!["real/one"]);
+    }
+
+    #[test]
+    fn gitmodules_rejects_paths_escaping_the_root() {
+        // These would make the walk index a tree outside the project root,
+        // whose files cannot be stored as project-relative paths.
+        let body = "path = /etc\npath = ../outside\npath = a/../../b\npath =\npath = ok/here\n";
+        assert_eq!(parse_gitmodules(body), vec!["ok/here"]);
+    }
 }
