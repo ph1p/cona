@@ -28,6 +28,41 @@ use crate::{db, indexer, lang};
 use anyhow::Result;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+/// Tool names that carry a file read or search directly, as their own tool.
+const NATIVE_TOOLS: &[&str] = &["Read", "Grep"];
+
+/// Tool names that carry one as a shell command line instead. A harness whose
+/// ONLY file tool is a shell (Codex runs `cat f` / `rg Foo` as
+/// `tool_name: "Bash"`) never emits a Read or Grep call — `classify_shell`
+/// recovers the intent from the command line and anything it does not
+/// recognise passes. Listing a tool cona then ignores costs one no-op hook
+/// run, missing one costs the whole tier.
+const SHELL_TOOLS: &[&str] = &[
+    "Bash",
+    "Shell",
+    "shell",
+    "exec",
+    "run_command",
+    "local_shell",
+];
+
+/// The `PreToolUse` matcher admitting exactly the tools `try_pretooluse`
+/// dispatches on. Derived from the two lists above so the matcher and the
+/// dispatcher cannot drift: a name added to one is a name added to both.
+///
+/// `plugin/hooks/hooks.json` declares the SAME matcher for the plugin
+/// distribution path; `plugin_hook_matcher_matches_the_installer` pins them
+/// equal.
+pub static PRETOOL_MATCHER: LazyLock<String> = LazyLock::new(|| {
+    NATIVE_TOOLS
+        .iter()
+        .chain(SHELL_TOOLS)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("|")
+});
 
 /// Default line threshold above which a full read of an indexed code file is
 /// redirected to `cona outline`/`show`. Override with `CONA_READ_MAX_LINES`.
@@ -308,8 +343,7 @@ pub fn unwrap_shell_wrapper(cmd: &str) -> Option<String> {
     // The script follows the flag bundle that contains `c` (`-c`, `-lc`, …);
     // anything after it is `$0`/positional args and irrelevant here.
     let mut it = args.iter();
-    let flag = it.find(|a| a.starts_with('-') && a.contains('c'))?;
-    let _ = flag;
+    it.find(|a| a.starts_with('-') && a.contains('c'))?;
     it.next().cloned()
 }
 
@@ -362,24 +396,22 @@ pub fn classify_command(cmd: &str) -> ShellIntent {
     };
     // Skip leading `VAR=value` assignments (`LC_ALL=C grep …`) — they change the
     // environment, not what the command does.
-    let words: Vec<String> = words
+    let start = words
         .iter()
-        .skip_while(|w| {
-            w.split_once('=')
+        .position(|w| {
+            !w.split_once('=')
                 .is_some_and(|(k, _)| !k.is_empty() && !k.starts_with('-'))
         })
-        .cloned()
-        .collect();
-    let Some((prog, args)) = words.split_first() else {
+        .unwrap_or(words.len());
+    let Some((prog, args)) = words[start..].split_first() else {
         return ShellIntent::Other;
     };
     // `/bin/cat` and `cat` are the same program.
     let prog = Path::new(prog.as_str())
         .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| prog.clone());
+        .map_or_else(|| prog.as_str().into(), |s| s.to_string_lossy());
 
-    match prog.as_str() {
+    match prog.as_ref() {
         // Whole-file dumps. Exactly one operand and no flags = a full read.
         "cat" | "bat" | "less" | "more" => match args {
             [one] if !one.starts_with('-') => ShellIntent::Read {
@@ -401,7 +433,7 @@ pub fn classify_command(cmd: &str) -> ShellIntent {
         // early is a partial read; `1,$p` / `1,99999p` over a shorter file is
         // how agents spell "read it all", so those fall through to Read.
         "sed" => classify_sed(args),
-        "rg" | "grep" | "ag" | "ack" => classify_grep(&prog, args),
+        "rg" | "grep" | "ag" | "ack" => classify_grep(args),
         _ => ShellIntent::Other,
     }
 }
@@ -461,7 +493,7 @@ fn classify_sed(args: &[String]) -> ShellIntent {
 /// `rg PATTERN [PATH]` → the grep half of `classify_shell`. Any narrowing flag
 /// (`-g`, `-t`, `--files`, `-m`, …) makes it surgical and therefore `Other`;
 /// only a bare broad search is a candidate for the semantic redirect.
-fn classify_grep(prog: &str, args: &[String]) -> ShellIntent {
+fn classify_grep(args: &[String]) -> ShellIntent {
     let mut positional: Vec<&String> = Vec::new();
     for a in args {
         if let Some(flag) = a.strip_prefix('-') {
@@ -478,10 +510,11 @@ fn classify_grep(prog: &str, args: &[String]) -> ShellIntent {
             positional.push(a);
         }
     }
-    // grep needs an explicit path to recurse; rg defaults to cwd.
-    let (pattern, path) = match (prog, positional.as_slice()) {
-        (_, [p]) => (p, None),
-        (_, [p, dir]) => (p, Some((*dir).clone())),
+    // A bare pattern searches the cwd (rg) or is a grep without a path — both
+    // are the broad search this tier wants. A second operand is the directory.
+    let (pattern, path) = match positional.as_slice() {
+        [p] => (p, None),
+        [p, dir] => (p, Some((*dir).clone())),
         _ => return ShellIntent::Other,
     };
     ShellIntent::Grep {
@@ -564,7 +597,7 @@ fn try_pretooluse() -> Result<()> {
         // '1,240p' f` / `rg Foo` through `tool_name = "Bash"`) never emit a
         // Read or Grep call. Recover the intent from the command line so the
         // same two intercepts work there; anything unrecognised passes.
-        Some("Bash" | "Shell" | "shell" | "exec" | "run_command" | "local_shell") => {
+        Some(name) if SHELL_TOOLS.contains(&name) => {
             let Some(cmd) = v["tool_input"]["command"].as_str() else {
                 return Ok(());
             };

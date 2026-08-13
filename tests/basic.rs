@@ -1063,9 +1063,10 @@ fn plugin_skill_matches_the_canonical_one() {
 }
 
 /// The redirect tier only runs on tool calls the matcher admits, and the matcher
-/// is written down twice: once by the installer (settings.json) and once by the
-/// plugin (hooks.json). A drift between them is invisible — the hook simply
-/// stops firing on that distribution path, silently, with no error anywhere.
+/// is written down twice: once derived from hook.rs (settings.json, via the
+/// installer) and once by hand in the plugin's hooks.json. A drift between them
+/// is invisible — the hook simply stops firing on that distribution path,
+/// silently, with no error anywhere.
 #[test]
 fn plugin_hook_matcher_matches_the_installer() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1079,9 +1080,9 @@ fn plugin_hook_matcher_matches_the_installer() {
         .expect("a PreToolUse entry");
     assert_eq!(
         pre["matcher"].as_str(),
-        Some(cona::install::agents::PRETOOL_MATCHER),
+        Some(cona::hook::PRETOOL_MATCHER.as_str()),
         "plugin/hooks/hooks.json PreToolUse matcher drifted from \
-         install::agents::PRETOOL_MATCHER"
+         hook::PRETOOL_MATCHER"
     );
 }
 

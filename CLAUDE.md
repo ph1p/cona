@@ -150,10 +150,13 @@ sit where each CLI looks: `.claude-plugin/marketplace.json` and
 `.agents/plugins/marketplace.json`, both at the repo root.
 Hook payloads are wire-compatible across both harnesses, so hook.rs has NO
 per-harness branch; what differs is the tool (Codex ships only a shell — see the
-hook.rs entry). **The PreToolUse matcher is declared TWICE and the two must
-agree**: `plugin/hooks/hooks.json` (plugin path) and the `specs` table in
-install/agents.rs `claude_hooks` (`agents install` path). Reinstall reconciles a
-drifted matcher, so widening it self-heals existing installs.
+hook.rs entry). **The PreToolUse matcher has ONE source**: `hook::PRETOOL_MATCHER`,
+joined from `NATIVE_TOOLS` + `SHELL_TOOLS` — the same `SHELL_TOOLS` the
+dispatcher matches on, so matcher and dispatcher cannot disagree. The installer
+(`specs` in install/agents.rs `claude_hooks`) reads it; `plugin/hooks/hooks.json`
+is the one hand-written copy, pinned by
+`plugin_hook_matcher_matches_the_installer`. Reinstall reconciles a drifted
+matcher, so widening it self-heals existing installs.
 Codex specifics that bite: a `local` source is COPIED into
 `~/.codex/plugins/cache/<mkt>/<plugin>/<version>/`, so editing the checkout does
 nothing until `codex plugin add` runs again (silent — old hooks keep firing);
