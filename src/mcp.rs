@@ -57,6 +57,9 @@ pub fn tool_annotated(
 pub struct ToolOut {
     pub text: String,
     pub structured: Option<Value>,
+    /// Set by the disclosure gate: this call revealed the extended tools, so
+    /// tools/list must start returning them and the client must be told.
+    pub expand: bool,
 }
 
 impl ToolOut {
@@ -65,6 +68,7 @@ impl ToolOut {
         Self {
             text,
             structured: None,
+            expand: false,
         }
     }
 
@@ -73,7 +77,14 @@ impl ToolOut {
         Self {
             text,
             structured: Some(structured),
+            expand: false,
         }
+    }
+
+    /// Mark this result as the one that unlocks the extended toolset.
+    pub fn expanding(mut self) -> Self {
+        self.expand = true;
+        self
     }
 }
 
@@ -122,18 +133,27 @@ pub fn writes(title: &str, destructive: bool) -> Option<Value> {
     )
 }
 
-/// Serve until the reader closes. `tools` is the tools/list payload;
-/// `call(name, args)` runs one tool and returns its text. Tool failures
-/// become results with isError — never protocol errors. `instructions` is
-/// the optional MCP server preamble echoed in the initialize result (how to
-/// use the server); `None` omits the field.
+/// Serve until the reader closes. `call(name, args)` runs one tool and returns
+/// its text. Tool failures become results with isError — never protocol errors.
+/// `instructions` is the optional MCP server preamble echoed in the initialize
+/// result (how to use the server); `None` omits the field.
+///
+/// `tools(expanded)` builds the tools/list payload for the current disclosure
+/// tier: `false` = the core set, `true` = every tool. A tool whose text output
+/// sets [`ToolOut::expand`] flips the connection to expanded and triggers
+/// `notifications/tools/list_changed`, which is the ONLY way a client learns
+/// about the extra tools — clients may only call what tools/list returned, so
+/// merely describing a gated tool in some other tool's output leaves it
+/// unreachable. `listChanged` is declared for the same reason: a client that
+/// never gets the notification never re-lists.
 pub fn serve<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
-    tools: &[Value],
+    tools: impl Fn(bool) -> Vec<Value>,
     instructions: Option<&str>,
     mut call: impl FnMut(&str, &Value) -> Result<ToolOut>,
 ) -> Result<()> {
+    let mut expanded = false;
     let reply = |w: &mut W, id: Value, body: Result<Value, (i64, String)>| -> Result<()> {
         let msg = match body {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
@@ -173,7 +193,7 @@ pub fn serve<R: BufRead, W: Write>(
                     negotiate_protocol(params.get("protocolVersion").and_then(|v| v.as_str()));
                 let mut result = json!({
                     "protocolVersion": proto,
-                    "capabilities": {"tools": {}},
+                    "capabilities": {"tools": {"listChanged": true}},
                     "serverInfo": {
                         "name": "cona",
                         "title": "cona — code navigation",
@@ -186,15 +206,18 @@ pub fn serve<R: BufRead, W: Write>(
                 reply(&mut writer, id, Ok(result))?;
             }
             "ping" => reply(&mut writer, id, Ok(json!({})))?,
-            "tools/list" => reply(&mut writer, id, Ok(json!({"tools": tools})))?,
+            "tools/list" => reply(&mut writer, id, Ok(json!({"tools": tools(expanded)})))?,
             "tools/call" => {
                 let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let args = params
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
+                let mut newly_expanded = false;
                 let result = match call(name, &args) {
                     Ok(out) => {
+                        newly_expanded = out.expand && !expanded;
+                        expanded |= out.expand;
                         let mut r = json!({"content": [{"type": "text", "text": out.text}]});
                         if let Some(sc) = out.structured {
                             r["structuredContent"] = sc;
@@ -207,6 +230,16 @@ pub fn serve<R: BufRead, W: Write>(
                     }),
                 };
                 reply(&mut writer, id, Ok(result))?;
+                // After the result, so a client that re-lists on the notification
+                // sees the call it triggered already answered.
+                if newly_expanded {
+                    serde_json::to_writer(
+                        &mut writer,
+                        &json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}),
+                    )?;
+                    writer.write_all(b"\n")?;
+                    writer.flush()?;
+                }
             }
             other => reply(
                 &mut writer,
@@ -229,20 +262,28 @@ mod tests {
 
     fn run_with(input: &str, instructions: Option<&str>) -> Vec<Value> {
         let mut out = Vec::new();
-        let tools = vec![tool("echo", "echo text", json!({}), &[])];
+        // Two tiers, so the disclosure path is exercised: `gate` unlocks `extra`.
+        let tools = |expanded: bool| {
+            let mut t = vec![
+                tool("echo", "echo text", json!({}), &[]),
+                tool("gate", "unlock more", json!({}), &[]),
+            ];
+            if expanded {
+                t.push(tool("extra", "unlocked tool", json!({}), &[]));
+            }
+            t
+        };
         serve(
             input.as_bytes(),
             &mut out,
-            &tools,
+            tools,
             instructions,
-            |name, args| {
-                if name == "echo" {
-                    Ok(ToolOut::text(
-                        args["text"].as_str().unwrap_or("").to_string(),
-                    ))
-                } else {
-                    Err(anyhow!("unknown tool '{name}'"))
-                }
+            |name, args| match name {
+                "echo" => Ok(ToolOut::text(
+                    args["text"].as_str().unwrap_or("").to_string(),
+                )),
+                "gate" => Ok(ToolOut::text("unlocked".into()).expanding()),
+                _ => Err(anyhow!("unknown tool '{name}'")),
             },
         )
         .unwrap();
@@ -339,5 +380,84 @@ mod tests {
         assert_eq!(replies[0]["error"]["code"], -32700);
         assert_eq!(replies[0]["id"], serde_json::Value::Null);
         assert_eq!(replies[1]["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn disclosure_gate_expands_tools_list_and_notifies() {
+        let msgs = run(concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gate"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#,
+            "\n",
+        ));
+        let names = |m: &Value| -> Vec<String> {
+            m["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let replies: Vec<&Value> = msgs.iter().filter(|m| m.get("id").is_some()).collect();
+        // before: the gate is listed, what it unlocks is not
+        assert!(!names(replies[0]).contains(&"extra".to_string()));
+        // after: the unlocked tool is listed, so a client may call it
+        assert!(names(replies[2]).contains(&"extra".to_string()));
+
+        // and the client was TOLD to re-list — without this it would keep using
+        // the stale core-only list and never see `extra`
+        let notes: Vec<&str> = msgs
+            .iter()
+            .filter(|m| m.get("id").is_none())
+            .map(|m| m["method"].as_str().unwrap())
+            .collect();
+        assert_eq!(notes, vec!["notifications/tools/list_changed"]);
+    }
+
+    #[test]
+    fn disclosure_notification_follows_the_result_and_fires_once() {
+        let msgs = run(concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"gate"}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gate"}}"#,
+            "\n",
+        ));
+        // the result comes first: a client that re-lists on the notification finds
+        // the call that triggered it already answered
+        assert_eq!(msgs[0]["id"], 1);
+        assert_eq!(msgs[1]["method"], "notifications/tools/list_changed");
+        // already expanded — re-calling the gate must not re-notify
+        assert_eq!(
+            msgs.iter()
+                .filter(|m| m["method"] == "notifications/tools/list_changed")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn tool_props_are_a_property_map_not_a_schema_fragment() {
+        // `props` is nested under "properties", so passing a schema fragment
+        // (e.g. {"type":"object"}) silently declares properties named "type" —
+        // an invalid inputSchema, which clients reject by dropping the ENTIRE
+        // tools/list. Every property value must itself be an object.
+        for t in [
+            tool("a", "d", json!({}), &[]),
+            tool("b", "d", json!({"x": {"type": "string"}}), &["x"]),
+        ] {
+            let props = t["inputSchema"]["properties"].as_object().unwrap();
+            for (name, spec) in props {
+                assert!(
+                    spec.is_object(),
+                    "property {name} is not a schema object: {spec}"
+                );
+                assert!(
+                    !matches!(name.as_str(), "type" | "additionalProperties" | "required"),
+                    "schema keyword {name} leaked into the property map"
+                );
+            }
+        }
     }
 }

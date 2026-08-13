@@ -36,7 +36,7 @@ cona index
 | Component      | Effect                                                                     |
 | :------------- | :------------------------------------------------------------------------- |
 | **Skill**      | `/cona:cona` — the coarse→fine navigation workflow                          |
-| **MCP server** | 8 core tools + a `more` gate disclosing 13 advanced ones                     |
+| **MCP server** | 8 core tools + a `more` gate that unlocks 13 advanced ones                   |
 | **PreToolUse** | Redirects large full reads and broad identifier greps to cona (advisory)     |
 | **PostToolUse**| Reindexes after edits, so symbol line ranges never go stale                  |
 | **SessionStart**| Indexes quietly and prints a repo-orientation map (most-referenced symbols) |

@@ -590,6 +590,10 @@ fn mcp_stdio_handshake_and_tools_list() {
                 "\n",
                 r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"find","arguments":{"name":"hello"}}}"#,
                 "\n",
+                // after `more`, the extended tools must appear in tools/list —
+                // a client may only call what tools/list returned
+                r#"{"jsonrpc":"2.0","id":5,"method":"tools/list"}"#,
+                "\n",
             )
             .as_bytes(),
         )
@@ -597,12 +601,31 @@ fn mcp_stdio_handshake_and_tools_list() {
     drop(stdin); // EOF ends the serve loop
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
-    let lines: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+    let all: Vec<serde_json::Value> = String::from_utf8(out.stdout)
         .unwrap()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 4); // notification gets no reply
+    // Server-initiated notifications are interleaved with the replies; keep them
+    // apart so the replies stay addressable by request order.
+    let notes: Vec<&str> = all
+        .iter()
+        .filter(|m| m.get("id").is_none())
+        .map(|m| m["method"].as_str().unwrap_or(""))
+        .collect();
+    let lines: Vec<serde_json::Value> = all
+        .iter()
+        .filter(|m| m.get("id").is_some())
+        .cloned()
+        .collect();
+    assert_eq!(lines.len(), 5); // our own notifications/initialized gets no reply
+    // Unlocking the extended tier MUST announce itself: a client that is never
+    // told to re-list can never call the tools `more` just revealed.
+    assert!(
+        notes.contains(&"notifications/tools/list_changed"),
+        "no list_changed after `more`: {notes:?}"
+    );
+    assert_eq!(lines[0]["result"]["capabilities"]["tools"]["listChanged"], true);
     assert_eq!(lines[0]["result"]["serverInfo"]["name"], "cona");
     // a supported protocol version is echoed back verbatim (negotiation)
     assert_eq!(lines[0]["result"]["protocolVersion"], "2025-03-26");
@@ -635,8 +658,14 @@ fn mcp_stdio_handshake_and_tools_list() {
         tools.len()
     );
 
-    // Parity is still total — the callgraph/insight/knowledge tools live behind
-    // `more`, so its payload (not tools/list) is what must list them.
+    // Parity is total once expanded, and the EXPANDED tools/list is what proves
+    // it: `more`'s text payload is advisory, but only a listed tool is callable.
+    let expanded: Vec<&str> = lines[4]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
     let more = lines[2]["result"]["content"][0]["text"].as_str().unwrap();
     let gated: serde_json::Value =
         serde_json::from_str(&more[more.find('[').unwrap()..]).unwrap();
@@ -661,10 +690,23 @@ fn mcp_stdio_handshake_and_tools_list() {
         "note",
     ] {
         assert!(gated.contains(&t), "missing MCP tool {t}: {gated:?}");
+        assert!(
+            expanded.contains(&t),
+            "{t} described by `more` but absent from the expanded tools/list, \
+             so no client can call it: {expanded:?}"
+        );
     }
     // A tool is disclosed by exactly one tier, never both.
     for t in &tools {
         assert!(!gated.contains(t), "tool {t} disclosed twice");
+    }
+    // Every core tool survives expansion, and the spent gate is retired.
+    for t in &tools {
+        if *t == "more" {
+            assert!(!expanded.contains(t), "spent `more` gate still listed");
+        } else {
+            assert!(expanded.contains(t), "core tool {t} lost on expansion");
+        }
     }
 
     // behaviour annotations: read-only queries vs writing tools. Core tools come
@@ -1013,4 +1055,39 @@ fn plugin_skill_matches_the_canonical_one() {
         "plugin/skills/cona/SKILL.md drifted from SKILL.md — \
          re-run: cp SKILL.md plugin/skills/cona/SKILL.md"
     );
+}
+
+/// A malformed inputSchema is not a soft failure: clients reject the whole
+/// tools/list, so ONE bad tool silently removes every cona tool from the
+/// session. Validate the shape of all of them, both tiers.
+#[test]
+fn every_mcp_tool_schema_is_well_formed() {
+    for expanded in [false, true] {
+        for t in cona::commands::mcp_server::mcp_tools(expanded) {
+            let name = t["name"].as_str().expect("tool needs a name");
+            let schema = &t["inputSchema"];
+            assert_eq!(schema["type"], "object", "{name}: inputSchema not object");
+            let props = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name}: properties missing/not an object"));
+            for (prop, spec) in props {
+                let spec = spec
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{name}.{prop} is not a schema object: {spec}"));
+                assert!(
+                    spec.contains_key("type"),
+                    "{name}.{prop} has no declared type"
+                );
+            }
+            // `required` must name declared properties, or a client can reject a
+            // call it has no way to satisfy.
+            for r in t["inputSchema"]["required"].as_array().unwrap() {
+                let r = r.as_str().unwrap();
+                assert!(props.contains_key(r), "{name}: required {r} not declared");
+            }
+            if let Some(out) = t.get("outputSchema") {
+                assert_eq!(out["type"], "object", "{name}: outputSchema not object");
+            }
+        }
+    }
 }

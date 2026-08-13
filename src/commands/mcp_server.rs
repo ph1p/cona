@@ -227,12 +227,14 @@ fn is_core(t: &serde_json::Value) -> bool {
 /// reaches for only once it knows what it wants, which is exactly when it can
 /// afford one extra call to `more` to fetch their schemas.
 ///
-/// Extended tools stay CALLABLE the whole time — `mcp_call` dispatches on name
-/// and never consults this list. `more` only reveals schemas; it does not
-/// unlock anything, so a client that already knows a name (or reconnects
-/// mid-session) can call it directly and a disclosure step is never a
-/// prerequisite for correctness.
-fn mcp_tools() -> Vec<serde_json::Value> {
+/// Disclosure must go through tools/list, not through prose. A client may only
+/// call what tools/list returned, so describing a gated tool in some other
+/// tool's output leaves it UNREACHABLE — Claude Code answers such a call with
+/// "No such tool available". Hence `more` flips the connection to expanded and
+/// `serve` emits notifications/tools/list_changed, after which this returns the
+/// full set. `mcp_call` still dispatches on name alone, so a client that never
+/// re-lists is not broken, merely unable to discover the tail.
+pub fn mcp_tools(expanded: bool) -> Vec<serde_json::Value> {
     use serde_json::json;
     let all = all_tools();
     let extended: Vec<&str> = all
@@ -240,15 +242,23 @@ fn mcp_tools() -> Vec<serde_json::Value> {
         .filter(|t| !is_core(t))
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
         .collect();
+    // Expanded: everything, and `more` is gone — it has nothing left to unlock,
+    // and leaving it would invite a second no-op call.
+    if expanded {
+        return all;
+    }
     let mut out: Vec<serde_json::Value> = all.iter().filter(|t| is_core(t)).cloned().collect();
     out.push(mcp_tool(
         "more",
         &format!(
-            "Full schemas for cona's {} advanced tools — call once, then call them by name. \
-             Analysis: {}",
+            "Unlock cona's {} advanced analysis tools ({}). Call this once and they \
+             become available as normal tools for the rest of the session.",
             extended.len(),
             extended.join(", ")
         ),
+        // `props` is the properties MAP, which tool_annotated nests under
+        // "properties" — a schema fragment here yields bogus property defs and
+        // clients drop the whole tools/list as invalid.
         json!({}),
         &[],
         read_only("More tools"),
@@ -263,7 +273,7 @@ fn mcp_more() -> Result<String> {
     let extended: Vec<serde_json::Value> =
         all_tools().into_iter().filter(|t| !is_core(t)).collect();
     Ok(format!(
-        "{} advanced cona tools — call any of them by name like a normal tool:\n\n{}",
+        "{} advanced cona tools are now available — call any of them by name:\n\n{}",
         extended.len(),
         serde_json::to_string_pretty(&extended)?
     ))
@@ -585,12 +595,13 @@ Typical flow, coarse to fine — pull the smallest slice that answers the questi
   3. show <Symbol> — the source of exactly ONE symbol (not the whole file)
   4. context <Symbol> — that symbol plus its callee signatures and call sites
 
-The tools listed here are the core set. Thirteen more — insert, batch_edit, \
-check, impact, callers, callees, path, deps, shape, entries, tests, note — \
-exist and are callable by name at any time; call `more` once for their full \
-schemas. Before changing code: deps / callers / callees / path map imports and \
-call chains; impact / tests / shape scope a change first. edit / batch_edit / \
-insert are syntax-verified and roll back on a parse error.
+The tools listed here are the core set. Call `more` once to unlock thirteen \
+advanced ones — diff, insert, batch_edit, check, impact, callers, callees, \
+path, deps, shape, entries, tests, note — after which they behave like any \
+other tool for the rest of the session. Before changing code: deps / callers / \
+callees / path map imports and call chains; impact / tests / shape scope a \
+change first. edit / batch_edit / insert are syntax-verified and roll back on \
+a parse error.
 
 Paths are relative to the project root. Only fall back to reading a whole file \
 when it is not indexed or you truly need every line.";
@@ -611,14 +622,14 @@ pub fn cmd_mcp(root: &Path) -> Result<()> {
     crate::mcp::serve(
         std::io::stdin().lock(),
         std::io::stdout().lock(),
-        &mcp_tools(),
+        mcp_tools,
         Some(MCP_INSTRUCTIONS),
         |name, args| {
             // `more` only reflects over static schemas — opening (and possibly
             // building) the index for it would make schema discovery as
             // expensive as a query, and fail in an unindexed tree.
             if name == "more" {
-                return Ok(ToolOut::text(mcp_more()?));
+                return Ok(ToolOut::text(mcp_more()?).expanding());
             }
             let conn = match conn.get() {
                 Some(c) => c,

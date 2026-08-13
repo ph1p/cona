@@ -105,10 +105,14 @@ session (WAL makes external reindexes visible; freshness via locate_fresh).
 note/diff) are disclosed by calling `more`. Schemas are re-sent on EVERY request,
 so the full 21 cost ~2.6k tokens per turn whether or not one is called — the
 whole set is ~1.7k this way. `all_tools()` is the single source both tiers
-filter, so they cannot disagree about a schema. Extended tools stay CALLABLE
-throughout: `mcp_call` dispatches on name and never consults the list, so
-disclosure is never a prerequisite for correctness (a client that knows a name,
-or reconnects mid-session, just calls it). `more` short-circuits BEFORE the lazy
+filter, so they cannot disagree about a schema. **Disclosure MUST go through
+tools/list.** A client can only call what tools/list returned — naming a gated
+tool in prose leaves it unreachable ("No such tool available"). So `more` returns
+`ToolOut::expanding()`, `serve` flips the connection and emits
+`notifications/tools/list_changed` (hence `capabilities.tools.listChanged`), and
+tools/list then returns everything with the spent `more` retired. `mcp_call`
+still dispatches on name alone, so a client that never re-lists is not broken,
+just unable to discover the tail. `more` short-circuits BEFORE the lazy
 index open — reflecting over static schemas must not build an index or fail in an
 unindexed tree.
 
