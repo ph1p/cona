@@ -127,21 +127,32 @@ and Cline all read), `cursor`, `gemini`, `pi`, `opencode`, `windsurf`, `zed`,
 **Uninstall** mirrors setup: `cona uninstall` (interactive checklist),
 `cona uninstall -y` (agents + binary), `--purge` also deletes `~/.cona`.
 
-### Claude Code plugin
+### As a plugin (Claude Code, Codex)
 
-Claude Code users can take the skill, hooks and MCP server as a plugin instead
-of `cona agents install` — same components, managed by `/plugin`:
+Both harnesses can take the skill, hooks and MCP server as a managed plugin
+instead of `cona agents install`. Same components, same `plugin/` directory —
+it ships a manifest for each (`.claude-plugin/` and `.codex-plugin/`) over one
+shared payload.
 
 ```sh
+# Claude Code
 /plugin marketplace add ph1p/cona
 /plugin install cona@cona
+
+# Codex CLI (marketplace manifest is in the repo, so clone first)
+git clone https://github.com/ph1p/cona
+codex plugin marketplace add ./cona
+codex plugin add cona@cona
 ```
 
 The binary is still the prerequisite (see [Installation](#installation)); every
 plugin hook is guarded with `command -v cona`, so without it the plugin is inert
-rather than noisy. Use the plugin **or** `cona agents install claude`, not both —
-running both is harmless but you'll see the guidance twice. Details:
-[`plugin/README.md`](plugin/README.md).
+rather than noisy. Use the plugin **or** `cona agents install`, not both —
+running both is harmless but you'll see the guidance twice.
+
+Codex copies a local plugin into a cache snapshot, so re-run `codex plugin add`
+after editing the plugin, and it gates hooks behind a trust prompt on first run.
+Details for both harnesses: [`plugin/README.md`](plugin/README.md).
 
 ## MCP server
 
@@ -224,6 +235,14 @@ it redirects exactly two things — a complete read of a large code file, and a
 broad identifier grep — to the cheaper query. Everything else (partial reads,
 small files, non-code, regex greps) passes untouched. It always fails open;
 `CONA_HOOK_DISABLE=1` turns it off.
+
+It recognises both shapes a read arrives in. Harnesses with real `Read`/`Grep`
+tools are matched by tool name; harnesses whose only file tool is a shell (Codex
+runs `cat f` / `sed -n '1,400p' f` / `rg Foo` through its Bash tool) get the
+command line parsed instead. Fail-open holds there too: a line with one
+unrecognised segment passes whole (`sed -n '1,50p' f && cargo build` is a build,
+not a read), an unrecognised wrapper program passes, and a genuinely bounded
+`sed`/`head`/`tail` passes because it is already the cheap thing.
 
 **The re-nudge hook** is off by default. Current models keep the habit from the
 session-start note alone, and repeating it on a timer is just context noise. On

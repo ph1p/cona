@@ -1,0 +1,43 @@
+{
+  "name": "cona",
+  "version": "0.1.0",
+  "description": "Token-efficient code navigation: read one symbol instead of a whole file, search code semantically, and edit with syntax verification. Bundles the cona skill, the read/grep advisory hooks, auto-reindexing, and the MCP server.",
+  "author": {
+    "name": "ph1p",
+    "url": "https://github.com/ph1p"
+  },
+  "homepage": "https://github.com/ph1p/cona",
+  "repository": "https://github.com/ph1p/cona",
+  "license": "MIT",
+  "keywords": [
+    "code-navigation",
+    "tokens",
+    "tree-sitter",
+    "search",
+    "refactoring"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "cona",
+    "shortDescription": "Read one symbol instead of a whole file",
+    "longDescription": "cona indexes your project into a tree-sitter symbol tree so Codex can pull a single function, class, or method instead of dumping whole files into context. Adds semantic code search, syntax-verified edits, and hooks that steer large reads toward the cheap query.",
+    "developerName": "ph1p",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/ph1p/cona",
+    "privacyPolicyURL": "https://github.com/ph1p/cona/blob/main/README.md",
+    "termsOfServiceURL": "https://github.com/ph1p/cona/blob/main/LICENSE",
+    "defaultPrompt": [
+      "Orient me in this codebase with cona",
+      "Show me the login function without reading the whole file",
+      "What calls this symbol, and what would break if I change it?"
+    ],
+    "brandColor": "#4C6EF5",
+    "screenshots": []
+  }
+}

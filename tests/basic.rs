@@ -1062,6 +1062,62 @@ fn plugin_skill_matches_the_canonical_one() {
     );
 }
 
+/// The redirect tier only runs on tool calls the matcher admits, and the matcher
+/// is written down twice: once by the installer (settings.json) and once by the
+/// plugin (hooks.json). A drift between them is invisible — the hook simply
+/// stops firing on that distribution path, silently, with no error anywhere.
+#[test]
+fn plugin_hook_matcher_matches_the_installer() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let hooks: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("plugin/hooks/hooks.json")).expect("plugin hooks.json"),
+    )
+    .expect("plugin hooks.json is valid JSON");
+    let pre = hooks["hooks"]["PreToolUse"]
+        .as_array()
+        .and_then(|a| a.first())
+        .expect("a PreToolUse entry");
+    assert_eq!(
+        pre["matcher"].as_str(),
+        Some(cona::install::agents::PRETOOL_MATCHER),
+        "plugin/hooks/hooks.json PreToolUse matcher drifted from \
+         install::agents::PRETOOL_MATCHER"
+    );
+}
+
+/// One plugin directory serves both harnesses: Claude Code reads
+/// `.claude-plugin/plugin.json`, Codex reads `.codex-plugin/plugin.json`, and
+/// both point at the SAME skills/hooks/mcp payload. If the two manifests
+/// disagree about what they are describing, one harness ships something the
+/// other does not.
+#[test]
+fn both_plugin_manifests_describe_the_same_plugin() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |p: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| {
+            panic!("{p}: {e}");
+        }))
+        .unwrap_or_else(|e| panic!("{p} is not valid JSON: {e}"))
+    };
+    let claude = read("plugin/.claude-plugin/plugin.json");
+    let codex = read("plugin/.codex-plugin/plugin.json");
+    for key in ["name", "version", "description", "homepage", "license"] {
+        assert_eq!(
+            claude[key], codex[key],
+            "plugin manifests disagree on `{key}`"
+        );
+    }
+    // The Codex manifest names the shared payload explicitly (Claude Code
+    // discovers it by convention), so those paths must actually exist.
+    for key in ["skills", "mcpServers", "hooks"] {
+        let rel = codex[key].as_str().unwrap_or_else(|| {
+            panic!(".codex-plugin/plugin.json is missing `{key}`");
+        });
+        let path = root.join("plugin").join(rel.trim_start_matches("./"));
+        assert!(path.exists(), "`{key}` points at a missing path: {rel}");
+    }
+}
+
 /// A malformed inputSchema is not a soft failure: clients reject the whole
 /// tools/list, so ONE bad tool silently removes every cona tool from the
 /// session. Validate the shape of all of them, both tiers.

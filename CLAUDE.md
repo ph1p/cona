@@ -56,7 +56,13 @@ src/entries.rs   Pure heuristics for entries/tests
 src/fuzzy.rs     fuzzy_score — find's fallback ranking
 src/diffmap.rs   Pure diff helpers (parse_unified/overlaps/has_uncovered)
 src/resolve.rs   Optional stack-graphs tier (fail-open), separate helper binary
-src/hook.rs      PreToolUse/PostToolUse hooks; additionalContext ONLY
+src/hook.rs      PreToolUse/PostToolUse hooks. PreToolUse redirect = the ONLY
+                 permissionDecision (deny); every hint path is additionalContext.
+                 Reads arrive in TWO shapes: native Read/Grep, and a shell
+                 command line (Codex has no Read/Grep — `cat f`/`sed -n`/`rg`
+                 come through as tool_name "Bash"), normalized by classify_shell
+                 into the SAME try_read/try_grep. Fail-open: one unrecognised
+                 segment passes the whole line
 src/dashboard.rs `cona ui` — ratatui live TUI, read-only
 src/ui.rs        ANSI styling (zero deps) + select/multiselect primitives
 src/mcp.rs       MCP framing (stdio JSON-RPC 2.0, pure, tested)
@@ -134,6 +140,25 @@ with `[0]` on an unknown request); newest = 2025-11-25, whose additions (`_meta`
 `icons`, `outputSchema`) are all optional, so existing payloads stay valid.
 Registration into harness configs is NOT here — it is install-time
 (src/install/mcp_config.rs), run by `agents install`/`setup`.
+
+## Plugin (`plugin/`)
+
+ONE directory, TWO harness manifests: `.claude-plugin/plugin.json` (Claude Code)
+and `.codex-plugin/plugin.json` (Codex) over a SHARED payload (`skills/`,
+`.mcp.json`, `hooks/hooks.json`) — nothing to keep in sync. Marketplace manifests
+sit where each CLI looks: `.claude-plugin/marketplace.json` and
+`.agents/plugins/marketplace.json`, both at the repo root.
+Hook payloads are wire-compatible across both harnesses, so hook.rs has NO
+per-harness branch; what differs is the tool (Codex ships only a shell — see the
+hook.rs entry). **The PreToolUse matcher is declared TWICE and the two must
+agree**: `plugin/hooks/hooks.json` (plugin path) and the `specs` table in
+install/agents.rs `claude_hooks` (`agents install` path). Reinstall reconciles a
+drifted matcher, so widening it self-heals existing installs.
+Codex specifics that bite: a `local` source is COPIED into
+`~/.codex/plugins/cache/<mkt>/<plugin>/<version>/`, so editing the checkout does
+nothing until `codex plugin add` runs again (silent — old hooks keep firing);
+hooks are hash-trusted (`--dangerously-bypass-hook-trust` skips the prompt once).
+Details: docs/architecture.md, user-facing docs: plugin/README.md.
 
 ## Setup / uninstall UX
 

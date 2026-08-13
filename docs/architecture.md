@@ -175,12 +175,38 @@ src/resolve.rs   Optional semantic resolution tier (fail-open): spawns
                  a cargo dependency of cona (links collision). Findings:
                  docs/spike-semantic-resolution.md
 src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
-                 PreToolUse (matcher Read|Grep) = pure decide_read/decide_grep +
-                 fail-open runner; redirects large full reads + broad identifier
-                 greps (indexed project, no glob/type/path filter) to cona; hook
-                 NEVER creates a DB. try_read gates (partial/non-code/metadata-
-                 size) BEFORE reading bytes — multi-GB file must not be slurped
-                 just to be allowed. PostToolUse (no matcher) = periodic re-nudge,
+                 PreToolUse = pure decide_read/decide_grep + fail-open runner;
+                 redirects large full reads + broad identifier greps (indexed
+                 project, no glob/type/path filter) to cona; hook NEVER creates a
+                 DB. try_read gates (partial/non-code/metadata-size) BEFORE
+                 reading bytes — multi-GB file must not be slurped just to be
+                 allowed.
+                 TWO tool shapes reach the same decision. Native Read/Grep is
+                 read off tool_input. A harness whose ONLY file tool is a shell
+                 (Codex sends tool_name "Bash" with command
+                 `/bin/zsh -lc "sed -n '1,400p' f"`) never emits Read or Grep, so
+                 classify_shell normalizes the command line into a ShellIntent
+                 (Read{path,upto} | PartialRead | Grep{pattern,path} | Other) and
+                 try_shell routes it into the SAME try_read/try_grep — the matcher
+                 therefore lists the shell tool names too. Pipeline: unwrap_shell
+                 _wrapper peels `sh|bash|zsh|… -lc "<script>"` → split_segments
+                 splits on && || ; | newline (quote-respecting) → classify_command
+                 per segment. Whole-line policy: ONE unrecognised segment makes
+                 the line Other (blocking it would block that segment too —
+                 `sed -n … f && cargo build` is a build); among recognised
+                 segments the strongest intent wins (rank). Metadata probes
+                 (wc/ls/file/stat/echo/…) are PartialRead, not Other, because an
+                 agent routinely pairs one with the read it is about to do.
+                 `sed -n '1,N p'` is Read{upto:N}, NOT PartialRead: that is
+                 exactly how a shell-only harness spells "read the whole file"
+                 (it picks an N it expects to exceed the length). The bound is
+                 applied only after the real line count is known (upto < lines →
+                 genuinely partial → pass), so the caller, not the parser, decides.
+                 Relative paths resolve against the payload `cwd` — the hook runs
+                 wherever the harness launched it. Fail-open by construction: an
+                 unrecognised wrapper (a shell proxy prefixing commands) yields
+                 Other and passes.
+                 PostToolUse (no matcher) = periodic re-nudge,
                  OFF by default (DEFAULT_RENUDGE_EVERY = 0): repeating the same
                  rule across SessionStart + guide + timer is over-constraint for
                  current models. Opt in with CONA_RENUDGE_EVERY=<n> → a
@@ -193,10 +219,13 @@ src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  + counter tick gate BEFORE the expensive has_index DB-open, so
                  non-nudging calls never open the DB.
                  tick_toolcall + nudge_once share session_marker_path (the ONE
-                 session-identity rule: CLAUDE_SESSION_ID, else per-day bucket).
-                 ALL hint paths emit additionalContext ONLY, never a
-                 permissionDecision ("allow" would silently bypass the permission
-                 system)
+                 session-identity rule via session_id(): CLAUDE_SESSION_ID, else
+                 the payload's own `session_id` — Codex exports no env var but
+                 sends the field — else a per-day bucket).
+                 The redirect is the ONLY permissionDecision cona ever emits, and
+                 only "deny" + the cona command to run instead. Every hint path
+                 (advisory, streak, nudge) is additionalContext ONLY. cona NEVER
+                 emits "allow" — that would silently bypass the permission system
 src/dashboard.rs `cona ui` — ratatui live TUI, read-only. DBs opened ONCE (not
                  per tick); cheap usage stats refresh 1s, the expensive index-
                  state scan (one fs stat/file) throttled to 5s. Keys: q quit,
@@ -407,3 +436,36 @@ src/db.rs        SQLite: ~/.cona/projects/<fnv1a-hash>.db per project
                  home indexing
 ```
 
+## Plugin packaging (`plugin/`)
+
+One directory, two harness manifests. `plugin/.claude-plugin/plugin.json` is
+read by Claude Code, `plugin/.codex-plugin/plugin.json` by Codex; the payload
+they both point at — `skills/`, `.mcp.json`, `hooks/hooks.json` — is shared, so
+there is nothing to keep in sync. The marketplace manifests sit where each CLI
+looks for them: `.claude-plugin/marketplace.json` and
+`.agents/plugins/marketplace.json`, both at the repo root.
+
+Two Codex behaviours shape how this is used and documented:
+
+- **`local` sources are copied, not linked.** `codex plugin add` snapshots the
+  plugin into `~/.codex/plugins/cache/<marketplace>/<plugin>/<version>/`. Editing
+  the checkout does not affect an installed plugin until `codex plugin add` runs
+  again — the failure mode is silent (old hooks keep firing), so it is called out
+  in plugin/README.md.
+- **Hooks are hash-trusted.** Codex prompts before running a plugin's hooks the
+  first time and after any change to them.
+
+Hook payloads are wire-compatible between the two harnesses (same JSON fields,
+same `hookSpecificOutput` response), so `src/hook.rs` needs no per-harness
+branch. What differs is the TOOL, not the protocol: Codex has no Read/Grep, only
+a shell — which is what classify_shell in hook.rs exists for (see its entry
+above), and why the PreToolUse matcher lists the shell tool names alongside
+Read|Grep. The matcher is declared in TWO places that must agree:
+plugin/hooks/hooks.json (plugin path) and the `specs` table in
+install/agents.rs claude_hooks (`cona agents install` path). The installer
+reconciles a drifted matcher on reinstall, so widening it self-heals existing
+installs.
+
+Distribution overlap is deliberate: the plugin and `cona agents install` deliver
+the same components by different routes. Both are idempotent; running both only
+duplicates the guidance.

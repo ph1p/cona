@@ -1,0 +1,19 @@
+{
+  "name": "cona",
+  "interface": {
+    "displayName": "cona"
+  },
+  "plugins": [
+    {
+      "name": "cona",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
