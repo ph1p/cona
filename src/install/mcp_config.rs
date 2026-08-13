@@ -77,7 +77,6 @@ impl ServerKey {
     }
 }
 
-
 /// Add/remove the cona entry in a JSON config carrying an `mcpServers` object.
 /// Returns the `Change` so callers can report Created/Updated/Unchanged like
 /// every other install target.
@@ -93,12 +92,7 @@ pub fn json_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
 
 /// `json_server` for a harness that spells the server map differently
 /// (`ServerKey`). Same guarantees; only the key and entry shape move.
-pub fn json_server_keyed(
-    path: &Path,
-    exe: &str,
-    install: bool,
-    key: ServerKey,
-) -> Result<Change> {
+pub fn json_server_keyed(path: &Path, exe: &str, install: bool, key: ServerKey) -> Result<Change> {
     let existing = std::fs::read_to_string(path).ok();
     if !install && existing.is_none() {
         return Ok(Change::Unchanged);
@@ -472,7 +466,11 @@ mod tests {
         let p = dir.join("settings.json");
         let before = "{\n  \"theme\": \"dark\"\n}\n";
         std::fs::write(&p, before).unwrap();
-        for key in [ServerKey::McpServers, ServerKey::Mcp, ServerKey::ContextServers] {
+        for key in [
+            ServerKey::McpServers,
+            ServerKey::Mcp,
+            ServerKey::ContextServers,
+        ] {
             assert_eq!(
                 json_server_keyed(&p, "/bin/cona", false, key).unwrap(),
                 Change::Unchanged

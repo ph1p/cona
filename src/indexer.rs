@@ -532,7 +532,8 @@ mod tests {
     fn gitmodules_ignores_comments_and_other_keys() {
         // `url`/`branch` must not be mistaken for paths, and a commented-out
         // declaration is not a submodule.
-        let body = "# path = not/real\n; path = also/not\nurl = x\nbranch = main\npath = real/one\n";
+        let body =
+            "# path = not/real\n; path = also/not\nurl = x\nbranch = main\npath = real/one\n";
         assert_eq!(parse_gitmodules(body), vec!["real/one"]);
     }
 

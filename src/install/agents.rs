@@ -229,7 +229,9 @@ impl AgentName {
                 if global {
                     home.join(".copilot").exists()
                 } else {
-                    project_root.join(".github/copilot-instructions.md").exists()
+                    project_root
+                        .join(".github/copilot-instructions.md")
+                        .exists()
                         || project_root.join(".github/instructions").exists()
                 }
             }
@@ -386,15 +388,11 @@ impl AgentName {
             AgentName::Pi => None,
             // OpenCode's project config sits at the repo root; globally it
             // lives beside its AGENTS.md under XDG.
-            AgentName::Opencode if global => {
-                Some(xdg_config(home).join("opencode/opencode.json"))
-            }
+            AgentName::Opencode if global => Some(xdg_config(home).join("opencode/opencode.json")),
             AgentName::Opencode => Some(project_root.join("opencode.json")),
             // Windsurf has no documented per-project MCP file — the one config
             // is global, under its Codeium data dir.
-            AgentName::Windsurf if global => {
-                Some(home.join(".codeium/windsurf/mcp_config.json"))
-            }
+            AgentName::Windsurf if global => Some(home.join(".codeium/windsurf/mcp_config.json")),
             AgentName::Windsurf => None,
             AgentName::Zed if global => Some(xdg_config(home).join("zed/settings.json")),
             AgentName::Zed => Some(project_root.join(".zed/settings.json")),
@@ -838,7 +836,11 @@ fn mcp_register(agent: AgentName, ctx: &Ctx, install: bool, done: &mut Vec<super
             // Uninstall deletes a config that held only our server, which can
             // leave the harness dir `dir_ok` respected on the way in (`.cursor/`)
             // standing empty.
-            let anchor: &Path = if ctx.global { ctx.home } else { ctx.project_root };
+            let anchor: &Path = if ctx.global {
+                ctx.home
+            } else {
+                ctx.project_root
+            };
             prune_empty_dirs(&path, anchor);
             mark(done, label, "removed", &path);
         }
@@ -1722,8 +1724,14 @@ mod tests {
         std::fs::write(&deep, "x").unwrap();
         std::fs::remove_file(&deep).unwrap();
         super::prune_empty_dirs(&deep, &tmp.join("proj"));
-        assert!(!tmp.join("proj/.cursor").exists(), "empty chain should be gone");
-        assert!(tmp.join("proj").exists(), "the anchor itself is never removed");
+        assert!(
+            !tmp.join("proj/.cursor").exists(),
+            "empty chain should be gone"
+        );
+        assert!(
+            tmp.join("proj").exists(),
+            "the anchor itself is never removed"
+        );
 
         // A sibling the user owns stops the walk at that level.
         let ours = tmp.join("proj2/.windsurf/rules/cona.md");
@@ -1743,7 +1751,10 @@ mod tests {
         std::fs::write(&shallow, "x").unwrap();
         std::fs::remove_file(&shallow).unwrap();
         super::prune_empty_dirs(&shallow, &tmp.join("proj3"));
-        assert!(tmp.join("proj3").exists(), "must not remove the anchor when empty");
+        assert!(
+            tmp.join("proj3").exists(),
+            "must not remove the anchor when empty"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1801,11 +1812,16 @@ mod tests {
         std::fs::write(&p, r#"{"hooks":{"Custom":[]}}"#).unwrap();
         claude_hooks(&p, true).unwrap();
         claude_hooks(&p, false).unwrap();
-        assert!(p.exists(), "settings.json holding a foreign key must survive");
+        assert!(
+            p.exists(),
+            "settings.json holding a foreign key must survive"
+        );
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
         assert!(
-            v["hooks"]["Custom"].as_array().is_some_and(|a| a.is_empty()),
+            v["hooks"]["Custom"]
+                .as_array()
+                .is_some_and(|a| a.is_empty()),
             "the user's empty event must come back exactly as it was, got {v}"
         );
         let _ = std::fs::remove_dir_all(p.parent().unwrap());

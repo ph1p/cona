@@ -207,7 +207,10 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
         Change::Created => "installed",
         Change::Updated => "updated",
     };
-    println!("  {}", ui::ok(&format!("{verb} → {}", super::short_path(&dst))));
+    println!(
+        "  {}",
+        ui::ok(&format!("{verb} → {}", super::short_path(&dst)))
+    );
 
     // Optional semantic-resolve helper: a separate crate (own tree-sitter 0.24
     // runtime — can't share cona's build). Build + install it beside cona

@@ -619,13 +619,16 @@ fn mcp_stdio_handshake_and_tools_list() {
         .cloned()
         .collect();
     assert_eq!(lines.len(), 5); // our own notifications/initialized gets no reply
-    // Unlocking the extended tier MUST announce itself: a client that is never
-    // told to re-list can never call the tools `more` just revealed.
+                                // Unlocking the extended tier MUST announce itself: a client that is never
+                                // told to re-list can never call the tools `more` just revealed.
     assert!(
         notes.contains(&"notifications/tools/list_changed"),
         "no list_changed after `more`: {notes:?}"
     );
-    assert_eq!(lines[0]["result"]["capabilities"]["tools"]["listChanged"], true);
+    assert_eq!(
+        lines[0]["result"]["capabilities"]["tools"]["listChanged"],
+        true
+    );
     assert_eq!(lines[0]["result"]["serverInfo"]["name"], "cona");
     // a supported protocol version is echoed back verbatim (negotiation)
     assert_eq!(lines[0]["result"]["protocolVersion"], "2025-03-26");
@@ -651,7 +654,10 @@ fn mcp_stdio_handshake_and_tools_list() {
     // Progressive disclosure: tools/list carries the core tier plus the `more`
     // gate, NOT the full set — the schemas are re-sent on every request, so the
     // advanced tail is disclosed on demand instead.
-    assert!(tools.contains(&"more"), "missing disclosure gate: {tools:?}");
+    assert!(
+        tools.contains(&"more"),
+        "missing disclosure gate: {tools:?}"
+    );
     assert!(
         tools.len() < 12,
         "tools/list should stay small, got {}: {tools:?}",
@@ -667,8 +673,7 @@ fn mcp_stdio_handshake_and_tools_list() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     let more = lines[2]["result"]["content"][0]["text"].as_str().unwrap();
-    let gated: serde_json::Value =
-        serde_json::from_str(&more[more.find('[').unwrap()..]).unwrap();
+    let gated: serde_json::Value = serde_json::from_str(&more[more.find('[').unwrap()..]).unwrap();
     let gated: Vec<&str> = gated
         .as_array()
         .unwrap()
@@ -1048,8 +1053,8 @@ fn read_only_never_serves_stale_ranges_as_fresh() {
 fn plugin_skill_matches_the_canonical_one() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let canonical = std::fs::read_to_string(root.join("SKILL.md")).expect("root SKILL.md");
-    let plugin = std::fs::read_to_string(root.join("plugin/skills/cona/SKILL.md"))
-        .expect("plugin SKILL.md");
+    let plugin =
+        std::fs::read_to_string(root.join("plugin/skills/cona/SKILL.md")).expect("plugin SKILL.md");
     assert_eq!(
         canonical, plugin,
         "plugin/skills/cona/SKILL.md drifted from SKILL.md — \
