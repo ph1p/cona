@@ -33,8 +33,9 @@ commit and edit.
   grep-then-read would have cost. `cona stats` shows the running total.
 - **Broad language support.** 30+ languages with full symbol extraction; more with
   search-only support.
-- **Plays with your agents.** Auto-wires Claude Code, Cursor, Codex, Gemini, and
-  more — or runs as an MCP server.
+- **Plays with your agents.** Auto-wires 11 harnesses — Claude Code, Cursor,
+  Codex, Gemini, OpenCode, Windsurf, Zed, Qwen, Crush, Copilot, pi — as a usage
+  guide, an MCP server, or both.
 
 ## How it works
 
@@ -118,8 +119,9 @@ cona agents status     # what's wired, per agent and scope
 cona agents add cursor # wire one agent (add/remove alias install/uninstall)
 ```
 
-Known agents: `claude`, `agents` (Codex / OpenCode / Amp / Jules via AGENTS.md),
-`cursor`, `gemini`, `pi`. Every change is idempotent and marker-based
+Known agents: `claude`, `agents` (the project `AGENTS.md` that Codex, Amp, Jules
+and Cline all read), `cursor`, `gemini`, `pi`, `opencode`, `windsurf`, `zed`,
+`qwen`, `crush`, `copilot`. Every change is idempotent and marker-based
 (`<!-- cona:begin/end -->`) — your own config is never touched.
 
 **Uninstall** mirrors setup: `cona uninstall` (interactive checklist),
@@ -137,6 +139,16 @@ config exists:
 | Codex | `.codex/config.toml` | `~/.codex/config.toml` |
 | Cursor | `.cursor/mcp.json` | `~/.cursor/mcp.json` |
 | Gemini CLI | `.gemini/settings.json` | `~/.gemini/settings.json` |
+| OpenCode | `opencode.json` | `~/.config/opencode/opencode.json` |
+| Zed | `.zed/settings.json` | `~/.config/zed/settings.json` |
+| Qwen Code | `.qwen/settings.json` | `~/.qwen/settings.json` |
+| Crush | `.crush.json` | `~/.config/crush/crush.json` |
+| Windsurf | — | `~/.codeium/windsurf/mcp_config.json` |
+| Copilot CLI | — | `~/.copilot/mcp-config.json` |
+
+Not every harness spells the server map the same way — most use `mcpServers`,
+OpenCode and Crush use `mcp` with a `"local"` transport, Zed calls them
+`context_servers`. cona writes whichever one the target expects.
 
 Entries are written with the absolute binary path, are idempotent, and leave
 foreign servers in the same file untouched; `cona agents remove` strips them

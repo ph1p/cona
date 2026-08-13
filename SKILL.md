@@ -81,5 +81,5 @@ Everything below is reference — reach for it when the four above don't cover t
 ## Lifecycle (rarely needed)
 - `cona install` / `./install.sh` — install binary + upgrade git hooks (run from the source checkout)
 - `cona upgrade` — rebuild when the source checkout changed, else update to the newest release (also auto-triggers in the background, remote check ≤1×/day)
-- `cona agents install|uninstall [names…] [--all] [--global]` — inject/remove agent configs (Claude Code, AGENTS.md, Cursor, Gemini, pi); no names = autodetect installed
-- `cona uninstall [--purge]` / `./uninstall.sh` — remove binary, hooks and global agent files (`--purge` deletes ~/.cona)
+- `cona agents install|uninstall [names…] [--all] [--global]` — inject/remove agent configs (guide + MCP entry); no names = autodetect installed, `cona agents status` lists every supported harness
+- `cona uninstall [--purge]` / `./uninstall.sh` — remove binary, hooks and every agent config cona wrote (`--purge` deletes ~/.cona)

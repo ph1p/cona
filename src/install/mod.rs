@@ -8,8 +8,8 @@
 //!             check crates.io (≤1×/day in the background) and update
 //!             to the newest release (git pull + rebuild for source
 //!             installs, prebuilt release binary else, cargo fallback).
-//! `agents`  — inject the usage guide into agent configs (Claude Code
-//!             skills + hooks + CLAUDE.md, AGENTS.md, Cursor, Gemini) —
+//! `agents`  — inject the usage guide, skill, hooks and MCP entry into every
+//!             supported agent config (the roster is `agents::AgentName`) —
 //!             idempotent, marker-based, uninstallable.
 
 use crate::ui;
@@ -334,6 +334,12 @@ pub(crate) struct Mark {
     pub path: PathBuf,
 }
 
+/// Width of `render`'s label column. A label longer than this pushes its row's
+/// verb and path out of line with every other row, so it is a real constraint
+/// on what a caller may name a target — `agents::label_widths_fit_the_column`
+/// pins it.
+pub(crate) const LABEL_COL: usize = 14;
+
 impl Mark {
     /// Does this denote a real change, vs an already-current no-op?
     pub fn changed(&self) -> bool {
@@ -349,7 +355,11 @@ impl Mark {
             "removed" => ui::yellow(&padded),
             _ => ui::dim(&padded),
         };
-        format!("{:<14} {verb_col} {}", self.label, short_path(&self.path))
+        format!(
+            "{:<LABEL_COL$} {verb_col} {}",
+            self.label,
+            short_path(&self.path)
+        )
     }
 }
 

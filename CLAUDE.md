@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 141 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic.rs, incl. MCP handshake)
+cargo test                   # 192 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic.rs, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -309,9 +309,39 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           via serde_json); AgentName ValueEnum + AgentSel::want =
                           THE selection rule: named/--all override detection,
                           bare install autodetects, bare uninstall cleans all.
+                          prune_empty_dirs = THE post-delete cleanup, called at
+                          EVERY uninstall site that removes a file (skill,
+                          cursor rule, guide loop both branches, mcp_register,
+                          claude_hooks): walks up to the scope anchor with
+                          remove_dir — never remove_dir_all — so it stops at the
+                          first dir holding anything else and a project that had
+                          no .cursor/.claude/.github before cona is left with
+                          none after. claude_hooks additionally remembers which
+                          event arrays were ALREADY empty on entry: the uninstall
+                          sweep drops empty arrays as husks of our own hooks, and
+                          without that set it would take a user's empty event —
+                          and, if it was the only key, the whole settings.json.
+                          xdg_config = THE $XDG_CONFIG_HOME rule (opencode/zed/
+                          crush): honoured only when absolute AND under the
+                          `home` being probed — an inherited value would let a
+                          synthetic test/probe home escape into the developer's
+                          real ~/.config; uninstall.sh guards the same way.
+                          mark_label = the per-agent status label, capped by
+                          install::LABEL_COL (label_widths_fit_the_column) since
+                          Mark::render pads to a fixed column.
+                          The six guide-only harnesses (opencode/windsurf/zed/
+                          qwen/crush/copilot) share ONE writer loop in
+                          cmd_agents_q driven off config_paths — the Presence tag
+                          IS the write mode (Marker = splice into a file the user
+                          also owns, Exists = ours alone, deleted outright), so
+                          writer and uninstall probe cannot disagree about
+                          ownership.
                           TWO per-scope path lists, deliberately separate:
                           config_paths = the guide/skill/hook targets a scope can
-                          ACT on (Pi empty at project scope) → agents_in_scope +
+                          ACT on (empty at project scope for pi/opencode/zed —
+                          the latter two read the project AGENTS.md the generic
+                          bucket already owns, so a second writer would fight
+                          over one marker block) → agents_in_scope +
                           the n/a cells; footprint_paths = those PLUS the MCP
                           entry (Presence::McpServer) + Claude's subagent-defs
                           probe (Presence::SubagentDefs) = "is cona installed
@@ -341,13 +371,20 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           bare+names → add, bare non-TTY → status); add/remove =
                           ValueEnum aliases of install/uninstall
                  mcp_config.rs THE MCP-registration writer, driven by
-                          AgentName::mcp_path (claude .mcp.json project-only —
-                          ~/.claude.json is Claude's live session state, never
-                          rewritten; codex .codex/config.toml; cursor
-                          .cursor/mcp.json; gemini .gemini/settings.json; pi
-                          none). ONE server_entry shape
-                          {type:"stdio",command,args:["mcp"]} — `type` is
-                          REQUIRED by Cursor, harmless elsewhere. json_server
+                          AgentName::mcp_path (per-agent + per-scope; claude
+                          .mcp.json project-only — ~/.claude.json is Claude's
+                          live session state, never rewritten; windsurf/copilot
+                          global-only; pi none) and AgentName::mcp_key. The two
+                          are SPLIT because they vary independently: ServerKey
+                          says which top-level map + entry shape a harness
+                          speaks — McpServers {type:"stdio",command,args} for
+                          most (`type` REQUIRED by Cursor, harmless elsewhere),
+                          Mcp {type:"local",command:[argv…],enabled} for
+                          opencode/crush, ContextServers {source:"custom",…} for
+                          zed. A wrong key does NOT error — the harness simply
+                          never sees the server — so each agent names its own and
+                          entry_shapes_match_each_harness_contract pins all
+                          three. json_server_keyed
                           parses + re-serializes (serde_json preserve_order:
                           foreign servers AND key order survive), errors rather
                           than clobbering invalid JSON, and deletes a file that

@@ -207,13 +207,16 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
         Change::Created => "installed",
         Change::Updated => "updated",
     };
-    println!("  {}", ui::ok(&format!("{verb} → {}", dst.display())));
+    println!("  {}", ui::ok(&format!("{verb} → {}", super::short_path(&dst))));
 
     // Optional semantic-resolve helper: a separate crate (own tree-sitter 0.24
     // runtime — can't share cona's build). Build + install it beside cona
     // best-effort; failure is non-fatal (cona degrades to its heuristics).
     match install_resolve_helper(&src_root, &bin_dir) {
-        Ok(Some(p)) => println!("  {}", ui::ok(&format!("resolve helper → {}", p.display()))),
+        Ok(Some(p)) => println!(
+            "  {}",
+            ui::ok(&format!("resolve helper → {}", super::short_path(&p)))
+        ),
         Ok(None) => {}
         Err(e) => {
             warnings += 1;
@@ -249,8 +252,11 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
         println!(
             "  {}",
             ui::warn(&format!(
+                // The prose half shortens; the `export` line must stay
+                // absolute — it is meant to be copied into a shell rc, where
+                // `~` may not expand and `./` means something else entirely.
                 "{} is not on your PATH — add it, e.g. `export PATH=\"{}:$PATH\"`",
-                bin_dir.display(),
+                super::short_path(&bin_dir),
                 bin_dir.display()
             ))
         );
@@ -322,8 +328,8 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
                         "{}",
                         ui::warn(&format!(
                             "recorded install path missing ({}) — using {}",
-                            missing.display(),
-                            live.display()
+                            super::short_path(missing),
+                            super::short_path(&live)
                         ))
                     );
                 }
@@ -345,9 +351,15 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
                 match ch {
                     Change::Unchanged => println!(
                         "{}",
-                        ui::ok(&format!("rebuilt — binary unchanged ({})", dst.display()))
+                        ui::ok(&format!(
+                            "rebuilt — binary unchanged ({})",
+                            super::short_path(&dst)
+                        ))
                     ),
-                    _ => println!("{}", ui::ok(&format!("updated → {}", dst.display()))),
+                    _ => println!(
+                        "{}",
+                        ui::ok(&format!("updated → {}", super::short_path(&dst)))
+                    ),
                 }
             }
             // keep the sibling resolve helper in step (best-effort, optional)
@@ -387,7 +399,10 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
                 if !quiet {
                     println!(
                         "  {}",
-                        ui::dim(&format!("updating source checkout {} …", src.display()))
+                        ui::dim(&format!(
+                            "updating source checkout {} …",
+                            super::short_path(&src)
+                        ))
                     );
                 }
                 update_source_checkout(&src, &remote, &dst, quiet)?;
@@ -395,7 +410,10 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
                 install_release_binary(&remote, &dst)?;
             }
             if !quiet {
-                println!("  {}", ui::ok(&format!("{} → v{remote}", dst.display())));
+                println!(
+                    "  {}",
+                    ui::ok(&format!("{} → v{remote}", super::short_path(&dst)))
+                );
             }
             refresh_config(quiet);
             if !quiet {
@@ -408,7 +426,7 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
                     "{}",
                     ui::ok(&format!(
                         "already up to date — v{current} ({})",
-                        dst.display()
+                        super::short_path(&dst)
                     ))
                 );
             }
@@ -419,7 +437,7 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
                     "{}",
                     ui::warn(&format!(
                         "v{current} ({}) — remote version check unavailable",
-                        dst.display()
+                        super::short_path(&dst)
                     ))
                 );
             }
@@ -576,7 +594,11 @@ fn sync_scope_config(
         let _ = db::meta_set(&config_ver_key(root), env!("CARGO_PKG_VERSION"));
         return None;
     }
-    match crate::install::agents::cmd_agents_q(root, "install", &names, false, global, quiet) {
+    // Always quiet: refresh can span dozens of registered projects, and the
+    // per-scope install block ("· N already current" + "✓ agents installed")
+    // would bury the upgrade result under one screen of noise per project.
+    // `refresh_config` owns the display — one dim line per scope.
+    match crate::install::agents::cmd_agents_q(root, "install", &names, false, global, true) {
         Ok(_) => {
             let _ = db::meta_set(&config_ver_key(root), env!("CARGO_PKG_VERSION"));
             Some(names)
@@ -587,7 +609,7 @@ fn sync_scope_config(
                     "{}",
                     ui::warn(&format!(
                         "config not refreshed for {} ({e})",
-                        root.display()
+                        super::short_path(root)
                     ))
                 );
             }
@@ -643,7 +665,7 @@ fn update_source_checkout(src: &Path, remote: &str, dst: &Path, quiet: bool) -> 
         if !popped && !quiet {
             println!(
                 "note: could not reapply autostash in {} — your changes are kept in `git stash` (run `git stash pop` after resolving)",
-                src.display()
+                super::short_path(src)
             );
         }
     }
@@ -651,7 +673,7 @@ fn update_source_checkout(src: &Path, remote: &str, dst: &Path, quiet: bool) -> 
     if !pulled && !quiet {
         println!(
             "note: git pull --ff-only failed in {} — rebuilding local state (wanted v{remote})",
-            src.display()
+            super::short_path(src)
         );
     }
     cargo_build(src)?;

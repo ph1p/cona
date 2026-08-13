@@ -4,9 +4,12 @@
 //! the same commands in as native MCP tools (`cona mcp`) for the harnesses that
 //! speak MCP. Two config shapes cover every one of them:
 //!
-//! * JSON with an `mcpServers` object — Claude Code (`.mcp.json`, the
-//!   checked-in project scope), Cursor (`.cursor/mcp.json`), Gemini CLI
-//!   (`.gemini/settings.json`). Codex is the exception (TOML, below).
+//! * JSON with a server map under one top-level key — Claude Code (`.mcp.json`,
+//!   the checked-in project scope), Cursor (`.cursor/mcp.json`), Gemini CLI
+//!   (`.gemini/settings.json`), Windsurf, Qwen, Copilot. The key name is NOT
+//!   universal (`mcpServers` for most, `mcp` for OpenCode/Crush,
+//!   `context_servers` for Zed), so it is a parameter — writing the wrong key
+//!   is a silent no-op the harness never reports. See `ServerKey`.
 //! * TOML with an `[mcp_servers.cona]` table — Codex (`~/.codex/config.toml`).
 //!
 //! Both writers are idempotent and surgical: they touch ONLY the `cona` entry
@@ -21,17 +24,59 @@ use std::path::Path;
 /// matches on, so it must stay stable.
 pub const SERVER_NAME: &str = "cona";
 
-/// The stdio server entry every harness gets: `<cona binary> mcp`. `exe` is the
-/// resolved absolute path (see `agents::agent_exe`) so the harness does not
-/// depend on cona being on ITS `PATH` — an agent launched from a GUI often has
-/// a different environment than the shell cona was installed from.
-fn server_entry(exe: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "stdio",
-        "command": exe,
-        "args": ["mcp"],
-    })
+/// The top-level key a harness keeps its MCP server map under. There is no
+/// single spelling across the ecosystem, and a wrong key does not error — the
+/// harness simply never sees the server — so each agent names its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ServerKey {
+    /// `{"mcpServers": {…}}` — Claude Code, Cursor, Gemini, Windsurf, Qwen,
+    /// Copilot. The majority spelling.
+    McpServers,
+    /// `{"mcp": {…}}` — OpenCode, Crush.
+    Mcp,
+    /// `{"context_servers": {…}}` — Zed, which calls them context servers.
+    ContextServers,
 }
+
+impl ServerKey {
+    fn as_str(self) -> &'static str {
+        match self {
+            ServerKey::McpServers => "mcpServers",
+            ServerKey::Mcp => "mcp",
+            ServerKey::ContextServers => "context_servers",
+        }
+    }
+
+    /// The entry shape this harness expects under that key. Most take the
+    /// stdio triple; OpenCode/Crush tag the transport `"local"` and name the
+    /// argv `command` (an ARRAY, binary first), and Zed nests it under
+    /// `source: "custom"`.
+    ///
+    /// `exe` is the resolved ABSOLUTE path (see `agents::agent_exe`) in every
+    /// shape, so the harness does not depend on cona being on ITS `PATH` — an
+    /// agent launched from a GUI often has a different environment than the
+    /// shell cona was installed from.
+    fn entry(self, exe: &str) -> serde_json::Value {
+        match self {
+            ServerKey::McpServers => serde_json::json!({
+                "type": "stdio",
+                "command": exe,
+                "args": ["mcp"],
+            }),
+            ServerKey::Mcp => serde_json::json!({
+                "type": "local",
+                "command": [exe, "mcp"],
+                "enabled": true,
+            }),
+            ServerKey::ContextServers => serde_json::json!({
+                "source": "custom",
+                "command": exe,
+                "args": ["mcp"],
+            }),
+        }
+    }
+}
+
 
 /// Add/remove the cona entry in a JSON config carrying an `mcpServers` object.
 /// Returns the `Change` so callers can report Created/Updated/Unchanged like
@@ -43,6 +88,17 @@ fn server_entry(exe: &str) -> serde_json::Value {
 /// than an overwrite — same rule as `claude_hooks` on settings.json
 /// (invariant 6: never clobber foreign file content).
 pub fn json_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
+    json_server_keyed(path, exe, install, ServerKey::McpServers)
+}
+
+/// `json_server` for a harness that spells the server map differently
+/// (`ServerKey`). Same guarantees; only the key and entry shape move.
+pub fn json_server_keyed(
+    path: &Path,
+    exe: &str,
+    install: bool,
+    key: ServerKey,
+) -> Result<Change> {
     let existing = std::fs::read_to_string(path).ok();
     if !install && existing.is_none() {
         return Ok(Change::Unchanged);
@@ -63,21 +119,27 @@ pub fn json_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
     if !root.is_object() {
         bail!("{} top level is not an object", path.display());
     }
+    let name = key.as_str();
+    // Uninstall never creates the map — a config that never had one must come
+    // back out byte-identical, not carrying a fresh empty scaffold.
+    if !install && !root.get(name).is_some_and(|v| v.is_object()) {
+        return Ok(Change::Unchanged);
+    }
     let servers = root
         .as_object_mut()
         .unwrap()
-        .entry("mcpServers")
+        .entry(name)
         .or_insert_with(|| serde_json::json!({}));
     let Some(servers) = servers.as_object_mut() else {
-        bail!("{} 'mcpServers' is not an object", path.display());
+        bail!("{} '{name}' is not an object", path.display());
     };
     if install {
-        servers.insert(SERVER_NAME.into(), server_entry(exe));
+        servers.insert(SERVER_NAME.into(), key.entry(exe));
     } else if servers.remove(SERVER_NAME).is_none() {
         return Ok(Change::Unchanged);
     } else if servers.is_empty() {
         // leave no empty scaffold behind in a file we may have created
-        root.as_object_mut().unwrap().remove("mcpServers");
+        root.as_object_mut().unwrap().remove(name);
     }
     // A file that would be left with nothing but `{}` after uninstall was ours
     // to begin with — remove it rather than littering an empty config.
@@ -179,7 +241,18 @@ pub fn registered(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()) == Some("toml") {
         return body.contains(TOML_BEGIN);
     }
-    body.contains("mcpServers") && body.contains(&format!("\"{SERVER_NAME}\""))
+    // The quoted `"cona"` key is the identity; any of the three server-map
+    // spellings qualifies as the container. Checking all three (rather than
+    // threading the agent's key in) keeps this a pure path→bool probe, and a
+    // config only ever carries the one its own harness reads.
+    let keyed = [
+        ServerKey::McpServers,
+        ServerKey::Mcp,
+        ServerKey::ContextServers,
+    ]
+    .iter()
+    .any(|k| body.contains(k.as_str()));
+    keyed && body.contains(&format!("\"{SERVER_NAME}\""))
 }
 
 #[cfg(test)]
@@ -325,6 +398,87 @@ mod tests {
         let p = dir.join("other.json");
         std::fs::write(&p, r#"{"mcpServers":{"other":{}}}"#).unwrap();
         assert!(!registered(&p));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Each non-default spelling must round-trip under its OWN key and be seen
+    /// by `registered()`. A wrong key is silent — the harness just never loads
+    /// the server — so nothing but an explicit assertion catches it.
+    #[test]
+    fn alternate_server_keys_round_trip_under_their_own_name() {
+        for (key, name) in [
+            (ServerKey::Mcp, "mcp"),
+            (ServerKey::ContextServers, "context_servers"),
+            (ServerKey::McpServers, "mcpServers"),
+        ] {
+            let dir = tmp(&format!("key-{name}"));
+            let p = dir.join("config.json");
+            std::fs::write(&p, r#"{"theme":"dark"}"#).unwrap();
+
+            assert_eq!(
+                json_server_keyed(&p, "/bin/cona", true, key).unwrap(),
+                Change::Updated
+            );
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            assert!(
+                v[name][SERVER_NAME].is_object(),
+                "{name}: entry not written under its own key"
+            );
+            assert!(registered(&p), "{name}: registered() missed the entry");
+            // Foreign keys survive.
+            assert_eq!(v["theme"], "dark");
+
+            // Uninstall strips the entry AND the now-empty map, leaving the
+            // user's own config behind.
+            assert_eq!(
+                json_server_keyed(&p, "/bin/cona", false, key).unwrap(),
+                Change::Updated
+            );
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            assert!(v.get(name).is_none(), "{name}: empty map left behind");
+            assert_eq!(v["theme"], "dark");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// OpenCode/Crush name the argv `command` as an ARRAY and tag the transport
+    /// `"local"`; Zed nests it under `source: "custom"`. Getting the shape wrong
+    /// fails the same silent way a wrong key does.
+    #[test]
+    fn entry_shapes_match_each_harness_contract() {
+        let stdio = ServerKey::McpServers.entry("/bin/cona");
+        assert_eq!(stdio["type"], "stdio");
+        assert_eq!(stdio["command"], "/bin/cona");
+        assert_eq!(stdio["args"], serde_json::json!(["mcp"]));
+
+        let local = ServerKey::Mcp.entry("/bin/cona");
+        assert_eq!(local["type"], "local");
+        assert_eq!(local["command"], serde_json::json!(["/bin/cona", "mcp"]));
+        assert_eq!(local["enabled"], true);
+
+        let zed = ServerKey::ContextServers.entry("/bin/cona");
+        assert_eq!(zed["source"], "custom");
+        assert_eq!(zed["command"], "/bin/cona");
+        assert_eq!(zed["args"], serde_json::json!(["mcp"]));
+    }
+
+    /// Uninstall must never CREATE the server map: a config that never had one
+    /// comes back byte-identical, not carrying a fresh empty scaffold.
+    #[test]
+    fn uninstall_on_a_config_without_our_key_is_a_no_op() {
+        let dir = tmp("nokey");
+        let p = dir.join("settings.json");
+        let before = "{\n  \"theme\": \"dark\"\n}\n";
+        std::fs::write(&p, before).unwrap();
+        for key in [ServerKey::McpServers, ServerKey::Mcp, ServerKey::ContextServers] {
+            assert_eq!(
+                json_server_keyed(&p, "/bin/cona", false, key).unwrap(),
+                Change::Unchanged
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

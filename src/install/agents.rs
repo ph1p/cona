@@ -1,6 +1,12 @@
-//! Agent integration: inject the usage guide + skill + hooks into agent
-//! configs (Claude Code, AGENTS.md, Cursor, Gemini, pi.dev) —
-//! idempotent, marker-based, uninstallable.
+//! Agent integration: inject the usage guide + skill + hooks + MCP entry into
+//! agent configs — idempotent, marker-based, uninstallable.
+//!
+//! `AgentName` is the roster; every per-agent fact (where its config lives,
+//! how to tell it is there, which MCP key it speaks) hangs off that enum rather
+//! than a list repeated per call site, so adding a harness is one variant plus
+//! its match arms. Deliberately NOT enumerated in prose here — a hand-kept list
+//! in a doc comment is the first thing to go stale. `cona agents --help` prints
+//! the live set.
 
 use super::mcp_config;
 use super::{mark, remove_block_file, upsert_block_file, write_if_changed, SKILL_MD};
@@ -48,6 +54,22 @@ pub(crate) fn agent_exe() -> String {
         .unwrap_or_else(|| "cona".to_string())
 }
 
+/// THE XDG config root for the harnesses that live under one (OpenCode, Zed,
+/// Crush): `$XDG_CONFIG_HOME` when set, else `~/.config`.
+///
+/// The env var is honoured only when it is absolute AND sits under the `home`
+/// being asked about. A relative or empty value is spec-invalid and would
+/// otherwise resolve against the cwd, scattering config into whatever directory
+/// cona ran from; and `home` is not always the real one — tests and the
+/// per-scope probes pass a synthetic root, which an unfiltered env var would
+/// escape, making detection read the developer's actual `~/.config`.
+fn xdg_config(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute() && p.starts_with(home))
+        .unwrap_or_else(|| home.join(".config"))
+}
+
 /// The agents `cmd_agents` knows how to configure. A `clap::ValueEnum`, so the
 /// CLI validates names at parse time (typo → clap error + possible-values in
 /// `--help`) and `--all` / `want()` derive from the SAME variant set — no
@@ -59,15 +81,27 @@ pub enum AgentName {
     Cursor,
     Gemini,
     Pi,
+    Opencode,
+    Windsurf,
+    Zed,
+    Qwen,
+    Crush,
+    Copilot,
 }
 
 impl AgentName {
     /// Every agent, in menu/priority order. The one place the full set lives.
-    pub const ALL: [AgentName; 5] = [
+    pub const ALL: [AgentName; 11] = [
         AgentName::Claude,
         AgentName::Agents,
         AgentName::Cursor,
         AgentName::Gemini,
+        AgentName::Opencode,
+        AgentName::Windsurf,
+        AgentName::Zed,
+        AgentName::Qwen,
+        AgentName::Crush,
+        AgentName::Copilot,
         AgentName::Pi,
     ];
 
@@ -79,6 +113,12 @@ impl AgentName {
             AgentName::Cursor => "cursor",
             AgentName::Gemini => "gemini",
             AgentName::Pi => "pi",
+            AgentName::Opencode => "opencode",
+            AgentName::Windsurf => "windsurf",
+            AgentName::Zed => "zed",
+            AgentName::Qwen => "qwen",
+            AgentName::Crush => "crush",
+            AgentName::Copilot => "copilot",
         }
     }
 
@@ -86,10 +126,20 @@ impl AgentName {
     pub fn desc(self) -> &'static str {
         match self {
             AgentName::Claude => "Claude Code — skill + hooks + CLAUDE.md",
-            AgentName::Agents => "AGENTS.md — Codex / OpenCode / Amp / Jules",
+            // The generic bucket owns the PROJECT AGENTS.md that most harnesses
+            // read, plus Codex's own global copy. Harnesses with a *distinct*
+            // global path (OpenCode, Zed, Crush) are their own entries below —
+            // ~/.codex/AGENTS.md is Codex's, not a shared global file.
+            AgentName::Agents => "AGENTS.md — Codex / Amp / Jules / Cline",
             AgentName::Cursor => "Cursor — .cursor/rules",
             AgentName::Gemini => "Gemini CLI — GEMINI.md",
             AgentName::Pi => "pi.dev — AGENTS.md",
+            AgentName::Opencode => "OpenCode — AGENTS.md + opencode.json",
+            AgentName::Windsurf => "Windsurf — .windsurf/rules",
+            AgentName::Zed => "Zed — AGENTS.md + context servers",
+            AgentName::Qwen => "Qwen Code — QWEN.md",
+            AgentName::Crush => "Crush — CRUSH.md",
+            AgentName::Copilot => "GitHub Copilot — copilot-instructions.md",
         }
     }
 
@@ -134,6 +184,55 @@ impl AgentName {
             // by the Agents bucket above) — never detected there, so it's
             // never offered/selected for a project-scope install.
             AgentName::Pi => global && home.join(".pi").exists(),
+            // The harnesses below read a project AGENTS.md the generic bucket
+            // already writes; what makes them their OWN entry is a distinct
+            // global path (and, for some, an MCP config shape of their own).
+            AgentName::Opencode => {
+                if global {
+                    xdg_config(home).join("opencode").exists()
+                } else {
+                    project_root.join("opencode.json").exists()
+                        || project_root.join("opencode.jsonc").exists()
+                }
+            }
+            AgentName::Windsurf => {
+                if global {
+                    home.join(".codeium/windsurf").exists()
+                } else {
+                    project_root.join(".windsurf").exists()
+                }
+            }
+            AgentName::Zed => {
+                if global {
+                    xdg_config(home).join("zed").exists()
+                } else {
+                    project_root.join(".zed").exists()
+                }
+            }
+            AgentName::Qwen => {
+                if global {
+                    home.join(".qwen").exists()
+                } else {
+                    project_root.join("QWEN.md").exists() || project_root.join(".qwen").exists()
+                }
+            }
+            AgentName::Crush => {
+                if global {
+                    xdg_config(home).join("crush").exists()
+                } else {
+                    project_root.join("CRUSH.md").exists() || project_root.join(".crush").exists()
+                }
+            }
+            // Copilot's instructions file is checked in, so its presence IS the
+            // signal at project scope; globally it is the CLI's own dir.
+            AgentName::Copilot => {
+                if global {
+                    home.join(".copilot").exists()
+                } else {
+                    project_root.join(".github/copilot-instructions.md").exists()
+                        || project_root.join(".github/instructions").exists()
+                }
+            }
         }
     }
 
@@ -211,6 +310,55 @@ impl AgentName {
             // Pi only has its own path at global scope.
             AgentName::Pi if global => vec![(home.join(".pi/agent/AGENTS.md"), Presence::Marker)],
             AgentName::Pi => vec![],
+            // OpenCode / Zed read the PROJECT AGENTS.md the generic bucket
+            // already owns — writing it twice would fight over one marker block
+            // — so at project scope they contribute their MCP entry only, and
+            // `config_paths` is empty (same shape as Pi).
+            AgentName::Opencode if global => vec![(
+                xdg_config(home).join("opencode/AGENTS.md"),
+                Presence::Marker,
+            )],
+            AgentName::Zed if global => {
+                vec![(xdg_config(home).join("zed/AGENTS.md"), Presence::Marker)]
+            }
+            AgentName::Opencode | AgentName::Zed => vec![],
+            // Windsurf: per-rule files at project scope, one global memories
+            // file. The project rule is a full-file write (ours alone), the
+            // global one a marker block in a file the user also writes.
+            AgentName::Windsurf if global => vec![(
+                home.join(".codeium/windsurf/memories/global_rules.md"),
+                Presence::Marker,
+            )],
+            AgentName::Windsurf => vec![(
+                project_root.join(".windsurf/rules/cona.md"),
+                Presence::Exists,
+            )],
+            AgentName::Qwen => {
+                let p = if global {
+                    home.join(".qwen/QWEN.md")
+                } else {
+                    project_root.join("QWEN.md")
+                };
+                vec![(p, Presence::Marker)]
+            }
+            AgentName::Crush => {
+                let p = if global {
+                    xdg_config(home).join("crush/CRUSH.md")
+                } else {
+                    project_root.join("CRUSH.md")
+                };
+                vec![(p, Presence::Marker)]
+            }
+            // Copilot's project file is the checked-in repo instruction file;
+            // globally the CLI reads its own copy under ~/.copilot.
+            AgentName::Copilot => {
+                let p = if global {
+                    home.join(".copilot/copilot-instructions.md")
+                } else {
+                    project_root.join(".github/copilot-instructions.md")
+                };
+                vec![(p, Presence::Marker)]
+            }
         }
     }
 
@@ -236,6 +384,64 @@ impl AgentName {
             AgentName::Gemini => Some(base.join(".gemini/settings.json")),
             // pi.dev's MCP config shape isn't ours to guess — guide only.
             AgentName::Pi => None,
+            // OpenCode's project config sits at the repo root; globally it
+            // lives beside its AGENTS.md under XDG.
+            AgentName::Opencode if global => {
+                Some(xdg_config(home).join("opencode/opencode.json"))
+            }
+            AgentName::Opencode => Some(project_root.join("opencode.json")),
+            // Windsurf has no documented per-project MCP file — the one config
+            // is global, under its Codeium data dir.
+            AgentName::Windsurf if global => {
+                Some(home.join(".codeium/windsurf/mcp_config.json"))
+            }
+            AgentName::Windsurf => None,
+            AgentName::Zed if global => Some(xdg_config(home).join("zed/settings.json")),
+            AgentName::Zed => Some(project_root.join(".zed/settings.json")),
+            AgentName::Qwen => Some(base.join(".qwen/settings.json")),
+            AgentName::Crush if global => Some(xdg_config(home).join("crush/crush.json")),
+            AgentName::Crush => Some(project_root.join(".crush.json")),
+            // Copilot CLI keeps one MCP config in its own dir; the VS Code
+            // extension's project `.vscode/mcp.json` is IDE-managed, not ours.
+            AgentName::Copilot if global => Some(home.join(".copilot/mcp-config.json")),
+            AgentName::Copilot => None,
+        }
+    }
+
+    /// The top-level key + entry shape this harness expects its MCP servers
+    /// under. Split from `mcp_path` because the two answers vary independently:
+    /// most harnesses spell it `mcpServers`, but OpenCode/Crush use `mcp` with a
+    /// `"local"` transport and an argv array, and Zed calls them
+    /// `context_servers`. A wrong key does not error — the harness simply never
+    /// sees the server — so each agent names its own.
+    pub fn mcp_key(self) -> mcp_config::ServerKey {
+        match self {
+            AgentName::Opencode | AgentName::Crush => mcp_config::ServerKey::Mcp,
+            AgentName::Zed => mcp_config::ServerKey::ContextServers,
+            _ => mcp_config::ServerKey::McpServers,
+        }
+    }
+
+    /// The status-line label for this agent's guide target. Must fit
+    /// `Mark::render`'s `LABEL_COL` column — a longer one shifts that row's verb
+    /// and path out of line with every other row (`label_widths_fit_the_column`).
+    ///
+    /// Only the guide-only harnesses read this; the hand-written blocks above
+    /// label several targets each ("claude skill" / "claude hooks" / …), which
+    /// no single per-agent string could express.
+    pub fn mark_label(self) -> &'static str {
+        match self {
+            AgentName::Opencode => "opencode guide",
+            AgentName::Windsurf => "windsurf rule",
+            AgentName::Zed => "zed guide",
+            AgentName::Qwen => "qwen memory",
+            AgentName::Crush => "crush memory",
+            AgentName::Copilot => "copilot guide",
+            AgentName::Claude => "claude skill",
+            AgentName::Agents => "AGENTS.md",
+            AgentName::Cursor => "cursor rule",
+            AgentName::Gemini => "gemini memory",
+            AgentName::Pi => "pi memory",
         }
     }
 
@@ -582,6 +788,28 @@ fn sync_subagents(dir: &Path, install: bool, done: &mut Vec<super::Mark>) -> Res
 /// chosen between. Fail-soft: a broken foreign config warns and leaves the rest
 /// of the install intact — losing the MCP entry must never cost the user the
 /// guide + hooks.
+/// Prune directories that only ever existed to hold the file just removed,
+/// walking up from it and stopping at `stop` (the project root or `$HOME`).
+///
+/// `remove_dir` — never `remove_dir_all` — is what makes this safe: it fails on
+/// a non-empty directory, so a dir the user also keeps things in survives, and
+/// the walk ends at the first one that does. Without it an uninstall leaves a
+/// trail of empty `.cursor/rules`, `.windsurf/rules`, `.github` skeletons in a
+/// project that had none of them before cona, which reads as leftover state.
+fn prune_empty_dirs(file: &Path, stop: &Path) {
+    let mut dir = file.parent();
+    while let Some(d) = dir {
+        // Never climb past the anchor, and never remove the anchor itself.
+        if d == stop || !d.starts_with(stop) || d == stop.parent().unwrap_or(stop) {
+            break;
+        }
+        if std::fs::remove_dir(d).is_err() {
+            break; // non-empty (or gone) — everything above it is too
+        }
+        dir = d.parent();
+    }
+}
+
 fn mcp_register(agent: AgentName, ctx: &Ctx, install: bool, done: &mut Vec<super::Mark>) {
     let Some(path) = agent.mcp_path(ctx.project_root, ctx.home, ctx.global) else {
         return;
@@ -600,13 +828,20 @@ fn mcp_register(agent: AgentName, ctx: &Ctx, install: bool, done: &mut Vec<super
     let res = if is_toml {
         mcp_config::toml_server(&path, &ctx.exe, install)
     } else {
-        mcp_config::json_server(&path, &ctx.exe, install)
+        mcp_config::json_server_keyed(&path, &ctx.exe, install, agent.mcp_key())
     };
     let label = "mcp server";
     match res {
         Ok(ch) if install => mark(done, label, ch.verb(), &path),
         Ok(super::Change::Unchanged) => {}
-        Ok(_) => mark(done, label, "removed", &path),
+        Ok(_) => {
+            // Uninstall deletes a config that held only our server, which can
+            // leave the harness dir `dir_ok` respected on the way in (`.cursor/`)
+            // standing empty.
+            let anchor: &Path = if ctx.global { ctx.home } else { ctx.project_root };
+            prune_empty_dirs(&path, anchor);
+            mark(done, label, "removed", &path);
+        }
         Err(e) => println!("{}", ui::warn(&format!("mcp: {e}"))),
     }
 }
@@ -648,6 +883,9 @@ pub fn cmd_agents_q(
     let install = action == "install";
     let mut done: Vec<super::Mark> = Vec::new();
     let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
+    // How far up `prune_empty_dirs` may climb after deleting a file: never out
+    // of the scope this run was asked to touch.
+    let scope_root: &Path = if global { &home } else { project_root };
 
     let sel = AgentSel {
         names: names.to_vec(),
@@ -679,7 +917,7 @@ pub fn cmd_agents_q(
             mark(&mut done, "claude skill", ch.verb(), &skill);
         } else if skill.exists() {
             std::fs::remove_file(&skill)?;
-            let _ = std::fs::remove_dir(skill.parent().unwrap());
+            prune_empty_dirs(&skill, scope_root);
             mark(&mut done, "claude skill", "removed", &skill);
         }
         // CLAUDE.md — global installs keep the guide in its own CONA.md
@@ -724,6 +962,10 @@ pub fn cmd_agents_q(
                         &settings,
                     );
                 } else if changed {
+                    // A settings.json that held only our hooks is deleted by
+                    // `claude_hooks`, which can leave `.claude/` empty in a
+                    // project that had no Claude config before cona.
+                    prune_empty_dirs(&settings, scope_root);
                     mark(&mut done, "claude hooks", "removed", &settings);
                 }
             }
@@ -772,6 +1014,7 @@ pub fn cmd_agents_q(
             mark(&mut done, "cursor rule", ch.verb(), &cursor);
         } else if cursor.exists() {
             std::fs::remove_file(&cursor)?;
+            prune_empty_dirs(&cursor, scope_root);
             mark(&mut done, "cursor rule", "removed", &cursor);
         }
     }
@@ -810,6 +1053,56 @@ pub fn cmd_agents_q(
             mark(&mut done, "pi memory", ch.verb(), &pi_agents);
         } else if remove_block_file(&pi_agents)? {
             mark(&mut done, "pi memory", "removed", &pi_agents);
+        }
+    }
+
+    // --- guide-only harnesses -------------------------------------------------
+    // OpenCode, Windsurf, Zed, Qwen, Crush, Copilot each read one guide file per
+    // scope, so they need no hand-written block: `config_paths` already IS the
+    // per-scope target list, and its `Presence` tag says how the file is
+    // written — `Marker` = splice a block into a file the user also owns,
+    // `Exists` = the file is ours alone. Driving both from that ONE list keeps
+    // the writer and the installed()/uninstall probe from ever disagreeing
+    // about which file an agent owns.
+    for a in [
+        AgentName::Opencode,
+        AgentName::Windsurf,
+        AgentName::Zed,
+        AgentName::Qwen,
+        AgentName::Crush,
+        AgentName::Copilot,
+    ] {
+        if !sel.want(a, a.detected(project_root, &home, global)) {
+            continue;
+        }
+        let label = a.mark_label();
+        for (path, kind) in a.config_paths(project_root, &home, global) {
+            match kind {
+                // Ours alone: a whole-file write, removed outright.
+                Presence::Exists => {
+                    if install {
+                        let ch = write_if_changed(&path, GUIDE_MD)?;
+                        mark(&mut done, label, ch.verb(), &path);
+                    } else if path.exists() {
+                        std::fs::remove_file(&path)?;
+                        prune_empty_dirs(&path, scope_root);
+                        mark(&mut done, label, "removed", &path);
+                    }
+                }
+                // Shared with the user: marker block only (invariant 6).
+                _ => {
+                    if install {
+                        let ch = upsert_block_file(&path, GUIDE_MD)?;
+                        mark(&mut done, label, ch.verb(), &path);
+                    } else if remove_block_file(&path)? {
+                        // `remove_block_file` deletes a file that held nothing
+                        // but our block, which can empty a dir the install
+                        // created (`.github` for Copilot).
+                        prune_empty_dirs(&path, scope_root);
+                        mark(&mut done, label, "removed", &path);
+                    }
+                }
+            }
         }
     }
 
@@ -967,6 +1260,12 @@ fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
         ("PostToolUse", None, &posttool_cmd, "hook PostToolUse"),
     ];
     let mut changed = false;
+    // Uninstall never CREATES structure — only an install may. Without this an
+    // uninstall on a settings.json that has no cona entries would materialize
+    // `"hooks": {}` plus an empty array per event and leave that husk behind.
+    if !install && !root.get("hooks").map(|h| h.is_object()).unwrap_or(false) {
+        return Ok(false);
+    }
     let hooks = root
         .as_object_mut()
         .unwrap()
@@ -975,6 +1274,19 @@ fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
     if !hooks.is_object() {
         bail!("settings.json 'hooks' is not an object");
     }
+    // Which event arrays were ALREADY empty before we touched anything. The
+    // uninstall sweep below removes empty arrays as husks of our own hooks, but
+    // an array that arrived empty is the user's — deleting it (and, when it was
+    // the only key, the whole file with it) would be us editing foreign config.
+    let preexisting_empty: Vec<String> = hooks
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .filter(|(_, v)| v.as_array().is_some_and(|a| a.is_empty()))
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     for (event, matcher, cmd, marker) in specs {
         let is_ours = |v: &serde_json::Value| -> bool {
             v["hooks"]
@@ -989,11 +1301,17 @@ fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
                 })
                 .unwrap_or(false)
         };
-        let arr = hooks
-            .as_object_mut()
-            .unwrap()
-            .entry(event)
-            .or_insert_with(|| serde_json::json!([]));
+        let events = hooks.as_object_mut().unwrap();
+        // Same rule per event: an install may add the array, an uninstall only
+        // ever edits one that is already there.
+        let arr = if install {
+            events.entry(event).or_insert_with(|| serde_json::json!([]))
+        } else {
+            match events.get_mut(event) {
+                Some(v) => v,
+                None => continue,
+            }
+        };
         let Some(list) = arr.as_array_mut() else {
             continue;
         };
@@ -1039,7 +1357,28 @@ fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
             changed = true;
         }
     }
+    // Uninstall leaves no husk: an event array we emptied goes, and so does
+    // `hooks` if that was all it held. Only arrays/objects that are now empty
+    // are touched — a foreign hook keeps its event alive.
+    if !install && changed {
+        if let Some(events) = hooks.as_object_mut() {
+            events.retain(|k, v| {
+                !v.as_array().map(|a| a.is_empty()).unwrap_or(false)
+                    || preexisting_empty.iter().any(|p| p == k)
+            });
+            let empty = events.is_empty();
+            if empty {
+                root.as_object_mut().unwrap().remove("hooks");
+            }
+        }
+    }
     if changed {
+        // A settings.json that only ever held our hooks is ours to remove —
+        // leaving `{}` behind is litter, not preservation.
+        if !install && root.as_object().map(|o| o.is_empty()).unwrap_or(false) {
+            let _ = std::fs::remove_file(settings_path);
+            return Ok(true);
+        }
         if let Some(dir) = settings_path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -1325,17 +1664,167 @@ mod tests {
     fn config_paths_empty_only_for_pi_project_scope() {
         let proj = Path::new("/proj");
         let home = Path::new("/home");
-        // Pi has no project target; everything else does.
-        assert!(AgentName::Pi.config_paths(proj, home, false).is_empty());
-        assert!(!AgentName::Pi.config_paths(proj, home, true).is_empty());
-        for a in [
-            AgentName::Claude,
-            AgentName::Agents,
-            AgentName::Cursor,
-            AgentName::Gemini,
-        ] {
-            assert!(!a.config_paths(proj, home, false).is_empty());
-            assert!(!a.config_paths(proj, home, true).is_empty());
+        // Exactly the agents whose project-scope guide is the project AGENTS.md
+        // the generic bucket already owns. Writing it from their block too would
+        // put two owners on one marker block, so they contribute an MCP entry
+        // there and nothing else. Derived from ALL, not a second hand-kept list:
+        // a new agent that forgets a project target then fails HERE rather than
+        // silently installing nothing.
+        let no_project_target = [AgentName::Pi, AgentName::Opencode, AgentName::Zed];
+        for a in AgentName::ALL {
+            let empty = a.config_paths(proj, home, false).is_empty();
+            assert_eq!(
+                empty,
+                no_project_target.contains(&a),
+                "{} project-scope config_paths emptiness",
+                a.slug()
+            );
+            // Every agent has a global target — that is what makes it an entry
+            // of its own rather than a row in the generic AGENTS.md bucket.
+            assert!(
+                !a.config_paths(proj, home, true).is_empty(),
+                "{} has no global config target",
+                a.slug()
+            );
         }
+    }
+
+    /// `Mark::render` pads the label to a fixed column; a longer one pushes its
+    /// row's verb and path out of line with every other row. Checked for every
+    /// agent, so adding one with a verbose label fails here rather than
+    /// producing a ragged install log nobody notices.
+    #[test]
+    fn label_widths_fit_the_column() {
+        for a in AgentName::ALL {
+            let label = a.mark_label();
+            assert!(
+                label.len() <= super::super::LABEL_COL,
+                "{} label {label:?} is {} chars, over the {}-char column",
+                a.slug(),
+                label.len(),
+                super::super::LABEL_COL
+            );
+        }
+    }
+
+    /// Pruning must clean up the scaffolding an install created without ever
+    /// taking a directory the user also keeps things in, and without walking
+    /// out of the scope it was given. The stop-at-first-non-empty rule is what
+    /// buys both: it is the same guarantee, checked from three directions.
+    #[test]
+    fn prune_stops_at_non_empty_dirs_and_at_the_anchor() {
+        let tmp = std::env::temp_dir().join(format!("cona-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // A chain nothing else lives in: every level goes.
+        let deep = tmp.join("proj/.cursor/rules/cona.mdc");
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&deep, "x").unwrap();
+        std::fs::remove_file(&deep).unwrap();
+        super::prune_empty_dirs(&deep, &tmp.join("proj"));
+        assert!(!tmp.join("proj/.cursor").exists(), "empty chain should be gone");
+        assert!(tmp.join("proj").exists(), "the anchor itself is never removed");
+
+        // A sibling the user owns stops the walk at that level.
+        let ours = tmp.join("proj2/.windsurf/rules/cona.md");
+        std::fs::create_dir_all(ours.parent().unwrap()).unwrap();
+        std::fs::write(&ours, "x").unwrap();
+        std::fs::write(ours.parent().unwrap().join("theirs.md"), "keep").unwrap();
+        std::fs::remove_file(&ours).unwrap();
+        super::prune_empty_dirs(&ours, &tmp.join("proj2"));
+        assert!(
+            ours.parent().unwrap().exists(),
+            "a directory still holding the user's file must survive"
+        );
+
+        // Anchored at the file's own dir: nothing above it may be touched.
+        let shallow = tmp.join("proj3/only.md");
+        std::fs::create_dir_all(shallow.parent().unwrap()).unwrap();
+        std::fs::write(&shallow, "x").unwrap();
+        std::fs::remove_file(&shallow).unwrap();
+        super::prune_empty_dirs(&shallow, &tmp.join("proj3"));
+        assert!(tmp.join("proj3").exists(), "must not remove the anchor when empty");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Scratch settings.json path, unique per test + process.
+    fn settings_tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cona-hooks-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("settings.json")
+    }
+
+    #[test]
+    fn uninstall_removes_a_settings_file_that_only_held_our_hooks() {
+        let p = settings_tmp("husk");
+        assert!(claude_hooks(&p, true).unwrap(), "install must write");
+        assert!(p.exists());
+        assert!(claude_hooks(&p, false).unwrap(), "uninstall must change");
+        // No `{"hooks": {"PreToolUse": [], …}}` husk left behind: the file cona
+        // created, and whose only content was cona's, goes away entirely.
+        assert!(!p.exists(), "cona-only settings.json must be removed");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn uninstall_keeps_foreign_settings_and_prunes_only_what_it_emptied() {
+        let p = settings_tmp("foreign");
+        std::fs::write(
+            &p,
+            r#"{"model":"opus","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"mine"}]}]}}"#,
+        )
+        .unwrap();
+        claude_hooks(&p, true).unwrap();
+        claude_hooks(&p, false).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["model"], "opus");
+        // PreToolUse still holds the foreign entry, so it survives …
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(v["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "mine");
+        // … while the events only cona ever populated are gone, not left empty.
+        assert!(v["hooks"].get("PostToolUse").is_none());
+        assert!(v["hooks"].get("SessionStart").is_none());
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// An event array that was ALREADY empty before the install belongs to the
+    /// user, not to us. The uninstall sweep removes empty arrays as husks of
+    /// our own hooks, so without remembering which ones arrived empty it would
+    /// delete this one — and, since it was the file's only key, take the whole
+    /// settings.json with it (invariant 6: never touch foreign content).
+    #[test]
+    fn uninstall_keeps_an_event_array_that_was_empty_before_we_installed() {
+        let p = settings_tmp("preempty");
+        std::fs::write(&p, r#"{"hooks":{"Custom":[]}}"#).unwrap();
+        claude_hooks(&p, true).unwrap();
+        claude_hooks(&p, false).unwrap();
+        assert!(p.exists(), "settings.json holding a foreign key must survive");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(
+            v["hooks"]["Custom"].as_array().is_some_and(|a| a.is_empty()),
+            "the user's empty event must come back exactly as it was, got {v}"
+        );
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn uninstall_without_our_hooks_never_creates_structure() {
+        let p = settings_tmp("noop");
+        std::fs::write(&p, "{\"model\":\"opus\"}").unwrap();
+        assert!(
+            !claude_hooks(&p, false).unwrap(),
+            "uninstall with nothing of ours must report no change"
+        );
+        // Byte-identical: no `hooks` key materialized on the way out.
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{\"model\":\"opus\"}");
+        // Same for a settings.json that does not exist at all.
+        let missing = p.parent().unwrap().join("absent.json");
+        assert!(!claude_hooks(&missing, false).unwrap());
+        assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 }

@@ -368,7 +368,17 @@ struct HookArgs {
 }
 
 #[derive(clap::Args)]
+#[command(long_about = "\
+Install or remove this project's git hooks. The hooks keep the index fresh\n\
+automatically: post-commit, post-merge and post-checkout reindex what changed,\n\
+so a commit, pull, rebase or branch switch never leaves stale symbols behind.\n\n\
+Appends to existing hooks rather than replacing them — your own hook lines are\n\
+preserved, and uninstall strips only cona's.\n\n\
+EXAMPLES\n  \
+cona hooks install        Wire up auto-reindexing in this repo\n  \
+cona hooks uninstall      Remove cona's hook lines (keeps your own)")]
 struct HooksArgs {
+    /// Whether to add cona's hook lines or strip them out again
     #[arg(value_enum)]
     action: IntegrationAction,
 }
@@ -397,6 +407,17 @@ struct SetupArgs {
 }
 
 #[derive(clap::Args)]
+#[command(long_about = "\
+Install the binary from a source checkout. Run it from inside the cona repo:\n\
+it builds a release binary if the sources are newer, copies it to ~/.local/bin\n\
+(or --bin-dir), installs the optional semantic-resolve helper beside it, and\n\
+wires git hooks in the checkout so every commit rebuilds what you installed.\n\n\
+Installing the binary does NOT wire your agents — run `cona setup` for that.\n\
+Without a Rust toolchain, use install.sh, which downloads a prebuilt release.\n\n\
+EXAMPLES\n  \
+cona install                      Build + install to ~/.local/bin\n  \
+cona install --bin-dir ~/bin      Install somewhere else\n  \
+cona setup                        Then: index + wire your agents")]
 struct InstallArgs {
     /// Target directory (default: ~/.local/bin)
     #[arg(long)]
@@ -404,7 +425,19 @@ struct InstallArgs {
 }
 
 #[derive(clap::Args)]
+#[command(long_about = "\
+Update cona in place. From a source checkout it pulls and rebuilds; otherwise\n\
+it downloads the newest GitHub release binary (falling back to cargo install).\n\
+Either way it then re-syncs the guide, skill and hooks for every agent already\n\
+installed — globally and in each registered project — so they never lag the\n\
+binary. Nothing new is added; only what you already installed is refreshed.\n\n\
+This also runs on its own in the background, at most once a day, so you rarely\n\
+need to call it by hand.\n\n\
+EXAMPLES\n  \
+cona upgrade              Update the binary + refresh agent configs\n  \
+cona upgrade --quiet      Silent (what the background check runs)")]
 struct UpgradeArgs {
+    /// Print nothing unless something actually changed
     #[arg(short, long)]
     quiet: bool,
 }
@@ -569,10 +602,27 @@ enum Project {
     Ui,
 }
 
+/// Long help for `doctor`. A const rather than an inline attribute because
+/// `doctor` takes no arguments: commands with an `*Args` struct carry their
+/// `long_about` on that struct, so the grouped and flat spellings inherit one
+/// copy, but a bare variant has no such shared home and would otherwise need
+/// the prose written out on both `Maint::Doctor` and `Cmd::DoctorFlat`.
+const DOCTOR_ABOUT: &str = "\
+Health check for the whole installation. Reports the binary and whether it is on\n\
+your PATH, git hooks, the guide/skill in each scope, this project's index, config\n\
+freshness per scope, the optional semantic-resolve helper, and every harness the\n\
+MCP server is registered with.\n\n\
+Read-only — it changes nothing. Anything it flags is fixed by `cona setup`\n\
+(wire agents), `cona index` (build the index), or `cona upgrade` (stale config).\n\n\
+EXAMPLES\n  \
+cona doctor               Check this project + your global install\n  \
+cona doctor --json        Machine-readable report";
+
 /// Install, upgrade, and wire cona into agents/hooks.
 #[derive(Subcommand)]
 enum Maint {
     /// Diagnose install + agent integration (binary, hooks, skill, index, storage)
+    #[command(long_about = DOCTOR_ABOUT)]
     Doctor,
     /// One-shot setup: index + git hooks + agent integration (no arg → interactive chooser)
     Setup(SetupArgs),
@@ -580,9 +630,9 @@ enum Maint {
     Install(InstallArgs),
     /// Rebuild when the source checkout changed, else update to the newest release
     Upgrade(UpgradeArgs),
-    /// Remove binary, upgrade hooks and global agent files
+    /// Remove the binary, git hooks and every agent config cona wrote
     Uninstall(UninstallArgs),
-    /// Inject/remove cona into agent configs (Claude Code, AGENTS.md, Cursor, Gemini)
+    /// Inject/remove cona into agent configs (guides, skills and MCP entries)
     Agents(AgentsArgs),
     /// Install/uninstall git hooks for automatic re-indexing
     Hooks(HooksArgs),
@@ -679,7 +729,7 @@ enum Cmd {
     TidyFlat(TidyArgs),
     #[command(name = "ui", hide = true)]
     UiFlat,
-    #[command(name = "doctor", hide = true)]
+    #[command(name = "doctor", hide = true, long_about = DOCTOR_ABOUT)]
     DoctorFlat,
     #[command(name = "setup", hide = true)]
     SetupFlat(SetupArgs),
