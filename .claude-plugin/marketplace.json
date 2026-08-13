@@ -1,0 +1,23 @@
+{
+  "name": "cona",
+  "owner": {
+    "name": "ph1p",
+    "url": "https://github.com/ph1p"
+  },
+  "plugins": [
+    {
+      "name": "cona",
+      "source": "./plugin",
+      "description": "Token-efficient code navigation: read one symbol instead of a whole file, search code semantically, and edit with syntax verification.",
+      "version": "0.1.0",
+      "category": "development",
+      "keywords": [
+        "code-navigation",
+        "tokens",
+        "tree-sitter",
+        "search",
+        "refactoring"
+      ]
+    }
+  ]
+}

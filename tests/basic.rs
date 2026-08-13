@@ -998,3 +998,19 @@ fn read_only_never_serves_stale_ranges_as_fresh() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The plugin ships its own copy of the skill because Claude Code loads it from
+/// `plugin/skills/cona/SKILL.md`, while the installer bakes the root file in via
+/// `include_str!`. Two sources for one text drift silently — pin them equal.
+#[test]
+fn plugin_skill_matches_the_canonical_one() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let canonical = std::fs::read_to_string(root.join("SKILL.md")).expect("root SKILL.md");
+    let plugin = std::fs::read_to_string(root.join("plugin/skills/cona/SKILL.md"))
+        .expect("plugin SKILL.md");
+    assert_eq!(
+        canonical, plugin,
+        "plugin/skills/cona/SKILL.md drifted from SKILL.md — \
+         re-run: cp SKILL.md plugin/skills/cona/SKILL.md"
+    );
+}

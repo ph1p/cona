@@ -127,6 +127,22 @@ and Cline all read), `cursor`, `gemini`, `pi`, `opencode`, `windsurf`, `zed`,
 **Uninstall** mirrors setup: `cona uninstall` (interactive checklist),
 `cona uninstall -y` (agents + binary), `--purge` also deletes `~/.cona`.
 
+### Claude Code plugin
+
+Claude Code users can take the skill, hooks and MCP server as a plugin instead
+of `cona agents install` — same components, managed by `/plugin`:
+
+```sh
+/plugin marketplace add ph1p/cona
+/plugin install cona@cona
+```
+
+The binary is still the prerequisite (see [Installation](#installation)); every
+plugin hook is guarded with `command -v cona`, so without it the plugin is inert
+rather than noisy. Use the plugin **or** `cona agents install claude`, not both —
+running both is harmless but you'll see the guidance twice. Details:
+[`plugin/README.md`](plugin/README.md).
+
 ## MCP server
 
 For hosts without hook support, cona speaks MCP over stdio. `cona setup` /

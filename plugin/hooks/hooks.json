@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v cona >/dev/null 2>&1 && cona index --quiet --session-start || :"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v cona >/dev/null 2>&1 && cona hook PreToolUse || :"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v cona >/dev/null 2>&1 && cona index --quiet || :"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${CONA_RENUDGE_EVERY:-0}\" -gt 0 ] 2>/dev/null && cona hook PostToolUse || :"
+          }
+        ]
+      }
+    ]
+  }
+}
