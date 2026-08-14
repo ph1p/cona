@@ -356,7 +356,7 @@ pub fn cmd_find(
     conn: &Connection,
     name: &str,
     kind: Option<&str>,
-    limit: i64,
+    limit: usize,
     path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
@@ -380,7 +380,7 @@ pub fn cmd_find(
         limit.saturating_mul(20).clamp(1000, 5000)
     } else {
         limit
-    };
+    } as i64;
     let mut stmt = conn.prepare(&sql)?;
     let mapper =
         |r: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, i64, String, i64)> {
@@ -406,7 +406,7 @@ pub fn cmd_find(
     if pf.is_scoped() {
         let had_rows = !rows.is_empty();
         rows.retain(|(p, ..)| pf.ok(p));
-        rows.truncate(limit.max(0) as usize);
+        rows.truncate(limit);
         // Distinguish "name exists, just not here" from "no such name" — the
         // fuzzy fallback would misleadingly answer the second question.
         if rows.is_empty() && had_rows {

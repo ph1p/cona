@@ -187,7 +187,7 @@ pub(crate) fn push_numbered_lines(out: &mut String, lines: &[&str], start: usize
 /// so the two surfaces can't drift.
 pub mod defaults {
     pub const TREE_BUDGET: i64 = 2000;
-    pub const FIND_LIMIT: i64 = 25;
+    pub const FIND_LIMIT: usize = 25;
     pub const SHOW_CONTEXT: usize = 0;
     pub const REFS_LIMIT: usize = 100;
     pub const CONTEXT_BUDGET: i64 = 3000;

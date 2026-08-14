@@ -125,7 +125,7 @@ struct FindArgs {
     #[arg(long)]
     kind: Option<String>,
     #[arg(long, default_value_t = defaults::FIND_LIMIT)]
-    limit: i64,
+    limit: usize,
     /// Only symbols in files under this path prefix (file or directory)
     #[arg(long)]
     path: Option<String>,

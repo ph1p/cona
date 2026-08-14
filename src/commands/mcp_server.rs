@@ -315,7 +315,7 @@ fn mcp_call(
                 conn,
                 n,
                 opt("kind"),
-                int64("limit", defaults::FIND_LIMIT),
+                uint("limit", defaults::FIND_LIMIT),
                 opt("path"),
                 false,
             )?;
@@ -584,7 +584,7 @@ fn mcp_call(
                 conn,
                 sarg("name")?,
                 opt("kind"),
-                int64("limit", defaults::FIND_LIMIT),
+                uint("limit", defaults::FIND_LIMIT),
                 opt("path"),
                 true,
             ),
