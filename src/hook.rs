@@ -83,6 +83,14 @@ const DEFAULT_ADVISE_MIN_LINES: i64 = 120;
 /// 0 disables.
 const DEFAULT_READ_STREAK: i64 = 4;
 
+/// Default number of suppressed nudge-eligible events (large reads / broad
+/// greps in an UNINDEXED repo) between repeats of the "this repo isn't
+/// indexed" hint. The first one fires immediately; without a repeat, a hint
+/// dropped early in a long session is gone for good even though `cona index`
+/// stays a one-second fix the whole time. Override with `CONA_NUDGE_EVERY`;
+/// 0 = fire once per session and never repeat.
+const DEFAULT_NUDGE_EVERY: i64 = 10;
+
 /// Default cadence for the periodic re-nudge: OFF. Repeating the same guidance
 /// across SessionStart, the agent guide and a timer is over-constraint for
 /// current models — they hold the habit from one statement, and the PreToolUse
@@ -644,7 +652,7 @@ fn session_id(v: &serde_json::Value) -> String {
 
 /// Path of a per-(project, session) marker file under `data_dir/<kind>/`.
 ///
-/// Both session-scoped hook mechanisms (`nudge_once`, `tick_toolcall`) share
+/// Both session-scoped hook mechanisms (`nudge_due`, `tick_toolcall`) share
 /// this so the identity rule stays in ONE place — they only differ in `<kind>`
 /// and what they store. `None` when the data dir is unavailable; each caller
 /// picks its own fallback.
@@ -664,34 +672,55 @@ pub fn fires_on_cadence(count: i64, every: i64) -> bool {
     every > 0 && count > 0 && count % every == 0
 }
 
-/// Record a full read of `rel` for this (project, session) and report whether the
-/// same path was already read. One newline-delimited path per line under the
-/// `reads` marker kind; the file is the session's read log, so its line count
-/// doubles as the read-volume counter (see `read_streak`).
+/// Look up this (project, session)'s read log WITHOUT writing: whether `rel`
+/// was already fully read, and how many *counted* reads it holds so far. One
+/// path per line under the `reads` marker kind; a line prefixed with a tab is
+/// a read that already carried an advisory — it marks the path as seen (the
+/// bytes DID land in context) but does not count toward the volume streak,
+/// otherwise every advised read would drag the next streak reminder closer
+/// and the agent would be nagged twice for one mistake.
 ///
-/// Best-effort like every other hook side effect: if the data dir is unavailable
-/// we report "not a re-read" and stay silent rather than guessing.
-fn note_read(root: &Path, rel: &str, session: &str) -> (bool, i64) {
+/// Best-effort like every other hook side effect: if the data dir is
+/// unavailable we report "not a re-read" and stay silent rather than guessing.
+fn peek_reads(root: &Path, rel: &str, session: &str) -> (bool, i64) {
     let Some(log) = session_marker_path(root, "reads", session) else {
         return (false, 0);
     };
+    if !log.exists() {
+        // First touch of this session: prune markers whose sessions are over.
+        if let Some(parent) = log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            prune_marker_dir(parent);
+        }
+        return (false, 0);
+    }
     let (mut seen, mut count) = (false, 0i64);
     for line in std::fs::read_to_string(&log).unwrap_or_default().lines() {
-        seen |= line == rel;
-        count += 1;
+        seen |= line.strip_prefix('\t').unwrap_or(line) == rel;
+        count += i64::from(!line.starts_with('\t'));
     }
+    (seen, count)
+}
+
+/// Append one read that actually went through to the session's read log.
+/// `counted` = the read carried no advisory (see `peek_reads`). A DENIED read
+/// is never recorded — the bytes never reached the agent, so a retry must not
+/// look like a re-read.
+fn record_read(root: &Path, rel: &str, session: &str, counted: bool) {
+    let Some(log) = session_marker_path(root, "reads", session) else {
+        return;
+    };
     if let Some(parent) = log.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let prefix = if counted { "" } else { "\t" };
     // Append rather than rewrite: the log grows for the whole session, and a
     // failed write only costs us this call's bookkeeping.
-    let appended = std::fs::OpenOptions::new()
+    let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log)
-        .and_then(|mut f| f.write_all(format!("{rel}\n").as_bytes()));
-    let _ = appended;
-    (seen, count + 1)
+        .and_then(|mut f| f.write_all(format!("{prefix}{rel}\n").as_bytes()));
 }
 
 /// Record that a full read of `rel` was redirected (denied) this session and
@@ -711,6 +740,9 @@ fn note_denied(root: &Path, rel: &str, session: &str) -> bool {
     if !seen {
         if let Some(parent) = log.parent() {
             let _ = std::fs::create_dir_all(parent);
+            if !log.exists() {
+                prune_marker_dir(parent);
+            }
         }
         let _ = std::fs::OpenOptions::new()
             .create(true)
@@ -780,7 +812,7 @@ fn try_posttooluse() -> Result<()> {
 /// Increment and return the per-(project, session) tool-call counter. A tiny
 /// file under the data dir holds the running count (path via
 /// `session_marker_path`, so the session-identity rule is shared with
-/// `nudge_once`). Best-effort: any IO failure returns 0 so the caller simply
+/// `nudge_due`). Best-effort: any IO failure returns 0 so the caller simply
 /// doesn't re-nudge this call.
 fn tick_toolcall(root: &Path, session: &str) -> i64 {
     let Some(counter) = session_marker_path(root, "toolcalls", session) else {
@@ -894,17 +926,20 @@ fn try_read(
             .unwrap_or(false)
     });
 
-    // Log every full read of an indexed source file: re-read detection and the
-    // read-volume streak are both size-blind, so this must happen even for files
+    // Track full reads of indexed source files: re-read detection and the
+    // read-volume streak are both size-blind, so this applies even to files
     // far below the advisory floor. Skipped when unindexed (nothing to point at)
     // or non-callable (prose/data — a run of README reads is not the pattern we
     // are looking for, and must not inflate the counter for real source files),
     // and skipped entirely when both tiers that consume it are disabled, so the
-    // default hot path pays no marker IO it cannot use.
+    // default hot path pays no marker IO it cannot use. Peek here; each arm
+    // records the read only if it actually goes through (a denied read never
+    // reached the agent), and marks it uncounted when it carried an advisory.
     let streak_every = read_streak_every();
     let tracking_reads = advise_min_lines > 0 || streak_every > 0;
-    let (reread, read_count) = if indexed && callable && tracking_reads {
-        note_read(&root, &rel, &session_id(v))
+    let tracking = indexed && callable && tracking_reads;
+    let (reread, prior_reads) = if tracking {
+        peek_reads(&root, &rel, &session_id(v))
     } else {
         (false, 0)
     };
@@ -924,7 +959,14 @@ fn try_read(
         Decision::Allow => {
             // Individually fine, but volume is its own cost: several full reads
             // in one session is the drain pattern no single-call rule catches.
-            if indexed && fires_on_cadence(read_count, streak_every) {
+            // Always counted — even when the streak reminder fires on this
+            // very read, it must advance the counter or the same multiple
+            // would re-fire on every subsequent read.
+            let read_count = prior_reads + 1;
+            if tracking {
+                record_read(&root, &rel, &session_id(v), true);
+            }
+            if tracking && fires_on_cadence(read_count, streak_every) {
                 let lead = format!(
                     "That's {read_count} full file reads this session in an indexed project"
                 );
@@ -933,15 +975,23 @@ fn try_read(
             Ok(())
         }
         Decision::Advise => {
-            let lead = if reread {
+            if tracking {
+                record_read(&root, &rel, &session_id(v), false);
+            }
+            // A re-read gets its own short, imperative message instead of the
+            // generic "one function is cheaper" tail — the file is already in
+            // context, so the useful advice is different in kind.
+            let msg = if reread {
                 format!(
-                    "You already read {rel} in full this session — {size_desc} \
-                     still in your context"
+                    "Re-read: {rel} ({size_desc}) is already in your context from \
+                     earlier this session. Need one part again? `cona show <Symbol>` \
+                     re-reads just that symbol. Expect it changed? `cona outline {rel}` \
+                     re-maps it first. This read ran as-is."
                 )
             } else {
-                format!("{rel} is {size_desc}")
+                advisory(&format!("{rel} is {size_desc}"), &rel)
             };
-            allow_with_reason(&root, "hook:read-advise", &rel, &advisory(&lead, &rel))
+            allow_with_reason(&root, "hook:read-advise", &rel, &msg)
         }
         Decision::Redirect => {
             // refresh a stale index entry so line ranges we point at are correct
@@ -955,6 +1005,10 @@ fn try_read(
             // following "read it in chunks" (or plain stubbornness) meets the
             // same wall with the same words forever must not exist.
             if note_denied(&root, &rel, &session_id(v)) {
+                if tracking {
+                    // this read goes through — seen, but advised, so uncounted
+                    record_read(&root, &rel, &session_id(v), false);
+                }
                 let lead = format!(
                     "You retried the full read of {rel} ({size_desc}) after a \
                      redirect, so it went through"
@@ -990,7 +1044,7 @@ fn try_read(
         Decision::Nudge => {
             // Fresh repo, large code file — indexing unlocks the fast path.
             // One hint per session so it never nags on subsequent reads.
-            if !nudge_once(&root, &session_id(v)) {
+            if !nudge_due(&root, &session_id(v)) {
                 return Ok(());
             }
             let reason = format!(
@@ -1048,7 +1102,7 @@ fn try_grep(
             deny(&root, "hook:grep-block", pattern, &reason)
         }
         Decision::Nudge => {
-            if !nudge_once(&root, &session_id(v)) {
+            if !nudge_due(&root, &session_id(v)) {
                 return Ok(());
             }
             let reason = format!(
@@ -1094,27 +1148,55 @@ fn allow_with_reason(root: &Path, cmd: &str, target: &str, reason: &str) -> Resu
     Ok(())
 }
 
-/// True at most once per (project, session): the first time we consider nudging
-/// a fresh repo. A marker file under the data dir, stamped with the current
-/// session id, makes the hint fire once and then stay quiet for the rest of the
-/// session — subsequent large reads in the same unindexed repo pass silently.
+/// Whether the "this repo isn't indexed" hint is due. Fires on the FIRST
+/// nudge-eligible event of a (project, session), then again after every
+/// `CONA_NUDGE_EVERY` suppressed ones (default 10, 0 = never repeat) — a hint
+/// dropped once at the start of a long session is otherwise gone for good.
+/// The marker file holds the running event count.
 ///
 /// Session identity comes from `CLAUDE_SESSION_ID` when the agent exports it;
 /// without it we fall back to a per-day key so a long-lived shell still only
 /// nags occasionally rather than on every read.
-fn nudge_once(root: &Path, session: &str) -> bool {
+fn nudge_due(root: &Path, session: &str) -> bool {
     let Some(marker) = session_marker_path(root, "nudged", session) else {
         return true; // can't track → don't suppress the (useful) first hint
     };
-    if marker.exists() {
-        return false;
+    if !marker.exists() {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            prune_marker_dir(parent);
+        }
     }
-    if let Some(parent) = marker.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let count = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+        + 1;
+    // best-effort, like every marker write
+    let _ = std::fs::write(&marker, count.to_string());
+    count == 1 || fires_on_cadence(count - 1, env_i64("CONA_NUDGE_EVERY", DEFAULT_NUDGE_EVERY, 0))
+}
+
+/// Delete session markers old enough that their session is certainly over
+/// (7 days — the per-day fallback key rolls daily, real session ids within a
+/// week are plausibly live). Called only when a NEW session touches the dir,
+/// so steady-state hook calls pay no directory scan. Best-effort throughout.
+fn prune_marker_dir(dir: &Path) {
+    const WEEK: u64 = 7 * 86_400;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() > WEEK);
+        if stale {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
-    // create the marker (best-effort); either way we nudge this once
-    let _ = std::fs::write(&marker, b"");
-    true
 }
 
 #[cfg(test)]
