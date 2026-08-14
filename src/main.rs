@@ -321,7 +321,11 @@ struct ShapeArgs {
 #[derive(clap::Args)]
 struct DepsArgs {
     /// Only edges from files under this path prefix
+    #[arg(long)]
     path: Option<String>,
+    /// Positional fallback for --path (the pre-0.1 spelling)
+    #[arg(value_name = "PATH", hide = true)]
+    path_pos: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -1138,9 +1142,10 @@ fn run() -> Result<()> {
             finish(&root, "shape", t0, &out, baseline, symbol);
         }
         Cmd::Inspect(Inspect::Deps(a)) | Cmd::DepsFlat(a) => {
-            let DepsArgs { path } = a;
+            let DepsArgs { path, path_pos } = a;
+            let path = path.as_deref().or(path_pos.as_deref());
             let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_deps(&root, &conn, path.as_deref(), cli.json)?;
+            let (out, baseline) = cmd_deps(&root, &conn, path, cli.json)?;
             print!("{out}");
             finish(
                 &root,
@@ -1148,7 +1153,7 @@ fn run() -> Result<()> {
                 t0,
                 &out,
                 baseline,
-                path.as_deref().unwrap_or(""),
+                path.unwrap_or(""),
             );
         }
         Cmd::Edit(EditCmd::Rename(a)) | Cmd::RenameFlat(a) => {
