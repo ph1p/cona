@@ -74,12 +74,7 @@ pub(crate) fn cmd_edit_code(
     if replacement.trim().is_empty() {
         bail!("replacement is empty — pass --file or pipe code via stdin");
     }
-    // first locate to learn which file, then re-index THAT file and locate
-    // again — guarantees line numbers are fresh even if the file changed
-    // since the last `cona index`.
-    let (path0, _, _, _) = locate_symbol(conn, symbol)?;
-    indexer::reindex_file(root, conn, &path0)?;
-    let (path, s, e, q) = locate_symbol(conn, symbol)?;
+    let (path, s, e, q) = super::locate_for_write(root, conn, symbol)?;
     let abs = project_path(root, &path)?;
     let original = std::fs::read_to_string(&abs)?;
     let new_src = editing::splice_lines(&original, s as usize, e as usize, replacement);
@@ -176,9 +171,7 @@ pub fn cmd_insert(
     // resolve the target file + the insertion line
     let (path, at_line, label) = match (symbol, &at) {
         (Some(sym), None) => {
-            let (path0, _, _, _) = locate_symbol(conn, sym)?;
-            indexer::reindex_file(root, conn, &path0)?;
-            let (path, s, e, q) = locate_symbol(conn, sym)?;
+            let (path, s, e, q) = super::locate_for_write(root, conn, sym)?;
             // before → at line s-1; after → just past line e
             let line = if after {
                 e as usize

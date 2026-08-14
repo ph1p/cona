@@ -399,6 +399,16 @@ pub(crate) fn locate_fresh(
     Ok(located)
 }
 
+/// `locate_fresh` for WRITE paths (edit/insert): always re-index the defining
+/// file before the final locate, no staleness heuristic. A write splices by
+/// these line numbers, so "probably fresh" is not fresh enough — the extra
+/// reindex of one file is cheap next to a mis-spliced edit.
+pub(crate) fn locate_for_write(root: &Path, conn: &Connection, symbol: &str) -> Result<Located> {
+    let (path0, ..) = locate_symbol(conn, symbol)?;
+    indexer::reindex_file(root, conn, &path0)?;
+    locate_symbol(conn, symbol)
+}
+
 /// Every candidate for `symbol`, in the same priority order the ambiguity
 /// error lists them. This does NOT pick a winner — callers that use it (`show
 /// --all`) render them all, so invariant 4 ("never silently picks") holds:
