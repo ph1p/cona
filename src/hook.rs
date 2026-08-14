@@ -190,10 +190,15 @@ pub struct GrepFacts {
     pub indexed_project: bool,
     /// The search root is inside a git repo (indexable, if not yet indexed).
     pub in_repo: bool,
+    /// The search is still broad but its OUTPUT is bounded (file list, counts,
+    /// context windows) — the agent already reached for restraint, so it gets
+    /// a hint instead of a block.
+    pub soft: bool,
 }
 
 /// Decide what to do with a candidate `Grep`.
 /// - broad identifier search over an indexed project → Redirect
+///   (Advise instead when the output is already bounded — `soft`)
 /// - broad identifier search over an UNINDEXED git repo → Nudge
 /// - surgical / regex / non-repo → Allow
 pub fn decide_grep(f: &GrepFacts) -> Decision {
@@ -201,7 +206,11 @@ pub fn decide_grep(f: &GrepFacts) -> Decision {
         return Decision::Allow;
     }
     if f.indexed_project {
-        Decision::Redirect
+        if f.soft {
+            Decision::Advise
+        } else {
+            Decision::Redirect
+        }
     } else if f.in_repo {
         Decision::Nudge
     } else {
@@ -231,10 +240,13 @@ pub enum ShellIntent {
     /// shell-side equivalent of Read with offset/limit. Never intercepted, but
     /// distinguished from `Other` so the intent is explicit.
     PartialRead,
-    /// A broad content search for `pattern` under an optional path.
+    /// A broad content search for `pattern` under an optional path. `soft`
+    /// marks a search whose output is already bounded (`-l`, `-c`, context
+    /// flags) — still broad, but the redirect softens to an advisory.
     Grep {
         pattern: String,
         path: Option<String>,
+        soft: bool,
     },
     /// Not a read or a search we recognise.
     Other,
@@ -498,25 +510,58 @@ fn classify_sed(args: &[String]) -> ShellIntent {
     }
 }
 
-/// `rg PATTERN [PATH]` → the grep half of `classify_shell`. Any narrowing flag
-/// (`-g`, `-t`, `--files`, `-m`, …) makes it surgical and therefore `Other`;
-/// only a bare broad search is a candidate for the semantic redirect.
+/// `rg PATTERN [PATH]` → the grep half of `classify_shell`. A narrowing flag
+/// (`-g`, `-t`, `--files`, `-m`, …) makes it surgical and therefore `Other`.
+/// Output-bounding flags (`-l`, `-c`, context windows) keep it a `Grep` but
+/// mark it `soft` — the search is still broad, only its presentation isn't.
 fn classify_grep(args: &[String]) -> ShellIntent {
     let mut positional: Vec<&String> = Vec::new();
-    for a in args {
-        if let Some(flag) = a.strip_prefix('-') {
-            // `-r`/`-R`/`-n`/`-i` and friends only affect presentation or
-            // recursion; anything else narrows the search or changes its shape
-            // (a file list, a count, a context window) and is not ours.
-            let plain = flag.trim_start_matches('-');
-            let harmless = matches!(plain, "r" | "R" | "n" | "i" | "rn" | "nr" | "ri" | "ir")
-                || plain.is_empty();
-            if !harmless {
-                return ShellIntent::Other;
-            }
-        } else {
+    let mut soft = false;
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        let Some(flag) = a.strip_prefix('-') else {
             positional.push(a);
+            continue;
+        };
+        // `-r`/`-R`/`-n`/`-i` and friends only affect presentation or
+        // recursion; anything else narrows the search or changes its shape.
+        let plain = flag.trim_start_matches('-');
+        if matches!(plain, "r" | "R" | "n" | "i" | "rn" | "nr" | "ri" | "ir") || plain.is_empty() {
+            continue;
         }
+        // Output-bounding flags: same broad search, bounded presentation.
+        if matches!(plain, "l" | "c" | "files-with-matches" | "count") {
+            soft = true;
+            continue;
+        }
+        // Context flags carrying their value: `-C3`, `--context=3`.
+        let ctx_attached = (plain.len() > 1
+            && ['A', 'B', 'C'].iter().any(|c| plain.starts_with(*c))
+            && plain[1..].chars().all(|c| c.is_ascii_digit()))
+            || plain.split_once('=').is_some_and(|(name, v)| {
+                matches!(name, "context" | "after-context" | "before-context")
+                    && !v.is_empty()
+                    && v.chars().all(|c| c.is_ascii_digit())
+            });
+        if ctx_attached {
+            soft = true;
+            continue;
+        }
+        // Bare context flags take the count as the NEXT argument; anything
+        // non-numeric there makes the line untrustworthy → not ours.
+        if matches!(
+            plain,
+            "A" | "B" | "C" | "context" | "after-context" | "before-context"
+        ) {
+            match iter.next() {
+                Some(v) if !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()) => {
+                    soft = true;
+                    continue;
+                }
+                _ => return ShellIntent::Other,
+            }
+        }
+        return ShellIntent::Other;
     }
     // A bare pattern searches the cwd (rg) or is a grep without a path — both
     // are the broad search this tier wants. A second operand is the directory.
@@ -528,6 +573,7 @@ fn classify_grep(args: &[String]) -> ShellIntent {
     ShellIntent::Grep {
         pattern: (*pattern).clone(),
         path,
+        soft,
     }
 }
 
@@ -599,7 +645,15 @@ fn try_pretooluse() -> Result<()> {
                 || !input["type"].is_null()
                 || !input["head_limit"].is_null()
                 || path.map(|p| Path::new(p).is_file()).unwrap_or(false);
-            try_grep(&v, pattern, path, surgical)
+            // bounded output (file list, counts, context windows) = the same
+            // restraint the shell path reads from -l/-c/-C — advisory tier
+            let soft = matches!(
+                input["output_mode"].as_str(),
+                Some("files_with_matches" | "count")
+            ) || !input["-A"].is_null()
+                || !input["-B"].is_null()
+                || !input["-C"].is_null();
+            try_grep(&v, pattern, path, surgical, soft)
         }
         // Harnesses whose only file tool is a shell (Codex runs `sed -n
         // '1,240p' f` / `rg Foo` through `tool_name = "Bash"`) never emit a
@@ -620,9 +674,13 @@ fn try_pretooluse() -> Result<()> {
 fn try_shell(v: &serde_json::Value, cmd: &str) -> Result<()> {
     match classify_shell(cmd) {
         ShellIntent::Read { path, upto } => try_read(v, &path, false, upto),
-        ShellIntent::Grep { pattern, path } => {
+        ShellIntent::Grep {
+            pattern,
+            path,
+            soft,
+        } => {
             let surgical = path.as_deref().map(|p| Path::new(p).is_file()) == Some(true);
-            try_grep(v, &pattern, path.as_deref(), surgical)
+            try_grep(v, &pattern, path.as_deref(), surgical, soft)
         }
         ShellIntent::PartialRead | ShellIntent::Other => Ok(()),
     }
@@ -1066,6 +1124,7 @@ fn try_grep(
     pattern: &str,
     path: Option<&str>,
     surgical: bool,
+    soft: bool,
 ) -> Result<()> {
     // cheap gates first — only a broad identifier search pays for the DB check
     if surgical || !lang::is_valid_ident(pattern) {
@@ -1084,12 +1143,21 @@ fn try_grep(
         // only projects the user already indexed — never create a DB from a hook
         indexed_project: db::has_index(&root),
         in_repo: root.join(".git").exists(),
+        soft,
     };
     match decide_grep(&facts) {
-        // decide_grep has no advisory tier: a broad identifier grep is either
-        // servable semantically (Redirect) or it isn't. Treated as Allow so the
-        // hook stays fail-open if that ever changes.
-        Decision::Allow | Decision::Advise => Ok(()),
+        Decision::Allow => Ok(()),
+        Decision::Advise => {
+            // Output already bounded (-l/-c/context) — respect the restraint,
+            // let it run, and point at the semantic equivalent.
+            let reason = format!(
+                "this project is cona-indexed — `cona grep {pattern}` searches code only \
+                 and labels every hit with its enclosing symbol; `cona refs {pattern}` \
+                 gives semantic usage sites (strings/comments never match). This search \
+                 ran as-is."
+            );
+            allow_with_reason(&root, "hook:grep-advise", pattern, &reason)
+        }
         Decision::Redirect => {
             let reason = format!(
                 "this project is cona-indexed — `cona grep {pattern}` searches code only \
@@ -1489,12 +1557,34 @@ mod tests {
             identifier: true,
             indexed_project: true,
             in_repo: true,
+            soft: false,
         }
     }
 
     #[test]
     fn redirects_broad_identifier_grep_in_indexed_project() {
         assert_eq!(decide_grep(&grep_facts()), Decision::Redirect);
+    }
+
+    #[test]
+    fn advises_soft_grep_in_indexed_project() {
+        // Bounded output softens the redirect to a hint — the search runs.
+        assert_eq!(
+            decide_grep(&GrepFacts {
+                soft: true,
+                ..grep_facts()
+            }),
+            Decision::Advise
+        );
+        // Outside an indexed project, soft changes nothing.
+        assert_eq!(
+            decide_grep(&GrepFacts {
+                soft: true,
+                indexed_project: false,
+                ..grep_facts()
+            }),
+            Decision::Nudge
+        );
     }
 
     #[test]
@@ -1637,7 +1727,8 @@ mod tests {
             classify_shell("LC_ALL=C grep -rn UserService src"),
             ShellIntent::Grep {
                 pattern: "UserService".into(),
-                path: Some("src".into())
+                path: Some("src".into()),
+                soft: false
             }
         );
     }
@@ -1697,14 +1788,16 @@ mod tests {
             classify_shell("rg UserService"),
             ShellIntent::Grep {
                 pattern: "UserService".into(),
-                path: None
+                path: None,
+                soft: false
             }
         );
         assert_eq!(
             classify_shell("grep -rn UserService src"),
             ShellIntent::Grep {
                 pattern: "UserService".into(),
-                path: Some("src".into())
+                path: Some("src".into()),
+                soft: false
             }
         );
     }
@@ -1718,9 +1811,30 @@ mod tests {
             "rg --files -g 'AGENTS.md' .",
             "rg -t rust UserService",
             "rg -m 5 UserService",
-            "rg -l UserService",
         ] {
             assert_eq!(classify_shell(cmd), ShellIntent::Other, "{cmd}");
         }
+    }
+
+    #[test]
+    fn output_bounded_shell_greps_are_soft() {
+        // Bounded output = still a broad search, but the agent showed
+        // restraint — classify as Grep{soft} so it gets the advisory tier.
+        for cmd in [
+            "rg -l UserService",
+            "rg -c UserService",
+            "grep -rn --count UserService src",
+            "rg -C3 UserService",
+            "rg -C 3 UserService",
+            "rg --context=2 UserService",
+            "rg -A 2 UserService src",
+        ] {
+            match classify_shell(cmd) {
+                ShellIntent::Grep { soft: true, .. } => {}
+                other => panic!("expected soft Grep for {cmd}, got {other:?}"),
+            }
+        }
+        // A context flag with a non-numeric value is untrustworthy → Other.
+        assert_eq!(classify_shell("rg -C x UserService"), ShellIntent::Other);
     }
 }
