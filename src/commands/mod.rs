@@ -37,7 +37,9 @@ pub fn open_indexed(root: &Path) -> Result<Connection> {
     let conn = if db::is_read_only() {
         db::open_existing_project_db(root).map_err(|_| {
             anyhow!(
-                "no existing index for {} in read-only mode — run `cona index` from a writable environment first",
+                "no existing index for {} in read-only mode — run `cona index` from a \
+                 writable environment first (if one exists elsewhere, point CONA_DATA_DIR \
+                 at the directory that holds it)",
                 root.display()
             )
         })?
@@ -48,7 +50,9 @@ pub fn open_indexed(root: &Path) -> Result<Connection> {
     if n == 0 {
         if db::is_read_only() {
             bail!(
-                "the index for {} is empty in read-only mode — run `cona index` from a writable environment first",
+                "the index for {} is empty in read-only mode — run `cona index` from a \
+                 writable environment first (if one exists elsewhere, point CONA_DATA_DIR \
+                 at the directory that holds it)",
                 root.display()
             );
         }
