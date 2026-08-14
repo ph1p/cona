@@ -125,10 +125,15 @@ just unable to discover the tail. `more` short-circuits BEFORE the lazy
 index open — reflecting over static schemas must not build an index or fail in an
 unindexed tree.
 
+Query tools expose optional `limit`/`budget`/`max_depth` knobs (find/refs/grep/
+entries: limit; tree/context/shape: budget; path: max_depth) defaulting to the
+`defaults` module — same numbers as the CLI flags.
+
 **outputSchema.** find/refs/outline declare one and therefore MUST return
 matching `structuredContent` (`ToolOut::structured`); the payload comes from
 re-running the same query with `json = true`, since a cmd_* returns ONE string,
-either text or JSON. Text is never dropped — the spec keeps `content`
+either text or JSON. The second pass MUST read the same caller-supplied
+`limit` as the first, or structuredContent and text could disagree. Text is never dropped — the spec keeps `content`
 authoritative. A parse/query failure on the second pass degrades to text-only:
 structured content is an optimisation, a failed call is a lost answer.
 

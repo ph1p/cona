@@ -20,7 +20,9 @@ src/commands/    cmd_* implementations, split by concern:
                  mod.rs   shared: open_indexed/finish/jout/BudgetOut/locate_*/
                           render_symbol_body/scan_ref_sites/ENCLOSING_SYMBOL_SQL;
                           `defaults` module = THE per-command limits/budgets,
-                          used by clap default_value_t AND the MCP fallbacks.
+                          used by clap default_value_t AND the MCP fallbacks
+                          (MCP query tools expose them as optional limit/
+                          budget/max_depth args; unset = the same default).
                           path_ok/path_matches_in/path_matches_dir = THE `--path`
                           policy (find/refs/grep/tree). Directory and prefix
                           readings CONFLICT — `--path src/commands` must exclude

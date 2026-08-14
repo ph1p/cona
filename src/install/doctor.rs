@@ -124,19 +124,27 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
     let mut issues = 0usize;
 
     let install_path = db::meta_get("install_path").ok().flatten();
-    let install_exists = install_path.as_deref().is_some_and(|p| Path::new(p).exists());
+    let install_exists = install_path
+        .as_deref()
+        .is_some_and(|p| Path::new(p).exists());
     if !install_exists {
         issues += 1;
     }
     let on_path = cona_on_path();
 
     let mut scopes = Vec::new();
-    for (label, root) in [("global", home.clone()), ("project", project_root.to_path_buf())] {
+    for (label, root) in [
+        ("global", home.clone()),
+        ("project", project_root.to_path_buf()),
+    ] {
         let dir = root.join(".claude");
         let skill_path = dir.join("skills/cona/SKILL.md");
         let (index_hook, read_hook) = settings_cona_hooks(&dir.join("settings.json"));
         let skill = skill_path.exists();
-        issues += [index_hook, read_hook, skill].iter().filter(|b| !**b).count();
+        issues += [index_hook, read_hook, skill]
+            .iter()
+            .filter(|b| !**b)
+            .count();
         let config_ver = if skill {
             let v = db::meta_get(&super::upgrade::config_ver_key(&root))
                 .ok()
@@ -163,8 +171,7 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
     // hooks at startup, so a stale session keeps ignoring a fresh install.
     let hooks_configured = scopes.iter().any(|s| s.index_hook || s.read_hook);
     let hook_seen_secs = hook_last_seen();
-    let hook_silent =
-        hooks_configured && hook_seen_secs.is_none_or(|secs| secs > 7 * 86_400);
+    let hook_silent = hooks_configured && hook_seen_secs.is_none_or(|secs| secs > 7 * 86_400);
     if hook_silent {
         issues += 1;
     }
@@ -317,7 +324,10 @@ fn render_text(r: &DoctorReport) {
             _ => "project (./.claude)",
         };
         println!("\n{}", ui::heading(&format!("claude {label}")));
-        println!("  {}", tag(s.index_hook, "index hook (PostToolUse/SessionStart)"));
+        println!(
+            "  {}",
+            tag(s.index_hook, "index hook (PostToolUse/SessionStart)")
+        );
         println!(
             "  {}",
             tag(s.read_hook, "read-guard hook (PreToolUse read/grep/shell)")

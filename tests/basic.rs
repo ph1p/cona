@@ -873,7 +873,10 @@ fn show_all_renders_same_file_enum_impl_pair() {
     let (ok, msg) = run(&["show", "Thing"]);
     assert!(ok, "expected auto-all render, got error: {msg}");
     assert!(msg.contains("ambiguous — showing all 2"), "{msg}");
-    assert!(msg.contains("enum Thing") && msg.contains("impl Thing"), "{msg}");
+    assert!(
+        msg.contains("enum Thing") && msg.contains("impl Thing"),
+        "{msg}"
+    );
     assert!(msg.contains("--kind"), "{msg}");
     let _ = std::fs::remove_dir_all(&dir);
 }

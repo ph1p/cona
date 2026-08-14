@@ -1003,7 +1003,15 @@ fn run() -> Result<()> {
             let target = symbol.as_deref().unwrap_or("--at");
             queried(&root, t0, "edit", target, |conn| {
                 Ok((
-                    cmd_insert(&root, conn, symbol.as_deref(), *after, at_pos, &code, *force)?,
+                    cmd_insert(
+                        &root,
+                        conn,
+                        symbol.as_deref(),
+                        *after,
+                        at_pos,
+                        &code,
+                        *force,
+                    )?,
                     0,
                 ))
             })?;
@@ -1022,9 +1030,13 @@ fn run() -> Result<()> {
         }
         Cmd::Inspect(Inspect::Entries(a)) | Cmd::EntriesFlat(a) => {
             let EntriesArgs { path, limit } = a;
-            queried(&root, t0, "entries", path.as_deref().unwrap_or(""), |conn| {
-                cmd_entries(conn, path.as_deref(), *limit, cli.json)
-            })?;
+            queried(
+                &root,
+                t0,
+                "entries",
+                path.as_deref().unwrap_or(""),
+                |conn| cmd_entries(conn, path.as_deref(), *limit, cli.json),
+            )?;
         }
         Cmd::Inspect(Inspect::Tests(a)) | Cmd::TestsFlat(a) => {
             let TestsArgs { symbol } = a;

@@ -1261,7 +1261,11 @@ fn nudge_due(root: &Path, session: &str) -> bool {
         + 1;
     // best-effort, like every marker write
     let _ = std::fs::write(&marker, count.to_string());
-    count == 1 || fires_on_cadence(count - 1, env_i64("CONA_NUDGE_EVERY", DEFAULT_NUDGE_EVERY, 0))
+    count == 1
+        || fires_on_cadence(
+            count - 1,
+            env_i64("CONA_NUDGE_EVERY", DEFAULT_NUDGE_EVERY, 0),
+        )
 }
 
 /// Delete session markers old enough that their session is certainly over
