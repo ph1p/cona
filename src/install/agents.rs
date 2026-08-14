@@ -821,6 +821,9 @@ fn mcp_register(agent: AgentName, ctx: &Ctx, install: bool, done: &mut Vec<super
         .parent()
         .is_some_and(|d| d.exists() || d == ctx.project_root);
     if install && !dir_ok {
+        // Say so instead of vanishing: a user who expected the MCP server
+        // registered otherwise has no clue why doctor lists nothing.
+        mark(done, "mcp server", "skipped (no config dir)", &path);
         return;
     }
     let is_toml = path.extension().and_then(|e| e.to_str()) == Some("toml");
