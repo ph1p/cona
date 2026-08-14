@@ -866,15 +866,15 @@ fn show_all_renders_same_file_enum_impl_pair() {
     assert!(out.contains("enum Thing"), "{out}");
     assert!(out.contains("impl Thing"), "{out}");
     assert!(!out.contains("ambiguous"), "{out}");
-    // without --all the pair still errors (invariant 4), but the message only
-    // offers hatches that work here: --kind and --all — not file/Parent.Name
+    // without --all a SMALL ambiguity (≤3 candidates, ≤400 lines total)
+    // auto-renders every definition instead of erroring — a dead-end error
+    // that --all immediately fixes was pure friction. The banner still names
+    // the narrowing hatches.
     let (ok, msg) = run(&["show", "Thing"]);
-    assert!(!ok, "expected ambiguity error, got: {msg}");
-    assert!(msg.contains("--kind") && msg.contains("--all"), "{msg}");
-    assert!(
-        !msg.contains("file (`") && !msg.contains("Parent.Name"),
-        "{msg}"
-    );
+    assert!(ok, "expected auto-all render, got error: {msg}");
+    assert!(msg.contains("ambiguous — showing all 2"), "{msg}");
+    assert!(msg.contains("enum Thing") && msg.contains("impl Thing"), "{msg}");
+    assert!(msg.contains("--kind"), "{msg}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

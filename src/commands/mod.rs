@@ -199,6 +199,12 @@ pub mod defaults {
     pub const HOT_LIMIT: usize = 20;
     pub const COUPLING_LIMIT: usize = 15;
     pub const PATH_DEPTH: usize = 8;
+    /// `show` auto-expands an ambiguous name instead of erroring when the
+    /// pool is at most this many candidates …
+    pub const AUTO_ALL_MAX_CANDIDATES: usize = 3;
+    /// … and their bodies sum to at most this many lines. Past either bound
+    /// the guided ambiguity error is the cheaper answer.
+    pub const AUTO_ALL_MAX_LINES: i64 = 400;
 }
 
 /// How `show` renders a symbol, once the symbol itself is resolved.

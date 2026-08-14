@@ -2,8 +2,8 @@
 //! context, diff, grep.
 
 use super::{
-    jout, locate_fresh, push_numbered_lines, render_symbol_body, scan_ref_sites, BudgetOut,
-    GrepOpts, PathFilter, ShowOpts, ENCLOSING_SYMBOL_SQL,
+    defaults, jout, locate_fresh, push_numbered_lines, render_symbol_body, scan_ref_sites,
+    BudgetOut, GrepOpts, PathFilter, ShowOpts, ENCLOSING_SYMBOL_SQL,
 };
 use crate::{db, diffmap, entries, fuzzy, gitmap, graph, indexer, lang, resolve};
 use anyhow::{anyhow, bail, Result};
@@ -549,7 +549,22 @@ pub fn cmd_show(
     if super::split_locator(symbol).is_none() && root.join(symbol).exists() {
         return cmd_outline(root, conn, symbol, sig, json);
     }
-    if all {
+    // Without --all, a SMALL ambiguity pool is auto-expanded instead of
+    // erroring: showing 2–3 short definitions answers the question the agent
+    // actually asked, where the error costs a whole retry round-trip. Big
+    // pools (or big bodies) still raise `locate_symbol`'s guided error via
+    // `show_one` — printing them all would be the token sink this tool exists
+    // to avoid. `locate_all` only reports >1 when locate erred on ambiguity.
+    let auto_all = !all
+        && super::locate_all(conn, symbol, kind)
+            .map(|cands| {
+                cands.len() > 1
+                    && cands.len() <= defaults::AUTO_ALL_MAX_CANDIDATES
+                    && cands.iter().map(|c| c.2 - c.1 + 1).sum::<i64>()
+                        <= defaults::AUTO_ALL_MAX_LINES
+            })
+            .unwrap_or(false);
+    if all || auto_all {
         let cands = super::locate_all(conn, symbol, kind)?;
         if cands.len() > 1 {
             // Render each candidate from the row locate_all already resolved —
@@ -565,6 +580,13 @@ pub fn cmd_show(
                 cands
             };
             let mut out = String::new();
+            if auto_all {
+                out.push_str(&format!(
+                    "· '{symbol}' is ambiguous — showing all {} (narrow with \
+                     Parent.Name, file.rs:Name, or --kind)\n",
+                    cands.len()
+                ));
+            }
             let mut baseline = 0;
             for c in &cands {
                 match show_located(root, conn, c, opts, false, false) {
