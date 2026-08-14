@@ -1175,7 +1175,7 @@ fn run() -> Result<()> {
             dashboard::run(&root)?;
         }
         Cmd::Maint(Maint::Doctor) | Cmd::DoctorFlat => {
-            install::cmd_doctor(&root)?;
+            install::cmd_doctor(&root, cli.json)?;
         }
         Cmd::Project(Project::Tidy(a)) | Cmd::TidyFlat(a) => {
             let TidyArgs { orphans } = a;
