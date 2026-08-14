@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 192 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic.rs, incl. MCP handshake)
+cargo test                   # 219 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic.rs, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -82,6 +82,9 @@ src/db.rs        SQLite: per-project DB + global.db (registry/usage/meta)
 4. `locate_symbol` throws on ambiguity with a candidate list — never silently
    picks. Escape hatches: `Parent.Name`, `--kind`, `file.rs:Name` (path or
    `/`-guarded path suffix — the exact shape the candidate list prints).
+   `cmd_show` auto-renders SMALL ambiguities (≤3 candidates, ≤400 total lines,
+   `defaults::AUTO_ALL_*`) with an ambiguity banner — showing every candidate
+   is not picking one; larger sets still error with the list.
 5. Keep output compact: the tool exists to save agent tokens.
 6. `agents install/uninstall` is idempotent and marker-based
    (`<!-- cona:begin/end -->`) — NEVER touch foreign file content; invalid
@@ -245,10 +248,13 @@ returns `(String, i64)`. `detail` = query target (symbol/file) for top-target
 aggregation; added via guarded migration (`ALTER TABLE … ADD COLUMN`,
 `column_exists`). Hook logs redirected reads as `cmd = "hook:read-block"`,
 greps as `"hook:grep-block"`, and the advisory (non-blocking) outcomes as
-`"hook:read-advise"` (mid-size ≥`CONA_ADVISE_MIN_LINES` or repeat read of a
-path already read this session), `"hook:read-streak"` (every
-`CONA_READ_STREAK`-th full read in one session) and `"hook:read-nudge"` /
-`"hook:grep-nudge"` (unindexed repo) — all count lines with
+`"hook:read-advise"` (mid-size ≥`CONA_ADVISE_MIN_LINES`, repeat read of a
+path already read this session, or the yield on a retried denied read),
+`"hook:grep-advise"` (broad grep whose output is already bounded — `-l`/`-c`/
+context flags), `"hook:read-streak"` (every `CONA_READ_STREAK`-th full read in
+one session) and `"hook:read-nudge"` / `"hook:grep-nudge"` (unindexed repo;
+first eligible event per session, repeats every `CONA_NUDGE_EVERY` suppressed
+ones, default 10, 0 = never) — all count lines with
 `tokens_saved = 0` (saving credited to the follow-up query, else
 double-counting). `cmd_grep` prefilters candidates
 via rg (fallback system grep, else full scan — fail-open); hit labeling stays

@@ -178,15 +178,28 @@ src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  PreToolUse = pure decide_read/decide_grep + fail-open runner;
                  redirects large full reads + broad identifier greps (indexed
                  project, no glob/type/path filter) to cona; hook NEVER creates a
-                 DB. try_read gates (partial/non-code/metadata-size) BEFORE
-                 reading bytes — multi-GB file must not be slurped just to be
-                 allowed.
+                 DB. A broad grep whose OUTPUT is already bounded (-l/-c/
+                 --count/context flags, native output_mode files_with_matches|
+                 count or -A/-B/-C) is `soft`: same search, but the agent showed
+                 restraint, so decide_grep answers Advise (hook:grep-advise,
+                 runs as-is) instead of Redirect. try_read gates (partial/
+                 non-code/metadata-size) BEFORE reading bytes — multi-GB file
+                 must not be slurped just to be allowed. A read the redirect
+                 denied is retried verbatim by most agents: note_denied marks the
+                 (project,session,path) and the SECOND attempt yields with an
+                 advisory instead of denying again — a redirect that loops is
+                 worse than the read. The per-session read log is split
+                 peek_reads (read-only: seen? + counted volume) / record_read
+                 (append; tab-prefixed lines = seen-but-uncounted, so an advised
+                 read never ALSO drags the volume streak closer). Marker dirs
+                 are pruned of >7-day-old files on first touch per session.
                  TWO tool shapes reach the same decision. Native Read/Grep is
                  read off tool_input. A harness whose ONLY file tool is a shell
                  (Codex sends tool_name "Bash" with command
                  `/bin/zsh -lc "sed -n '1,400p' f"`) never emits Read or Grep, so
                  classify_shell normalizes the command line into a ShellIntent
-                 (Read{path,upto} | PartialRead | Grep{pattern,path} | Other) and
+                 (Read{path,upto} | PartialRead | Grep{pattern,path,soft} |
+                 Other) and
                  try_shell routes it into the SAME try_read/try_grep — the matcher
                  therefore lists the shell tool names too. Pipeline: unwrap_shell
                  _wrapper peels `sh|bash|zsh|… -lc "<script>"` → split_segments
@@ -218,10 +231,14 @@ src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  binary never even spawns. Hot-path order: cheap project_db_path stat
                  + counter tick gate BEFORE the expensive has_index DB-open, so
                  non-nudging calls never open the DB.
-                 tick_toolcall + nudge_once share session_marker_path (the ONE
+                 tick_toolcall + nudge_due share session_marker_path (the ONE
                  session-identity rule via session_id(): CLAUDE_SESSION_ID, else
                  the payload's own `session_id` — Codex exports no env var but
-                 sends the field — else a per-day bucket).
+                 sends the field — else a per-day bucket). The unindexed-repo
+                 nudge fires on the FIRST eligible event of a session, then
+                 again after every CONA_NUDGE_EVERY suppressed ones (default 10,
+                 0 = never repeat) — one hint at the start of a long session is
+                 otherwise gone for good.
                  The redirect is the ONLY permissionDecision cona ever emits, and
                  only "deny" + the cona command to run instead. Every hint path
                  (advisory, streak, nudge) is additionalContext ONLY. cona NEVER
