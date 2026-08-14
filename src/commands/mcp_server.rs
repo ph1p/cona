@@ -272,8 +272,14 @@ pub fn mcp_tools(expanded: bool) -> Vec<serde_json::Value> {
 fn mcp_more() -> Result<String> {
     let extended: Vec<serde_json::Value> =
         all_tools().into_iter().filter(|t| !is_core(t)).collect();
+    // Name the CLI fallback: the schemas only become callable after the
+    // harness refreshes tools/list, and not every client honours
+    // list_changed. The shell spelling works either way.
     Ok(format!(
-        "{} advanced cona tools are now available — call any of them by name:\n\n{}",
+        "{} advanced cona tools are now available — call any of them by name. \
+         If one is rejected as unknown (your client did not refresh its tool list), \
+         every one of them is also a CLI command: run `cona <tool> …` in a shell, \
+         e.g. `cona impact <Symbol>` or `cona callers <Symbol>`.\n\n{}",
         extended.len(),
         serde_json::to_string_pretty(&extended)?
     ))
