@@ -275,7 +275,26 @@ pub fn cmd_outline(
         if is_dir {
             bail!("'{file}' is a directory — try `cona tree --path {file}`");
         }
-        bail!("no symbols for '{file}' — file not indexed or has none");
+        // Distinguish the three remaining causes — each has a different next
+        // step, and the hook may have redirected an agent here, so a dead-end
+        // error would strand it with no route back to the content.
+        let in_index = conn
+            .query_row(
+                "SELECT 1 FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' LIMIT 1",
+                rusqlite::params![file, like],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if in_index {
+            bail!(
+                "'{file}' is indexed but has no extractable symbols — read it directly, \
+                 or search it with `cona grep <pattern> --path {file}`"
+            );
+        }
+        if root.join(file).is_file() {
+            bail!("'{file}' exists but is not in the index — run `cona index`, then retry");
+        }
+        bail!("no file '{file}' in the index — `cona find <name>` locates symbols by name");
     }
     // Baseline: sum each matched file's size once (rows are path-ordered).
     let mut bytes: i64 = 0;
