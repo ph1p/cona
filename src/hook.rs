@@ -600,6 +600,24 @@ fn read_streak_every() -> i64 {
     env_i64("CONA_READ_STREAK", DEFAULT_READ_STREAK, 0)
 }
 
+/// Liveness stamp for `cona doctor`: the file's mtime says when a hook last
+/// actually fired, which separates "hooks configured but the harness never
+/// runs them" (stale settings snapshot, broken PATH) from a healthy install.
+/// Throttled — rewrite only when the stamp is missing or older than an hour —
+/// so the hot path normally costs one stat. Best-effort: never fails the hook.
+fn touch_liveness() {
+    let Ok(dir) = db::data_dir() else { return };
+    let path = dir.join("hook-last-seen");
+    let fresh = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < 3600);
+    if !fresh {
+        let _ = std::fs::write(&path, b"");
+    }
+}
+
 /// Entry point for `cona hook <event>`. Reads the Claude hook payload from
 /// stdin and prints a decision to stdout. ALWAYS exits 0 — this is a helper for
 /// the agent, so a failure here must never break a tool call.
@@ -607,6 +625,7 @@ pub fn run(event: &str) -> Result<()> {
     if std::env::var("CONA_HOOK_DISABLE").is_ok() {
         return Ok(());
     }
+    touch_liveness();
     // Any error → do nothing silently.
     match event {
         "PreToolUse" => {

@@ -63,6 +63,16 @@ struct DoctorReport {
     install_exists: bool,
     on_path: Option<PathBuf>,
     scopes: Vec<ScopeCheck>,
+    /// Seconds since a hook last stamped `data_dir()/hook-last-seen`, if ever.
+    hook_seen_secs: Option<i64>,
+    /// Hooks are configured in some scope but the stamp is missing or >7 days
+    /// old — configured-but-silent, the failure doctor exists to catch.
+    hook_silent: bool,
+    /// Codex plugin cache (cache dir, cached version dirs) when present.
+    codex_cache: Option<(PathBuf, Vec<String>)>,
+    /// No cached version matches the running binary — the checkout was edited
+    /// or upgraded but `codex plugin add` never re-ran.
+    codex_stale: bool,
     /// (agent slug, scope, config path) for every registration found.
     mcp: Vec<(String, &'static str, PathBuf)>,
     index_files: i64,
@@ -72,6 +82,40 @@ struct DoctorReport {
     helper: Option<(PathBuf, &'static str)>,
     project_root: PathBuf,
     issues: usize,
+}
+
+/// Seconds since the hook liveness stamp (`hook.rs touch_liveness`) was last
+/// written. `None` = never fired (or the stamp predates this feature).
+fn hook_last_seen() -> Option<i64> {
+    let path = db::data_dir().ok()?.join("hook-last-seen");
+    let mtime = std::fs::metadata(&path).ok()?.modified().ok()?;
+    Some(mtime.elapsed().ok()?.as_secs() as i64)
+}
+
+/// Codex copies a `local`-source plugin into
+/// `~/.codex/plugins/cache/<marketplace>/cona/<version>/` — editing the
+/// checkout changes NOTHING until `codex plugin add` runs again, and the old
+/// hooks keep firing silently. Report what versions the cache holds so doctor
+/// can flag a cache that lags the binary.
+fn codex_plugin_cache(home: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let cache = home.join(".codex/plugins/cache");
+    for market in std::fs::read_dir(&cache).ok()?.flatten() {
+        let dir = market.path().join("cona");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut versions: Vec<String> = entries
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        if versions.is_empty() {
+            continue;
+        }
+        versions.sort();
+        return Some((dir, versions));
+    }
+    None
 }
 
 fn gather(project_root: &Path) -> Result<DoctorReport> {
@@ -114,6 +158,25 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         });
     }
 
+    // Hooks configured anywhere but never (or long ago) actually run = the
+    // exact failure this command exists to surface: the harness snapshots
+    // hooks at startup, so a stale session keeps ignoring a fresh install.
+    let hooks_configured = scopes.iter().any(|s| s.index_hook || s.read_hook);
+    let hook_seen_secs = hook_last_seen();
+    let hook_silent =
+        hooks_configured && hook_seen_secs.is_none_or(|secs| secs > 7 * 86_400);
+    if hook_silent {
+        issues += 1;
+    }
+
+    let codex_cache = codex_plugin_cache(&home);
+    let codex_stale = codex_cache
+        .as_ref()
+        .is_some_and(|(_, versions)| !versions.iter().any(|v| v == current_ver));
+    if codex_stale {
+        issues += 1;
+    }
+
     let mcp = super::agents::mcp_registrations(project_root, &home)
         .into_iter()
         .filter(|(.., on)| *on)
@@ -153,6 +216,10 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         install_exists,
         on_path,
         scopes,
+        hook_seen_secs,
+        hook_silent,
+        codex_cache,
+        codex_stale,
         mcp,
         index_files,
         index_symbols,
@@ -182,6 +249,15 @@ fn render_json(r: &DoctorReport) -> serde_json::Value {
             "config_version": s.config_ver,
             "config_current": s.skill.then_some(s.config_ver.as_deref() == Some(r.current_ver)),
         })).collect::<Vec<_>>(),
+        "hook_liveness": {
+            "last_fired_secs_ago": r.hook_seen_secs,
+            "silent": r.hook_silent,
+        },
+        "codex_plugin_cache": r.codex_cache.as_ref().map(|(dir, versions)| serde_json::json!({
+            "path": dir.display().to_string(),
+            "versions": versions,
+            "stale": r.codex_stale,
+        })),
         "mcp": r.mcp.iter().map(|(agent, scope, path)| serde_json::json!({
             "agent": agent, "scope": scope, "path": path.display().to_string(),
         })).collect::<Vec<_>>(),
@@ -270,6 +346,32 @@ fn render_text(r: &DoctorReport) {
         }
     }
 
+    println!("\n{}", ui::heading("hook liveness"));
+    let hooks_configured = r.scopes.iter().any(|s| s.index_hook || s.read_hook);
+    match (r.hook_seen_secs, hooks_configured) {
+        (Some(secs), _) if !r.hook_silent => println!(
+            "  {}",
+            ui::ok(&format!("last fired {}", db::ago(db::now() - secs)))
+        ),
+        (Some(secs), _) => println!(
+            "  {}",
+            ui::warn(&format!(
+                "hooks configured but last fired {} — restart Claude Code (it snapshots hooks at startup)",
+                db::ago(db::now() - secs)
+            ))
+        ),
+        (None, true) => println!(
+            "  {}",
+            ui::warn(
+                "hooks configured but never fired — restart Claude Code (it snapshots hooks at startup)"
+            )
+        ),
+        (None, false) => println!(
+            "  {}",
+            ui::dim("never fired (no hooks configured — `cona setup` installs them)")
+        ),
+    }
+
     // MCP is informational, never an "issue": an optional second surface (the
     // CLI + skill work without it), and most harnesses only get it once their
     // config directory exists.
@@ -285,6 +387,30 @@ fn render_text(r: &DoctorReport) {
             "  {}",
             ui::ok(&format!("{agent} ({scope}): {}", super::short_path(path)))
         );
+    }
+
+    if let Some((dir, versions)) = &r.codex_cache {
+        println!("\n{}", ui::heading("codex plugin cache"));
+        if r.codex_stale {
+            println!(
+                "  {}",
+                ui::warn(&format!(
+                    "cache holds {} but binary is v{} — run `codex plugin add` again \
+                     (Codex copies the plugin; editing the checkout changes nothing until then)",
+                    versions.join(", "),
+                    r.current_ver
+                ))
+            );
+        } else {
+            println!(
+                "  {}",
+                ui::ok(&format!(
+                    "v{} cached: {}",
+                    r.current_ver,
+                    super::short_path(dir)
+                ))
+            );
+        }
     }
 
     println!(

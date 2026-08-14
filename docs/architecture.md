@@ -193,6 +193,9 @@ src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  (append; tab-prefixed lines = seen-but-uncounted, so an advised
                  read never ALSO drags the volume streak closer). Marker dirs
                  are pruned of >7-day-old files on first touch per session.
+                 Every run() (both events) stamps data_dir()/hook-last-seen so
+                 doctor can tell configured-but-silent hooks from healthy ones;
+                 throttled to one write/hour (stat first), best-effort.
                  TWO tool shapes reach the same decision. Native Read/Grep is
                  read off tool_input. A harness whose ONLY file tool is a shell
                  (Codex sends tool_name "Bash" with command
@@ -436,7 +439,13 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                  doctor.rs cmd_doctor: binary/PATH, hooks+skill (global+project),
                           index, per-scope config freshness, helper status,
                           mcp-server registration (informational, never an issue
-                          — MCP is the optional second surface)
+                          — MCP is the optional second surface), hook liveness
+                          (mtime of data_dir()/hook-last-seen, stamped throttled
+                          at the top of hook::run — configured-but-silent >7d =
+                          issue, the "harness snapshots hooks at startup"
+                          failure), Codex plugin-cache staleness (cache versions
+                          vs binary — editing the checkout does nothing until
+                          `codex plugin add` re-runs)
 src/db.rs        SQLite: ~/.cona/projects/<fnv1a-hash>.db per project
                  (data dir overridable via CONA_DATA_DIR — tests set it,
                  real ~/.cona never sees test repos)
