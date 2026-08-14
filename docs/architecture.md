@@ -367,13 +367,14 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           mark_label = the per-agent status label, capped by
                           install::LABEL_COL (label_widths_fit_the_column) since
                           Mark::render pads to a fixed column.
-                          The six guide-only harnesses (opencode/windsurf/zed/
-                          qwen/crush/copilot) share ONE writer loop in
+                          Every harness but Claude (whose skill/hooks/subagents
+                          block stays hand-written) shares ONE writer loop in
                           cmd_agents_q driven off config_paths — the Presence tag
                           IS the write mode (Marker = splice into a file the user
-                          also owns, Exists = ours alone, deleted outright), so
-                          writer and uninstall probe cannot disagree about
-                          ownership.
+                          also owns, Exists = ours alone, deleted outright;
+                          content from guide_body, which lets Cursor carry its
+                          .mdc frontmatter), so writer and uninstall probe cannot
+                          disagree about ownership.
                           TWO per-scope path lists, deliberately separate:
                           config_paths = the guide/skill/hook targets a scope can
                           ACT on (empty at project scope for pi/opencode/zed —

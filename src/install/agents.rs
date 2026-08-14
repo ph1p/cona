@@ -425,9 +425,9 @@ impl AgentName {
     /// `Mark::render`'s `LABEL_COL` column — a longer one shifts that row's verb
     /// and path out of line with every other row (`label_widths_fit_the_column`).
     ///
-    /// Only the guide-only harnesses read this; the hand-written blocks above
-    /// label several targets each ("claude skill" / "claude hooks" / …), which
-    /// no single per-agent string could express.
+    /// Only the guide-file loop reads this; Claude's hand-written block labels
+    /// several targets ("claude skill" / "claude hooks" / …), which no single
+    /// per-agent string could express.
     pub fn mark_label(self) -> &'static str {
         match self {
             AgentName::Opencode => "opencode guide",
@@ -441,6 +441,18 @@ impl AgentName {
             AgentName::Cursor => "cursor rule",
             AgentName::Gemini => "gemini memory",
             AgentName::Pi => "pi memory",
+        }
+    }
+
+    /// The content a `Presence::Exists` guide file carries. Everyone gets
+    /// GUIDE_MD verbatim; Cursor wraps it in `.mdc` frontmatter because its
+    /// rule loader needs `alwaysApply` to inject the guide unprompted.
+    pub fn guide_body(self) -> String {
+        match self {
+            AgentName::Cursor => format!(
+                "---\ndescription: cona — token-efficient code navigation\nalwaysApply: true\n---\n\n{GUIDE_MD}"
+            ),
+            _ => GUIDE_MD.to_string(),
         }
     }
 
@@ -983,101 +995,19 @@ pub fn cmd_agents_q(
         sync_subagents(&claude_dir.join("agents"), install, &mut done)?;
     } // 'claude
 
-    // --- generic AGENTS.md (Codex, OpenCode, Amp, Jules, …) ----------------
-    if sel.want(
-        AgentName::Agents,
-        AgentName::Agents.detected(project_root, &home, global),
-    ) {
-        let agents_md = if global {
-            home.join(".codex/AGENTS.md")
-        } else {
-            project_root.join("AGENTS.md")
-        };
-        let label = if global { "codex memory" } else { "AGENTS.md" };
-        if install {
-            let ch = upsert_block_file(&agents_md, GUIDE_MD)?;
-            mark(&mut done, label, ch.verb(), &agents_md);
-        } else if remove_block_file(&agents_md)? {
-            mark(&mut done, label, "removed", &agents_md);
+    // --- guide-file harnesses ---------------------------------------------
+    // Every agent but Claude (whose skill/hooks/subagents block sits above)
+    // reads one guide file per scope, so none needs a hand-written block:
+    // `config_paths` already IS the per-scope target list, and its `Presence`
+    // tag says how the file is written — `Marker` = splice a block into a file
+    // the user also owns, `Exists` = the file is ours alone (content from
+    // `guide_body`, which lets Cursor carry its .mdc frontmatter). Driving all
+    // of them from that ONE list keeps the writer and the installed()/uninstall
+    // probe from ever disagreeing about which file an agent owns.
+    for a in AgentName::ALL {
+        if a == AgentName::Claude {
+            continue;
         }
-    }
-
-    // --- Cursor ------------------------------------------------------------
-    let cursor = if global {
-        home.join(".cursor/rules/cona.mdc")
-    } else {
-        project_root.join(".cursor/rules/cona.mdc")
-    };
-    if sel.want(
-        AgentName::Cursor,
-        AgentName::Cursor.detected(project_root, &home, global),
-    ) {
-        if install {
-            let content = format!(
-                "---\ndescription: cona — token-efficient code navigation\nalwaysApply: true\n---\n\n{GUIDE_MD}"
-            );
-            let ch = write_if_changed(&cursor, &content)?;
-            mark(&mut done, "cursor rule", ch.verb(), &cursor);
-        } else if cursor.exists() {
-            std::fs::remove_file(&cursor)?;
-            prune_empty_dirs(&cursor, scope_root);
-            mark(&mut done, "cursor rule", "removed", &cursor);
-        }
-    }
-
-    // --- Gemini CLI ----------------------------------------------------------
-    let gemini = if global {
-        home.join(".gemini/GEMINI.md")
-    } else {
-        project_root.join("GEMINI.md")
-    };
-    if sel.want(
-        AgentName::Gemini,
-        AgentName::Gemini.detected(project_root, &home, global),
-    ) {
-        if install {
-            let ch = upsert_block_file(&gemini, GUIDE_MD)?;
-            mark(&mut done, "gemini memory", ch.verb(), &gemini);
-        } else if remove_block_file(&gemini)? {
-            mark(&mut done, "gemini memory", "removed", &gemini);
-        }
-    }
-
-    // --- pi.dev --------------------------------------------------------------
-    // Project scope reads the project's own AGENTS.md, already handled by the
-    // generic Agents bucket above — only global has a path of its own
-    // (~/.pi/agent/AGENTS.md, distinct from Codex's ~/.codex/AGENTS.md).
-    if global
-        && sel.want(
-            AgentName::Pi,
-            AgentName::Pi.detected(project_root, &home, global),
-        )
-    {
-        let pi_agents = home.join(".pi/agent/AGENTS.md");
-        if install {
-            let ch = upsert_block_file(&pi_agents, GUIDE_MD)?;
-            mark(&mut done, "pi memory", ch.verb(), &pi_agents);
-        } else if remove_block_file(&pi_agents)? {
-            mark(&mut done, "pi memory", "removed", &pi_agents);
-        }
-    }
-
-    // --- guide-only harnesses -------------------------------------------------
-    // OpenCode, Windsurf, Zed, Qwen, Crush, Copilot each read one guide file per
-    // scope, so they need no hand-written block: `config_paths` already IS the
-    // per-scope target list, and its `Presence` tag says how the file is
-    // written — `Marker` = splice a block into a file the user also owns,
-    // `Exists` = the file is ours alone. Driving both from that ONE list keeps
-    // the writer and the installed()/uninstall probe from ever disagreeing
-    // about which file an agent owns.
-    for a in [
-        AgentName::Opencode,
-        AgentName::Windsurf,
-        AgentName::Zed,
-        AgentName::Qwen,
-        AgentName::Crush,
-        AgentName::Copilot,
-    ] {
         if !sel.want(a, a.detected(project_root, &home, global)) {
             continue;
         }
@@ -1087,7 +1017,7 @@ pub fn cmd_agents_q(
                 // Ours alone: a whole-file write, removed outright.
                 Presence::Exists => {
                     if install {
-                        let ch = write_if_changed(&path, GUIDE_MD)?;
+                        let ch = write_if_changed(&path, &a.guide_body())?;
                         mark(&mut done, label, ch.verb(), &path);
                     } else if path.exists() {
                         std::fs::remove_file(&path)?;
