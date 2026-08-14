@@ -1482,7 +1482,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
     // --- 3. agents — pick per scope (interactive) or take every detected ---
     // `(project_agents, global_agents)`.
     let (proj_plan, glob_plan) = if interactive {
-        match pick_agents(root, do_project, do_global)? {
+        match install::pick_agents(root, do_project, do_global)? {
             Some(p) => p,
             None => {
                 println!("{}", ui::dim("setup cancelled — nothing changed"));
@@ -1493,7 +1493,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
         // non-interactive: install every detected agent in the active scopes.
         // Nothing is removed — an unattended run never takes integrations away.
         let home = dirs::home_dir().unwrap_or_default();
-        let detected = |on: bool, global: bool| ScopePlan {
+        let detected = |on: bool, global: bool| install::ScopePlan {
             add: if on {
                 install::detected_agents(root, &home, global)
             } else {
@@ -1552,73 +1552,4 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
         ])
     );
     Ok(())
-}
-
-/// The agents to add and to remove within ONE scope, as decided by the picker.
-#[derive(Default)]
-struct ScopePlan {
-    add: Vec<install::AgentName>,
-    remove: Vec<install::AgentName>,
-}
-
-/// The one interactive agent picker: a single checklist spanning both scopes
-/// (PROJECT + HOME sections). A row starts checked when the agent is already
-/// installed in that scope, else when it is merely detected on disk (the
-/// first-run suggestion). Unchecking an installed agent is a REMOVAL — the
-/// picker doubles as the manage surface, so setup must be able to take
-/// integrations away, not only add them. Returns the `(project, home)` plans,
-/// or `None` if cancelled.
-type ScopedPicks = (ScopePlan, ScopePlan);
-fn pick_agents(root: &Path, do_project: bool, do_global: bool) -> Result<Option<ScopedPicks>> {
-    let home = dirs::home_dir().unwrap_or_default();
-
-    // `items[ordinal]` = the (agent, global, was_installed) that item row maps
-    // back to; the ordinal is exactly what `multiselect` hands back for
-    // checked rows. Descriptions carry the row's current state — a pre-checked
-    // box alone can't tell "already installed (uncheck = remove)" apart from
-    // "detected, suggested".
-    let mut rows: Vec<ui::Row> = Vec::new();
-    let mut items: Vec<(install::AgentName, bool, bool)> = Vec::new();
-    for (global, header) in [
-        (false, "PROJECT — this repo"),
-        (true, "HOME — global configs (~/.claude, ~/.codex, …)"),
-    ] {
-        if (global && !do_global) || (!global && !do_project) {
-            continue;
-        }
-        let scoped = install::agents_in_scope(root, &home, global);
-        if scoped.is_empty() {
-            continue;
-        }
-        if !rows.is_empty() {
-            rows.push(ui::Row::Header("")); // spacer between sections
-        }
-        rows.push(ui::Row::Header(header));
-        for a in scoped {
-            let was = a.installed(root, &home, global);
-            let on = was || a.detected(root, &home, global);
-            rows.push(ui::Row::Item(a.slug(), a.state_desc(was, on).into(), on));
-            items.push((a, global, was));
-        }
-    }
-
-    match ui::multiselect("configure cona agents", &rows)? {
-        None => Ok(None),
-        Some(picked) => {
-            // Diff checked-now against installed-before: newly on → add,
-            // newly off → remove. Still-on agents are re-installed too —
-            // idempotent, and it refreshes marker blocks after a version bump.
-            let now_on: std::collections::HashSet<usize> = picked.into_iter().collect();
-            let (mut proj, mut glob) = (ScopePlan::default(), ScopePlan::default());
-            for (i, &(agent, global, was)) in items.iter().enumerate() {
-                let plan = if global { &mut glob } else { &mut proj };
-                if now_on.contains(&i) {
-                    plan.add.push(agent);
-                } else if was {
-                    plan.remove.push(agent);
-                }
-            }
-            Ok(Some((proj, glob)))
-        }
-    }
 }

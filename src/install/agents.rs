@@ -673,55 +673,97 @@ pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
 /// checked ones and uninstalls the newly unchecked ones — the one-screen way to
 /// add or remove any single agent. TTY-only; callers gate on that.
 pub fn cmd_agents_interactive(project_root: &Path, global: bool) -> Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
-    // Only agents that have a target in this scope are actionable.
-    let choices = agents_in_scope(project_root, &home, global);
-    let before: Vec<bool> = choices
-        .iter()
-        .map(|a| a.installed(project_root, &home, global))
-        .collect();
-    let rows: Vec<ui::Row> = choices
-        .iter()
-        .zip(&before)
-        .map(|(a, on)| ui::Row::Item(a.slug(), a.state_desc(*on, *on).into(), *on))
-        .collect();
-
-    let title = if global {
-        "configure agents (home configs)"
-    } else {
-        "configure agents (this project)"
+    // One scope of the same checklist `cona setup` shows — same pre-checks
+    // (installed OR detected), same diff, same refresh-on-still-checked.
+    let Some((proj, glob)) = pick_agents(project_root, !global, global)? else {
+        println!("{}", ui::dim("cancelled — nothing changed"));
+        return Ok(());
     };
-    let picked = match ui::multiselect(title, &rows)? {
-        Some(p) => p,
-        None => {
-            println!("{}", ui::dim("cancelled — nothing changed"));
-            return Ok(());
-        }
-    };
-    // `picked` = ordinals of the now-checked items (1:1 with `choices`). Diff
-    // against `before`: newly on → add, newly off → remove, unchanged → skip.
-    let now_on: std::collections::HashSet<usize> = picked.into_iter().collect();
-    let mut to_add = Vec::new();
-    let mut to_remove = Vec::new();
-    for (i, (&a, &was)) in choices.iter().zip(&before).enumerate() {
-        match (was, now_on.contains(&i)) {
-            (false, true) => to_add.push(a),
-            (true, false) => to_remove.push(a),
-            _ => {}
-        }
-    }
-
-    if to_add.is_empty() && to_remove.is_empty() {
+    let plan = if global { glob } else { proj };
+    if plan.add.is_empty() && plan.remove.is_empty() {
         println!("{}", ui::dim("no changes"));
         return Ok(());
     }
-    if !to_remove.is_empty() {
-        cmd_agents(project_root, "uninstall", &to_remove, false, global)?;
+    if !plan.remove.is_empty() {
+        cmd_agents(project_root, "uninstall", &plan.remove, false, global)?;
     }
-    if !to_add.is_empty() {
-        cmd_agents(project_root, "install", &to_add, false, global)?;
+    if !plan.add.is_empty() {
+        cmd_agents(project_root, "install", &plan.add, false, global)?;
     }
     Ok(())
+}
+
+/// The agents to add and to remove within ONE scope, as decided by the picker.
+#[derive(Default)]
+pub struct ScopePlan {
+    pub add: Vec<AgentName>,
+    pub remove: Vec<AgentName>,
+}
+
+/// ONE agent checklist across the requested scopes, diffed into per-scope
+/// plans. THE interactive manage surface — `cona setup` (both scopes) and
+/// `cona agents` (one scope) share it, so the two can never drift in
+/// pre-check policy or diff semantics. A row starts checked when the agent is
+/// already installed in that scope, else when it is merely detected on disk
+/// (the first-run suggestion). Unchecking an installed agent is a REMOVAL —
+/// the picker doubles as the manage surface, so it must be able to take
+/// integrations away, not only add them. `None` = user cancelled.
+pub fn pick_agents(
+    root: &Path,
+    do_project: bool,
+    do_global: bool,
+) -> Result<Option<(ScopePlan, ScopePlan)>> {
+    let home = dirs::home_dir().unwrap_or_default();
+
+    // `items[ordinal]` = the (agent, global, was_installed) that item row maps
+    // back to; the ordinal is exactly what `multiselect` hands back for
+    // checked rows. Descriptions carry the row's current state — a pre-checked
+    // box alone can't tell "already installed (uncheck = remove)" apart from
+    // "detected, suggested".
+    let mut rows: Vec<ui::Row> = Vec::new();
+    let mut items: Vec<(AgentName, bool, bool)> = Vec::new();
+    for (global, header) in [
+        (false, "PROJECT — this repo"),
+        (true, "HOME — global configs (~/.claude, ~/.codex, …)"),
+    ] {
+        if (global && !do_global) || (!global && !do_project) {
+            continue;
+        }
+        let scoped = agents_in_scope(root, &home, global);
+        if scoped.is_empty() {
+            continue;
+        }
+        if !rows.is_empty() {
+            rows.push(ui::Row::Header("")); // spacer between sections
+        }
+        rows.push(ui::Row::Header(header));
+        for a in scoped {
+            let was = a.installed(root, &home, global);
+            let on = was || a.detected(root, &home, global);
+            rows.push(ui::Row::Item(a.slug(), a.state_desc(was, on).into(), on));
+            items.push((a, global, was));
+        }
+    }
+
+    match ui::multiselect("configure cona agents", &rows)? {
+        None => Ok(None),
+        Some(picked) => {
+            // Diff checked-now against installed-before: newly on → add,
+            // newly off → remove. Still-on agents are re-installed too —
+            // idempotent, and it refreshes marker blocks after a version bump.
+            let now_on: std::collections::HashSet<usize> = picked.into_iter().collect();
+            let (mut proj, mut glob) = (ScopePlan::default(), ScopePlan::default());
+            for (i, &(agent, global, was)) in items.iter().enumerate() {
+                let plan = if global { &mut glob } else { &mut proj };
+                if now_on.contains(&i) {
+                    plan.add.push(agent);
+                } else if was {
+                    plan.remove.push(agent);
+                }
+            }
+            Ok(Some((proj, glob)))
+        }
+    }
 }
 
 /// How deep a `.claude/agents` tree is walked. Shipped collections nest one
