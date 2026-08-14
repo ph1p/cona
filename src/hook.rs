@@ -694,6 +694,33 @@ fn note_read(root: &Path, rel: &str, session: &str) -> (bool, i64) {
     (seen, count + 1)
 }
 
+/// Record that a full read of `rel` was redirected (denied) this session and
+/// report whether it already had been. A SECOND full-read attempt after a
+/// block means the agent weighed the pointers and still wants the file —
+/// denying again with the identical message is a loop, not guidance, so the
+/// caller lets that attempt through. Best-effort like every marker: no data
+/// dir → "not denied yet", which degrades to the pre-existing always-deny.
+fn note_denied(root: &Path, rel: &str, session: &str) -> bool {
+    let Some(log) = session_marker_path(root, "denied", session) else {
+        return false;
+    };
+    let seen = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .any(|l| l == rel);
+    if !seen {
+        if let Some(parent) = log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .and_then(|mut f| f.write_all(format!("{rel}\n").as_bytes()));
+    }
+    seen
+}
+
 /// Build a non-blocking read advisory: the caller's specific observation, then
 /// the one shared "here's the cheaper move" tail. Kept in one place so the three
 /// advisory triggers (mid-size, re-read, volume streak) cannot drift apart.
@@ -924,6 +951,31 @@ fn try_read(
                     let _ = indexer::reindex_file(&root, conn, &rel);
                 }
             }
+            // A second full-read attempt after a block yields: the loop where
+            // following "read it in chunks" (or plain stubbornness) meets the
+            // same wall with the same words forever must not exist.
+            if note_denied(&root, &rel, &session_id(v)) {
+                let lead = format!(
+                    "You retried the full read of {rel} ({size_desc}) after a \
+                     redirect, so it went through"
+                );
+                return allow_with_reason(&root, "hook:read-advise", &rel, &advisory(&lead, &rel));
+            }
+            // Only promise a chunked escape we can honour: a range is partial
+            // when it ends BEFORE the last line, so name that bound concretely
+            // when we measured it (an unmeasured `lines` is a floor, not a count).
+            let chunk_hint = if measured {
+                let mid = (lines / 2).max(1);
+                format!(
+                    "read it in ranges that stop short of line {lines} — Read \
+                     offset/limit, or `sed -n '1,{mid}p'` then `sed -n '{},$p'`",
+                    mid + 1
+                )
+            } else {
+                "read it in bounded ranges (Read offset/limit, or `sed -n` \
+                 ranges that stop short of the end)"
+                    .to_string()
+            };
             let reason = format!(
                 "{rel} is {size_desc}. cona can take you straight to \
                  the right spot for a fraction of the tokens: `cona outline {rel}` lists \
@@ -931,8 +983,7 @@ fn try_read(
                  those lines. To understand a symbol (its body + what it calls + who calls it) \
                  in ONE call, prefer `cona context <Symbol>`; before changing one, \
                  `cona impact <Symbol>` shows its blast radius. (Also `cona find <Name>` \
-                 / `cona refs <Name>`.) If you genuinely need the whole file, re-issue the \
-                 read in explicit chunks (Read offset/limit, or `sed -n` over line ranges)."
+                 / `cona refs <Name>`.) If you genuinely need the whole file, {chunk_hint}."
             );
             deny(&root, "hook:read-block", &rel, &reason)
         }
