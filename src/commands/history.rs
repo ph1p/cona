@@ -53,9 +53,12 @@ pub fn cmd_hot(
     let mut stmt = conn.prepare("SELECT path FROM files")?;
     let indexed: HashSet<String> = stmt.query_map([], |r| r.get(0))?.flatten().collect();
     let commits = gitmap::log_numstat(root, since)?;
+    // churn() returns rank-sorted rows — keep one past the limit so clip()
+    // can tell a full page from a clipped one, drop the rest unmaterialized
     let mut churn: Vec<_> = gitmap::churn(&commits)
         .into_iter()
         .filter(|(p, ..)| indexed.contains(p))
+        .take(limit.saturating_add(1))
         .collect();
     let truncated = clip(&mut churn, limit);
     if json {
@@ -101,7 +104,12 @@ pub fn cmd_coupling(
     // full history (not `-- <target>`): co_change needs each commit's complete file list
     let commits = gitmap::log_numstat(root, since)?;
     let (total, riders) = gitmap::co_change(&commits, &target);
-    let mut top: Vec<_> = riders.into_iter().filter(|(_, n)| *n >= 2).collect();
+    // riders arrive rank-sorted — same one-past-the-limit trick as cmd_hot
+    let mut top: Vec<_> = riders
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .take(limit.saturating_add(1))
+        .collect();
     let truncated = clip(&mut top, limit);
     if json {
         let items: Vec<_> = top

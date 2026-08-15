@@ -65,6 +65,8 @@ struct DoctorReport {
     scopes: Vec<ScopeCheck>,
     /// Seconds since a hook last stamped `data_dir()/hook-last-seen`, if ever.
     hook_seen_secs: Option<i64>,
+    /// Any hook registered in any scope — the premise of `hook_silent`.
+    hooks_configured: bool,
     /// Hooks are configured in some scope but the stamp is missing or >7 days
     /// old — configured-but-silent, the failure doctor exists to catch.
     hook_silent: bool,
@@ -87,9 +89,8 @@ struct DoctorReport {
 /// Seconds since the hook liveness stamp (`hook.rs touch_liveness`) was last
 /// written. `None` = never fired (or the stamp predates this feature).
 fn hook_last_seen() -> Option<i64> {
-    let path = db::data_dir().ok()?.join("hook-last-seen");
-    let mtime = std::fs::metadata(&path).ok()?.modified().ok()?;
-    Some(mtime.elapsed().ok()?.as_secs() as i64)
+    let path = db::data_dir().ok()?.join(crate::hook::LIVENESS_FILE);
+    Some(crate::hook::file_age_secs(&path)? as i64)
 }
 
 /// Codex copies a `local`-source plugin into
@@ -171,7 +172,8 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
     // hooks at startup, so a stale session keeps ignoring a fresh install.
     let hooks_configured = scopes.iter().any(|s| s.index_hook || s.read_hook);
     let hook_seen_secs = hook_last_seen();
-    let hook_silent = hooks_configured && hook_seen_secs.is_none_or(|secs| secs > 7 * 86_400);
+    let hook_silent = hooks_configured
+        && hook_seen_secs.is_none_or(|secs| secs > crate::hook::MARKER_MAX_AGE_SECS as i64);
     if hook_silent {
         issues += 1;
     }
@@ -224,6 +226,7 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         on_path,
         scopes,
         hook_seen_secs,
+        hooks_configured,
         hook_silent,
         codex_cache,
         codex_stale,
@@ -357,8 +360,7 @@ fn render_text(r: &DoctorReport) {
     }
 
     println!("\n{}", ui::heading("hook liveness"));
-    let hooks_configured = r.scopes.iter().any(|s| s.index_hook || s.read_hook);
-    match (r.hook_seen_secs, hooks_configured) {
+    match (r.hook_seen_secs, r.hooks_configured) {
         (Some(secs), _) if !r.hook_silent => println!(
             "  {}",
             ui::ok(&format!("last fired {}", db::ago(db::now() - secs)))

@@ -33,13 +33,16 @@ pub(crate) const ENCLOSING_SYMBOL_SQL: &str =
      WHERE f.path = ?1 AND s.start_line <= ?2 AND s.end_line >= ?2
      ORDER BY s.start_line DESC LIMIT 1";
 
+/// Shared remedy for both read-only dead ends (missing index / empty index).
+const READ_ONLY_INDEX_HINT: &str = "in read-only mode — run `cona index` from a \
+     writable environment first (if one exists elsewhere, point CONA_DATA_DIR \
+     at the directory that holds it)";
+
 pub fn open_indexed(root: &Path) -> Result<Connection> {
     let conn = if db::is_read_only() {
         db::open_existing_project_db(root).map_err(|_| {
             anyhow!(
-                "no existing index for {} in read-only mode — run `cona index` from a \
-                 writable environment first (if one exists elsewhere, point CONA_DATA_DIR \
-                 at the directory that holds it)",
+                "no existing index for {} {READ_ONLY_INDEX_HINT}",
                 root.display()
             )
         })?
@@ -50,9 +53,7 @@ pub fn open_indexed(root: &Path) -> Result<Connection> {
     if n == 0 {
         if db::is_read_only() {
             bail!(
-                "the index for {} is empty in read-only mode — run `cona index` from a \
-                 writable environment first (if one exists elsewhere, point CONA_DATA_DIR \
-                 at the directory that holds it)",
+                "the index for {} is empty {READ_ONLY_INDEX_HINT}",
                 root.display()
             );
         }

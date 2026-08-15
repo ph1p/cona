@@ -515,6 +515,7 @@ fn classify_sed(args: &[String]) -> ShellIntent {
 /// Output-bounding flags (`-l`, `-c`, context windows) keep it a `Grep` but
 /// mark it `soft` — the search is still broad, only its presentation isn't.
 fn classify_grep(args: &[String]) -> ShellIntent {
+    let all_digits = |v: &str| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit());
     let mut positional: Vec<&String> = Vec::new();
     let mut soft = false;
     let mut iter = args.iter();
@@ -537,11 +538,9 @@ fn classify_grep(args: &[String]) -> ShellIntent {
         // Context flags carrying their value: `-C3`, `--context=3`.
         let ctx_attached = (plain.len() > 1
             && ['A', 'B', 'C'].iter().any(|c| plain.starts_with(*c))
-            && plain[1..].chars().all(|c| c.is_ascii_digit()))
+            && all_digits(&plain[1..]))
             || plain.split_once('=').is_some_and(|(name, v)| {
-                matches!(name, "context" | "after-context" | "before-context")
-                    && !v.is_empty()
-                    && v.chars().all(|c| c.is_ascii_digit())
+                matches!(name, "context" | "after-context" | "before-context") && all_digits(v)
             });
         if ctx_attached {
             soft = true;
@@ -554,7 +553,7 @@ fn classify_grep(args: &[String]) -> ShellIntent {
             "A" | "B" | "C" | "context" | "after-context" | "before-context"
         ) {
             match iter.next() {
-                Some(v) if !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()) => {
+                Some(v) if all_digits(v) => {
                     soft = true;
                     continue;
                 }
@@ -607,15 +606,28 @@ fn read_streak_every() -> i64 {
 /// so the hot path normally costs one stat. Best-effort: never fails the hook.
 fn touch_liveness() {
     let Ok(dir) = db::data_dir() else { return };
-    let path = dir.join("hook-last-seen");
-    let fresh = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age.as_secs() < 3600);
+    let path = dir.join(LIVENESS_FILE);
+    let fresh = file_age_secs(&path).is_some_and(|age| age < 3600);
     if !fresh {
         let _ = std::fs::write(&path, b"");
     }
+}
+
+/// Filename of the liveness stamp — `cona doctor` reads the same file.
+pub const LIVENESS_FILE: &str = "hook-last-seen";
+
+/// A session marker (and the liveness stamp) older than this is certainly
+/// dead: the per-day fallback key rolls daily, real session ids within a week
+/// are plausibly live. Shared with `cona doctor`'s silence threshold.
+pub const MARKER_MAX_AGE_SECS: u64 = 7 * 86_400;
+
+/// Seconds since `path` was last written, None when it is missing/unreadable.
+pub fn file_age_secs(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map(|age| age.as_secs())
 }
 
 /// Entry point for `cona hook <event>`. Reads the Claude hook payload from
@@ -764,11 +776,7 @@ fn peek_reads(root: &Path, rel: &str, session: &str) -> (bool, i64) {
         return (false, 0);
     };
     if !log.exists() {
-        // First touch of this session: prune markers whose sessions are over.
-        if let Some(parent) = log.parent() {
-            let _ = std::fs::create_dir_all(parent);
-            prune_marker_dir(parent);
-        }
+        prepare_marker(&log);
         return (false, 0);
     }
     let (mut seen, mut count) = (false, 0i64);
@@ -787,17 +795,10 @@ fn record_read(root: &Path, rel: &str, session: &str, counted: bool) {
     let Some(log) = session_marker_path(root, "reads", session) else {
         return;
     };
-    if let Some(parent) = log.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    prepare_marker(&log);
     let prefix = if counted { "" } else { "\t" };
-    // Append rather than rewrite: the log grows for the whole session, and a
-    // failed write only costs us this call's bookkeeping.
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)
-        .and_then(|mut f| f.write_all(format!("{prefix}{rel}\n").as_bytes()));
+    // Append rather than rewrite: the log grows for the whole session.
+    append_marker_line(&log, &format!("{prefix}{rel}"));
 }
 
 /// Record that a full read of `rel` was redirected (denied) this session and
@@ -815,17 +816,8 @@ fn note_denied(root: &Path, rel: &str, session: &str) -> bool {
         .lines()
         .any(|l| l == rel);
     if !seen {
-        if let Some(parent) = log.parent() {
-            let _ = std::fs::create_dir_all(parent);
-            if !log.exists() {
-                prune_marker_dir(parent);
-            }
-        }
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log)
-            .and_then(|mut f| f.write_all(format!("{rel}\n").as_bytes()));
+        prepare_marker(&log);
+        append_marker_line(&log, rel);
     }
     seen
 }
@@ -1248,12 +1240,7 @@ fn nudge_due(root: &Path, session: &str) -> bool {
     let Some(marker) = session_marker_path(root, "nudged", session) else {
         return true; // can't track → don't suppress the (useful) first hint
     };
-    if !marker.exists() {
-        if let Some(parent) = marker.parent() {
-            let _ = std::fs::create_dir_all(parent);
-            prune_marker_dir(parent);
-        }
-    }
+    prepare_marker(&marker);
     let count = std::fs::read_to_string(&marker)
         .ok()
         .and_then(|s| s.trim().parse::<i64>().ok())
@@ -1273,21 +1260,37 @@ fn nudge_due(root: &Path, session: &str) -> bool {
 /// week are plausibly live). Called only when a NEW session touches the dir,
 /// so steady-state hook calls pay no directory scan. Best-effort throughout.
 fn prune_marker_dir(dir: &Path) {
-    const WEEK: u64 = 7 * 86_400;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for e in entries.flatten() {
-        let stale = e
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age.as_secs() > WEEK);
-        if stale {
+        if file_age_secs(&e.path()).is_some_and(|age| age > MARKER_MAX_AGE_SECS) {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// First touch of a session's marker file: create its directory and prune
+/// markers whose sessions are over. Steady-state calls (the file exists) cost
+/// one stat, so hot hook paths never pay the directory scan.
+fn prepare_marker(log: &Path) {
+    if log.exists() {
+        return;
+    }
+    if let Some(parent) = log.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        prune_marker_dir(parent);
+    }
+}
+
+/// Append one line to a marker log — every marker write is best-effort
+/// (a failed write only costs this call's bookkeeping, never the tool call).
+fn append_marker_line(log: &Path, line: &str) {
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
 }
 
 #[cfg(test)]

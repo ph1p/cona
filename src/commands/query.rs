@@ -379,7 +379,8 @@ pub fn cmd_find(
     let sql_limit = if pf.is_scoped() {
         limit.saturating_mul(20).clamp(1000, 5000)
     } else {
-        limit
+        // one extra row so clip() can tell "exactly limit" from "more exist"
+        limit.saturating_add(1)
     } as i64;
     let mut stmt = conn.prepare(&sql)?;
     let mapper =
@@ -403,11 +404,9 @@ pub fn cmd_find(
             .flatten()
             .collect()
     };
-    let mut truncated = false;
     if pf.is_scoped() {
         let had_rows = !rows.is_empty();
         rows.retain(|(p, ..)| pf.ok(p));
-        truncated = clip(&mut rows, limit);
         // Distinguish "name exists, just not here" from "no such name" — the
         // fuzzy fallback would misleadingly answer the second question.
         if rows.is_empty() && had_rows {
@@ -423,6 +422,7 @@ pub fn cmd_find(
     if rows.is_empty() {
         return cmd_find_fuzzy(conn, name, kind, json);
     }
+    let truncated = clip(&mut rows, limit);
     // Baseline: sum each hit file's size once (rows are rank-ordered, not
     // path-ordered, so dedup with a set).
     let mut seen: HashSet<&str> = HashSet::new();
@@ -559,17 +559,18 @@ pub fn cmd_show(
     // pools (or big bodies) still raise `locate_symbol`'s guided error via
     // `show_one` — printing them all would be the token sink this tool exists
     // to avoid. `locate_all` only reports >1 when locate erred on ambiguity.
-    let auto_all = !all
-        && super::locate_all(conn, symbol, kind)
-            .map(|cands| {
-                cands.len() > 1
-                    && cands.len() <= defaults::AUTO_ALL_MAX_CANDIDATES
-                    && cands.iter().map(|c| c.2 - c.1 + 1).sum::<i64>()
-                        <= defaults::AUTO_ALL_MAX_LINES
-            })
-            .unwrap_or(false);
-    if all || auto_all {
-        let cands = super::locate_all(conn, symbol, kind)?;
+    let cands = if all {
+        Some(super::locate_all(conn, symbol, kind)?)
+    } else {
+        // a lookup error here falls through to show_one's guided error
+        super::locate_all(conn, symbol, kind).ok().filter(|cands| {
+            cands.len() > 1
+                && cands.len() <= defaults::AUTO_ALL_MAX_CANDIDATES
+                && cands.iter().map(|c| c.2 - c.1 + 1).sum::<i64>() <= defaults::AUTO_ALL_MAX_LINES
+        })
+    };
+    let auto_all = !all && cands.is_some();
+    if let Some(cands) = cands {
         if cands.len() > 1 {
             // Render each candidate from the row locate_all already resolved —
             // re-resolving by `file:Name` would re-hit the ambiguity whenever
@@ -805,7 +806,7 @@ pub fn cmd_refs(
         out.push_str(&format!("  {l}: {t}\n"));
     }
     if truncated {
-        out.push_str("… truncated (raise --limit)\n");
+        out.push_str(LIMIT_TRAILER);
     }
     if hits.is_empty() {
         // An empty result is a dead end unless it names the next move: in-scope
@@ -1335,7 +1336,7 @@ pub fn cmd_grep(
         }
     }
     if truncated {
-        out.push_str("… truncated (raise --limit)\n");
+        out.push_str(LIMIT_TRAILER);
     }
     if hits.is_empty() {
         out.push_str(&format!("no matches for '{pattern}'"));
