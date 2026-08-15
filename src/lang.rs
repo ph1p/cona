@@ -805,8 +805,59 @@ fn swift_class_label(node: Node, src: &str) -> &'static str {
 }
 
 fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<Sym>) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
+    use std::rc::Rc;
+    // Explicit worklist, NOT recursion: recursion depth would equal AST depth,
+    // and generated/minified files nest arbitrarily deep — a recursive walk
+    // overflows the parse threads' stack and aborts the whole process.
+    enum Job<'t> {
+        /// Classify this node as a child of `parent` (the loop body below).
+        Visit(Node<'t>, Option<Rc<str>>),
+        /// Emit a js/ts function-valued binding, then descend into its value.
+        FnDecl {
+            name: String,
+            site: Node<'t>,
+            value: Node<'t>,
+            label: &'static str,
+            parent: Option<Rc<str>>,
+        },
+    }
+    // Pre-order = pop order, so children go on the stack reversed.
+    fn push_children<'t>(stack: &mut Vec<Job<'t>>, node: Node<'t>, parent: Option<Rc<str>>) {
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push(Job::Visit(child, parent.clone()));
+        }
+    }
+    let mut stack: Vec<Job> = Vec::new();
+    push_children(&mut stack, node, parent.map(Rc::from));
+    while let Some(job) = stack.pop() {
+        let (child, parent) = match job {
+            Job::FnDecl {
+                name,
+                site,
+                value,
+                label,
+                parent,
+            } => {
+                let qualified = match parent.as_deref() {
+                    Some(p) => format!("{}.{}", p, name),
+                    None => name.clone(),
+                };
+                out.push(Sym {
+                    name,
+                    qualified: qualified.clone(),
+                    kind: label,
+                    parent: parent.as_deref().map(|s| s.to_string()),
+                    start_line: site.start_position().row + 1,
+                    end_line: site.end_position().row + 1,
+                    signature: first_line_sig(site, src),
+                });
+                push_children(&mut stack, value, Some(Rc::from(qualified)));
+                continue;
+            }
+            Job::Visit(child, parent) => (child, parent),
+        };
         // js/ts: function-valued bindings — the declarator, not a classifiable
         // statement kind, carries the symbol
         if matches!(lang, "javascript" | "typescript" | "tsx") {
@@ -827,32 +878,25 @@ fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<S
                         .filter(|d| d.kind() == "variable_declarator")
                         .collect()
                 };
-                let mut emitted = false;
+                let label = if child.kind().ends_with("_definition") {
+                    "method"
+                } else {
+                    "fn"
+                };
+                let mut jobs = Vec::new();
                 for decl in decls {
                     if let Some((name, value)) = fn_valued_declarator(decl, src) {
-                        let label = if child.kind().ends_with("_definition") {
-                            "method"
-                        } else {
-                            "fn"
-                        };
-                        let qualified = match parent {
-                            Some(p) => format!("{}.{}", p, name),
-                            None => name.clone(),
-                        };
-                        out.push(Sym {
+                        jobs.push(Job::FnDecl {
                             name,
-                            qualified: qualified.clone(),
-                            kind: label,
-                            parent: parent.map(|s| s.to_string()),
-                            start_line: decl.start_position().row + 1,
-                            end_line: decl.end_position().row + 1,
-                            signature: first_line_sig(decl, src),
+                            site: decl,
+                            value,
+                            label,
+                            parent: parent.clone(),
                         });
-                        walk(value, src, lang, Some(&qualified), out);
-                        emitted = true;
                     }
                 }
-                if emitted {
+                if !jobs.is_empty() {
+                    stack.extend(jobs.into_iter().rev());
                     continue;
                 }
             }
@@ -864,11 +908,11 @@ fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<S
                 label
             };
             if needs_body(child.kind()) && child.child_by_field_name("body").is_none() {
-                walk(child, src, lang, parent, out);
+                push_children(&mut stack, child, parent);
                 continue;
             }
             if let Some(name) = node_name(child, src, name_field, lang) {
-                let qualified = match parent {
+                let qualified = match parent.as_deref() {
                     Some(p) => format!("{}.{}", p, name),
                     None => name.clone(),
                 };
@@ -876,7 +920,7 @@ fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<S
                     name: name.clone(),
                     qualified: qualified.clone(),
                     kind: label,
-                    parent: parent.map(|s| s.to_string()),
+                    parent: parent.as_deref().map(|s| s.to_string()),
                     start_line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
                     signature: first_line_sig(child, src),
@@ -884,11 +928,11 @@ fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<S
                 // Descend into every named symbol to catch nested defs
                 // (methods in a class, closures with inner fns, …). Containers
                 // and leaf defs are handled identically here.
-                walk(child, src, lang, Some(&qualified), out);
+                push_children(&mut stack, child, Some(Rc::from(qualified)));
                 continue;
             }
         }
-        walk(child, src, lang, parent, out);
+        push_children(&mut stack, child, parent);
     }
 }
 
@@ -1301,7 +1345,37 @@ fn collect_errors(node: Node, out: &mut Vec<usize>) {
 
 #[cfg(test)]
 mod tests {
-    use super::param_count;
+    use super::{extract_symbols, param_count};
+
+    #[test]
+    fn deeply_nested_source_does_not_overflow_the_stack() {
+        // Minified/generated files nest arbitrarily deep; a recursive walk
+        // overflowed the parse threads' stack and aborted the whole process.
+        let depth = 200_000;
+        let src = format!(
+            "let x = {}1{};\nfunction real() {{}}\n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+        let syms = extract_symbols("javascript", &src).unwrap();
+        assert!(syms.iter().any(|s| s.name == "real"));
+    }
+
+    #[test]
+    fn nested_js_bindings_keep_preorder_and_qualified_names() {
+        // The worklist rewrite must emit the same symbols in the same order
+        // as the old recursion: parent before child, child qualified.
+        let src = "const outer = () => {\n  const inner = () => {};\n};\nconst after = () => {};\n";
+        let syms = extract_symbols("javascript", &src).unwrap();
+        let got: Vec<(&str, &str)> = syms
+            .iter()
+            .map(|s| (s.qualified.as_str(), s.kind))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("outer", "fn"), ("outer.inner", "fn"), ("after", "fn")]
+        );
+    }
 
     #[test]
     fn param_count_basic_and_langs() {
