@@ -83,6 +83,14 @@ const DEFAULT_ADVISE_MIN_LINES: i64 = 120;
 /// 0 disables.
 const DEFAULT_READ_STREAK: i64 = 4;
 
+/// Default number of suppressed nudge-eligible events (large reads / broad
+/// greps in an UNINDEXED repo) between repeats of the "this repo isn't
+/// indexed" hint. The first one fires immediately; without a repeat, a hint
+/// dropped early in a long session is gone for good even though `cona index`
+/// stays a one-second fix the whole time. Override with `CONA_NUDGE_EVERY`;
+/// 0 = fire once per session and never repeat.
+const DEFAULT_NUDGE_EVERY: i64 = 10;
+
 /// Default cadence for the periodic re-nudge: OFF. Repeating the same guidance
 /// across SessionStart, the agent guide and a timer is over-constraint for
 /// current models — they hold the habit from one statement, and the PreToolUse
@@ -182,10 +190,15 @@ pub struct GrepFacts {
     pub indexed_project: bool,
     /// The search root is inside a git repo (indexable, if not yet indexed).
     pub in_repo: bool,
+    /// The search is still broad but its OUTPUT is bounded (file list, counts,
+    /// context windows) — the agent already reached for restraint, so it gets
+    /// a hint instead of a block.
+    pub soft: bool,
 }
 
 /// Decide what to do with a candidate `Grep`.
 /// - broad identifier search over an indexed project → Redirect
+///   (Advise instead when the output is already bounded — `soft`)
 /// - broad identifier search over an UNINDEXED git repo → Nudge
 /// - surgical / regex / non-repo → Allow
 pub fn decide_grep(f: &GrepFacts) -> Decision {
@@ -193,7 +206,11 @@ pub fn decide_grep(f: &GrepFacts) -> Decision {
         return Decision::Allow;
     }
     if f.indexed_project {
-        Decision::Redirect
+        if f.soft {
+            Decision::Advise
+        } else {
+            Decision::Redirect
+        }
     } else if f.in_repo {
         Decision::Nudge
     } else {
@@ -223,10 +240,13 @@ pub enum ShellIntent {
     /// shell-side equivalent of Read with offset/limit. Never intercepted, but
     /// distinguished from `Other` so the intent is explicit.
     PartialRead,
-    /// A broad content search for `pattern` under an optional path.
+    /// A broad content search for `pattern` under an optional path. `soft`
+    /// marks a search whose output is already bounded (`-l`, `-c`, context
+    /// flags) — still broad, but the redirect softens to an advisory.
     Grep {
         pattern: String,
         path: Option<String>,
+        soft: bool,
     },
     /// Not a read or a search we recognise.
     Other,
@@ -490,25 +510,58 @@ fn classify_sed(args: &[String]) -> ShellIntent {
     }
 }
 
-/// `rg PATTERN [PATH]` → the grep half of `classify_shell`. Any narrowing flag
-/// (`-g`, `-t`, `--files`, `-m`, …) makes it surgical and therefore `Other`;
-/// only a bare broad search is a candidate for the semantic redirect.
+/// `rg PATTERN [PATH]` → the grep half of `classify_shell`. A narrowing flag
+/// (`-g`, `-t`, `--files`, `-m`, …) makes it surgical and therefore `Other`.
+/// Output-bounding flags (`-l`, `-c`, context windows) keep it a `Grep` but
+/// mark it `soft` — the search is still broad, only its presentation isn't.
 fn classify_grep(args: &[String]) -> ShellIntent {
     let mut positional: Vec<&String> = Vec::new();
-    for a in args {
-        if let Some(flag) = a.strip_prefix('-') {
-            // `-r`/`-R`/`-n`/`-i` and friends only affect presentation or
-            // recursion; anything else narrows the search or changes its shape
-            // (a file list, a count, a context window) and is not ours.
-            let plain = flag.trim_start_matches('-');
-            let harmless = matches!(plain, "r" | "R" | "n" | "i" | "rn" | "nr" | "ri" | "ir")
-                || plain.is_empty();
-            if !harmless {
-                return ShellIntent::Other;
-            }
-        } else {
+    let mut soft = false;
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        let Some(flag) = a.strip_prefix('-') else {
             positional.push(a);
+            continue;
+        };
+        // `-r`/`-R`/`-n`/`-i` and friends only affect presentation or
+        // recursion; anything else narrows the search or changes its shape.
+        let plain = flag.trim_start_matches('-');
+        if matches!(plain, "r" | "R" | "n" | "i" | "rn" | "nr" | "ri" | "ir") || plain.is_empty() {
+            continue;
         }
+        // Output-bounding flags: same broad search, bounded presentation.
+        if matches!(plain, "l" | "c" | "files-with-matches" | "count") {
+            soft = true;
+            continue;
+        }
+        // Context flags carrying their value: `-C3`, `--context=3`.
+        let ctx_attached = (plain.len() > 1
+            && ['A', 'B', 'C'].iter().any(|c| plain.starts_with(*c))
+            && plain[1..].chars().all(|c| c.is_ascii_digit()))
+            || plain.split_once('=').is_some_and(|(name, v)| {
+                matches!(name, "context" | "after-context" | "before-context")
+                    && !v.is_empty()
+                    && v.chars().all(|c| c.is_ascii_digit())
+            });
+        if ctx_attached {
+            soft = true;
+            continue;
+        }
+        // Bare context flags take the count as the NEXT argument; anything
+        // non-numeric there makes the line untrustworthy → not ours.
+        if matches!(
+            plain,
+            "A" | "B" | "C" | "context" | "after-context" | "before-context"
+        ) {
+            match iter.next() {
+                Some(v) if !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()) => {
+                    soft = true;
+                    continue;
+                }
+                _ => return ShellIntent::Other,
+            }
+        }
+        return ShellIntent::Other;
     }
     // A bare pattern searches the cwd (rg) or is a grep without a path — both
     // are the broad search this tier wants. A second operand is the directory.
@@ -520,6 +573,7 @@ fn classify_grep(args: &[String]) -> ShellIntent {
     ShellIntent::Grep {
         pattern: (*pattern).clone(),
         path,
+        soft,
     }
 }
 
@@ -546,6 +600,24 @@ fn read_streak_every() -> i64 {
     env_i64("CONA_READ_STREAK", DEFAULT_READ_STREAK, 0)
 }
 
+/// Liveness stamp for `cona doctor`: the file's mtime says when a hook last
+/// actually fired, which separates "hooks configured but the harness never
+/// runs them" (stale settings snapshot, broken PATH) from a healthy install.
+/// Throttled — rewrite only when the stamp is missing or older than an hour —
+/// so the hot path normally costs one stat. Best-effort: never fails the hook.
+fn touch_liveness() {
+    let Ok(dir) = db::data_dir() else { return };
+    let path = dir.join("hook-last-seen");
+    let fresh = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < 3600);
+    if !fresh {
+        let _ = std::fs::write(&path, b"");
+    }
+}
+
 /// Entry point for `cona hook <event>`. Reads the Claude hook payload from
 /// stdin and prints a decision to stdout. ALWAYS exits 0 — this is a helper for
 /// the agent, so a failure here must never break a tool call.
@@ -553,6 +625,7 @@ pub fn run(event: &str) -> Result<()> {
     if std::env::var("CONA_HOOK_DISABLE").is_ok() {
         return Ok(());
     }
+    touch_liveness();
     // Any error → do nothing silently.
     match event {
         "PreToolUse" => {
@@ -591,7 +664,15 @@ fn try_pretooluse() -> Result<()> {
                 || !input["type"].is_null()
                 || !input["head_limit"].is_null()
                 || path.map(|p| Path::new(p).is_file()).unwrap_or(false);
-            try_grep(&v, pattern, path, surgical)
+            // bounded output (file list, counts, context windows) = the same
+            // restraint the shell path reads from -l/-c/-C — advisory tier
+            let soft = matches!(
+                input["output_mode"].as_str(),
+                Some("files_with_matches" | "count")
+            ) || !input["-A"].is_null()
+                || !input["-B"].is_null()
+                || !input["-C"].is_null();
+            try_grep(&v, pattern, path, surgical, soft)
         }
         // Harnesses whose only file tool is a shell (Codex runs `sed -n
         // '1,240p' f` / `rg Foo` through `tool_name = "Bash"`) never emit a
@@ -612,9 +693,13 @@ fn try_pretooluse() -> Result<()> {
 fn try_shell(v: &serde_json::Value, cmd: &str) -> Result<()> {
     match classify_shell(cmd) {
         ShellIntent::Read { path, upto } => try_read(v, &path, false, upto),
-        ShellIntent::Grep { pattern, path } => {
+        ShellIntent::Grep {
+            pattern,
+            path,
+            soft,
+        } => {
             let surgical = path.as_deref().map(|p| Path::new(p).is_file()) == Some(true);
-            try_grep(v, &pattern, path.as_deref(), surgical)
+            try_grep(v, &pattern, path.as_deref(), surgical, soft)
         }
         ShellIntent::PartialRead | ShellIntent::Other => Ok(()),
     }
@@ -644,7 +729,7 @@ fn session_id(v: &serde_json::Value) -> String {
 
 /// Path of a per-(project, session) marker file under `data_dir/<kind>/`.
 ///
-/// Both session-scoped hook mechanisms (`nudge_once`, `tick_toolcall`) share
+/// Both session-scoped hook mechanisms (`nudge_due`, `tick_toolcall`) share
 /// this so the identity rule stays in ONE place — they only differ in `<kind>`
 /// and what they store. `None` when the data dir is unavailable; each caller
 /// picks its own fallback.
@@ -664,34 +749,85 @@ pub fn fires_on_cadence(count: i64, every: i64) -> bool {
     every > 0 && count > 0 && count % every == 0
 }
 
-/// Record a full read of `rel` for this (project, session) and report whether the
-/// same path was already read. One newline-delimited path per line under the
-/// `reads` marker kind; the file is the session's read log, so its line count
-/// doubles as the read-volume counter (see `read_streak`).
+/// Look up this (project, session)'s read log WITHOUT writing: whether `rel`
+/// was already fully read, and how many *counted* reads it holds so far. One
+/// path per line under the `reads` marker kind; a line prefixed with a tab is
+/// a read that already carried an advisory — it marks the path as seen (the
+/// bytes DID land in context) but does not count toward the volume streak,
+/// otherwise every advised read would drag the next streak reminder closer
+/// and the agent would be nagged twice for one mistake.
 ///
-/// Best-effort like every other hook side effect: if the data dir is unavailable
-/// we report "not a re-read" and stay silent rather than guessing.
-fn note_read(root: &Path, rel: &str, session: &str) -> (bool, i64) {
+/// Best-effort like every other hook side effect: if the data dir is
+/// unavailable we report "not a re-read" and stay silent rather than guessing.
+fn peek_reads(root: &Path, rel: &str, session: &str) -> (bool, i64) {
     let Some(log) = session_marker_path(root, "reads", session) else {
         return (false, 0);
     };
+    if !log.exists() {
+        // First touch of this session: prune markers whose sessions are over.
+        if let Some(parent) = log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            prune_marker_dir(parent);
+        }
+        return (false, 0);
+    }
     let (mut seen, mut count) = (false, 0i64);
     for line in std::fs::read_to_string(&log).unwrap_or_default().lines() {
-        seen |= line == rel;
-        count += 1;
+        seen |= line.strip_prefix('\t').unwrap_or(line) == rel;
+        count += i64::from(!line.starts_with('\t'));
     }
+    (seen, count)
+}
+
+/// Append one read that actually went through to the session's read log.
+/// `counted` = the read carried no advisory (see `peek_reads`). A DENIED read
+/// is never recorded — the bytes never reached the agent, so a retry must not
+/// look like a re-read.
+fn record_read(root: &Path, rel: &str, session: &str, counted: bool) {
+    let Some(log) = session_marker_path(root, "reads", session) else {
+        return;
+    };
     if let Some(parent) = log.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let prefix = if counted { "" } else { "\t" };
     // Append rather than rewrite: the log grows for the whole session, and a
     // failed write only costs us this call's bookkeeping.
-    let appended = std::fs::OpenOptions::new()
+    let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log)
-        .and_then(|mut f| f.write_all(format!("{rel}\n").as_bytes()));
-    let _ = appended;
-    (seen, count + 1)
+        .and_then(|mut f| f.write_all(format!("{prefix}{rel}\n").as_bytes()));
+}
+
+/// Record that a full read of `rel` was redirected (denied) this session and
+/// report whether it already had been. A SECOND full-read attempt after a
+/// block means the agent weighed the pointers and still wants the file —
+/// denying again with the identical message is a loop, not guidance, so the
+/// caller lets that attempt through. Best-effort like every marker: no data
+/// dir → "not denied yet", which degrades to the pre-existing always-deny.
+fn note_denied(root: &Path, rel: &str, session: &str) -> bool {
+    let Some(log) = session_marker_path(root, "denied", session) else {
+        return false;
+    };
+    let seen = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .any(|l| l == rel);
+    if !seen {
+        if let Some(parent) = log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            if !log.exists() {
+                prune_marker_dir(parent);
+            }
+        }
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .and_then(|mut f| f.write_all(format!("{rel}\n").as_bytes()));
+    }
+    seen
 }
 
 /// Build a non-blocking read advisory: the caller's specific observation, then
@@ -753,7 +889,7 @@ fn try_posttooluse() -> Result<()> {
 /// Increment and return the per-(project, session) tool-call counter. A tiny
 /// file under the data dir holds the running count (path via
 /// `session_marker_path`, so the session-identity rule is shared with
-/// `nudge_once`). Best-effort: any IO failure returns 0 so the caller simply
+/// `nudge_due`). Best-effort: any IO failure returns 0 so the caller simply
 /// doesn't re-nudge this call.
 fn tick_toolcall(root: &Path, session: &str) -> i64 {
     let Some(counter) = session_marker_path(root, "toolcalls", session) else {
@@ -867,17 +1003,20 @@ fn try_read(
             .unwrap_or(false)
     });
 
-    // Log every full read of an indexed source file: re-read detection and the
-    // read-volume streak are both size-blind, so this must happen even for files
+    // Track full reads of indexed source files: re-read detection and the
+    // read-volume streak are both size-blind, so this applies even to files
     // far below the advisory floor. Skipped when unindexed (nothing to point at)
     // or non-callable (prose/data — a run of README reads is not the pattern we
     // are looking for, and must not inflate the counter for real source files),
     // and skipped entirely when both tiers that consume it are disabled, so the
-    // default hot path pays no marker IO it cannot use.
+    // default hot path pays no marker IO it cannot use. Peek here; each arm
+    // records the read only if it actually goes through (a denied read never
+    // reached the agent), and marks it uncounted when it carried an advisory.
     let streak_every = read_streak_every();
     let tracking_reads = advise_min_lines > 0 || streak_every > 0;
-    let (reread, read_count) = if indexed && callable && tracking_reads {
-        note_read(&root, &rel, &session_id(v))
+    let tracking = indexed && callable && tracking_reads;
+    let (reread, prior_reads) = if tracking {
+        peek_reads(&root, &rel, &session_id(v))
     } else {
         (false, 0)
     };
@@ -897,7 +1036,14 @@ fn try_read(
         Decision::Allow => {
             // Individually fine, but volume is its own cost: several full reads
             // in one session is the drain pattern no single-call rule catches.
-            if indexed && fires_on_cadence(read_count, streak_every) {
+            // Always counted — even when the streak reminder fires on this
+            // very read, it must advance the counter or the same multiple
+            // would re-fire on every subsequent read.
+            let read_count = prior_reads + 1;
+            if tracking {
+                record_read(&root, &rel, &session_id(v), true);
+            }
+            if tracking && fires_on_cadence(read_count, streak_every) {
                 let lead = format!(
                     "That's {read_count} full file reads this session in an indexed project"
                 );
@@ -906,15 +1052,23 @@ fn try_read(
             Ok(())
         }
         Decision::Advise => {
-            let lead = if reread {
+            if tracking {
+                record_read(&root, &rel, &session_id(v), false);
+            }
+            // A re-read gets its own short, imperative message instead of the
+            // generic "one function is cheaper" tail — the file is already in
+            // context, so the useful advice is different in kind.
+            let msg = if reread {
                 format!(
-                    "You already read {rel} in full this session — {size_desc} \
-                     still in your context"
+                    "Re-read: {rel} ({size_desc}) is already in your context from \
+                     earlier this session. Need one part again? `cona show <Symbol>` \
+                     re-reads just that symbol. Expect it changed? `cona outline {rel}` \
+                     re-maps it first. This read ran as-is."
                 )
             } else {
-                format!("{rel} is {size_desc}")
+                advisory(&format!("{rel} is {size_desc}"), &rel)
             };
-            allow_with_reason(&root, "hook:read-advise", &rel, &advisory(&lead, &rel))
+            allow_with_reason(&root, "hook:read-advise", &rel, &msg)
         }
         Decision::Redirect => {
             // refresh a stale index entry so line ranges we point at are correct
@@ -924,6 +1078,35 @@ fn try_read(
                     let _ = indexer::reindex_file(&root, conn, &rel);
                 }
             }
+            // A second full-read attempt after a block yields: the loop where
+            // following "read it in chunks" (or plain stubbornness) meets the
+            // same wall with the same words forever must not exist.
+            if note_denied(&root, &rel, &session_id(v)) {
+                if tracking {
+                    // this read goes through — seen, but advised, so uncounted
+                    record_read(&root, &rel, &session_id(v), false);
+                }
+                let lead = format!(
+                    "You retried the full read of {rel} ({size_desc}) after a \
+                     redirect, so it went through"
+                );
+                return allow_with_reason(&root, "hook:read-advise", &rel, &advisory(&lead, &rel));
+            }
+            // Only promise a chunked escape we can honour: a range is partial
+            // when it ends BEFORE the last line, so name that bound concretely
+            // when we measured it (an unmeasured `lines` is a floor, not a count).
+            let chunk_hint = if measured {
+                let mid = (lines / 2).max(1);
+                format!(
+                    "read it in ranges that stop short of line {lines} — Read \
+                     offset/limit, or `sed -n '1,{mid}p'` then `sed -n '{},$p'`",
+                    mid + 1
+                )
+            } else {
+                "read it in bounded ranges (Read offset/limit, or `sed -n` \
+                 ranges that stop short of the end)"
+                    .to_string()
+            };
             let reason = format!(
                 "{rel} is {size_desc}. cona can take you straight to \
                  the right spot for a fraction of the tokens: `cona outline {rel}` lists \
@@ -931,15 +1114,14 @@ fn try_read(
                  those lines. To understand a symbol (its body + what it calls + who calls it) \
                  in ONE call, prefer `cona context <Symbol>`; before changing one, \
                  `cona impact <Symbol>` shows its blast radius. (Also `cona find <Name>` \
-                 / `cona refs <Name>`.) If you genuinely need the whole file, re-issue the \
-                 read in explicit chunks (Read offset/limit, or `sed -n` over line ranges)."
+                 / `cona refs <Name>`.) If you genuinely need the whole file, {chunk_hint}."
             );
             deny(&root, "hook:read-block", &rel, &reason)
         }
         Decision::Nudge => {
             // Fresh repo, large code file — indexing unlocks the fast path.
             // One hint per session so it never nags on subsequent reads.
-            if !nudge_once(&root, &session_id(v)) {
+            if !nudge_due(&root, &session_id(v)) {
                 return Ok(());
             }
             let reason = format!(
@@ -961,6 +1143,7 @@ fn try_grep(
     pattern: &str,
     path: Option<&str>,
     surgical: bool,
+    soft: bool,
 ) -> Result<()> {
     // cheap gates first — only a broad identifier search pays for the DB check
     if surgical || !lang::is_valid_ident(pattern) {
@@ -979,12 +1162,21 @@ fn try_grep(
         // only projects the user already indexed — never create a DB from a hook
         indexed_project: db::has_index(&root),
         in_repo: root.join(".git").exists(),
+        soft,
     };
     match decide_grep(&facts) {
-        // decide_grep has no advisory tier: a broad identifier grep is either
-        // servable semantically (Redirect) or it isn't. Treated as Allow so the
-        // hook stays fail-open if that ever changes.
-        Decision::Allow | Decision::Advise => Ok(()),
+        Decision::Allow => Ok(()),
+        Decision::Advise => {
+            // Output already bounded (-l/-c/context) — respect the restraint,
+            // let it run, and point at the semantic equivalent.
+            let reason = format!(
+                "this project is cona-indexed — `cona grep {pattern}` searches code only \
+                 and labels every hit with its enclosing symbol; `cona refs {pattern}` \
+                 gives semantic usage sites (strings/comments never match). This search \
+                 ran as-is."
+            );
+            allow_with_reason(&root, "hook:grep-advise", pattern, &reason)
+        }
         Decision::Redirect => {
             let reason = format!(
                 "this project is cona-indexed — `cona grep {pattern}` searches code only \
@@ -997,7 +1189,7 @@ fn try_grep(
             deny(&root, "hook:grep-block", pattern, &reason)
         }
         Decision::Nudge => {
-            if !nudge_once(&root, &session_id(v)) {
+            if !nudge_due(&root, &session_id(v)) {
                 return Ok(());
             }
             let reason = format!(
@@ -1043,27 +1235,59 @@ fn allow_with_reason(root: &Path, cmd: &str, target: &str, reason: &str) -> Resu
     Ok(())
 }
 
-/// True at most once per (project, session): the first time we consider nudging
-/// a fresh repo. A marker file under the data dir, stamped with the current
-/// session id, makes the hint fire once and then stay quiet for the rest of the
-/// session — subsequent large reads in the same unindexed repo pass silently.
+/// Whether the "this repo isn't indexed" hint is due. Fires on the FIRST
+/// nudge-eligible event of a (project, session), then again after every
+/// `CONA_NUDGE_EVERY` suppressed ones (default 10, 0 = never repeat) — a hint
+/// dropped once at the start of a long session is otherwise gone for good.
+/// The marker file holds the running event count.
 ///
 /// Session identity comes from `CLAUDE_SESSION_ID` when the agent exports it;
 /// without it we fall back to a per-day key so a long-lived shell still only
 /// nags occasionally rather than on every read.
-fn nudge_once(root: &Path, session: &str) -> bool {
+fn nudge_due(root: &Path, session: &str) -> bool {
     let Some(marker) = session_marker_path(root, "nudged", session) else {
         return true; // can't track → don't suppress the (useful) first hint
     };
-    if marker.exists() {
-        return false;
+    if !marker.exists() {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+            prune_marker_dir(parent);
+        }
     }
-    if let Some(parent) = marker.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let count = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0)
+        + 1;
+    // best-effort, like every marker write
+    let _ = std::fs::write(&marker, count.to_string());
+    count == 1
+        || fires_on_cadence(
+            count - 1,
+            env_i64("CONA_NUDGE_EVERY", DEFAULT_NUDGE_EVERY, 0),
+        )
+}
+
+/// Delete session markers old enough that their session is certainly over
+/// (7 days — the per-day fallback key rolls daily, real session ids within a
+/// week are plausibly live). Called only when a NEW session touches the dir,
+/// so steady-state hook calls pay no directory scan. Best-effort throughout.
+fn prune_marker_dir(dir: &Path) {
+    const WEEK: u64 = 7 * 86_400;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() > WEEK);
+        if stale {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
-    // create the marker (best-effort); either way we nudge this once
-    let _ = std::fs::write(&marker, b"");
-    true
 }
 
 #[cfg(test)]
@@ -1356,12 +1580,34 @@ mod tests {
             identifier: true,
             indexed_project: true,
             in_repo: true,
+            soft: false,
         }
     }
 
     #[test]
     fn redirects_broad_identifier_grep_in_indexed_project() {
         assert_eq!(decide_grep(&grep_facts()), Decision::Redirect);
+    }
+
+    #[test]
+    fn advises_soft_grep_in_indexed_project() {
+        // Bounded output softens the redirect to a hint — the search runs.
+        assert_eq!(
+            decide_grep(&GrepFacts {
+                soft: true,
+                ..grep_facts()
+            }),
+            Decision::Advise
+        );
+        // Outside an indexed project, soft changes nothing.
+        assert_eq!(
+            decide_grep(&GrepFacts {
+                soft: true,
+                indexed_project: false,
+                ..grep_facts()
+            }),
+            Decision::Nudge
+        );
     }
 
     #[test]
@@ -1504,7 +1750,8 @@ mod tests {
             classify_shell("LC_ALL=C grep -rn UserService src"),
             ShellIntent::Grep {
                 pattern: "UserService".into(),
-                path: Some("src".into())
+                path: Some("src".into()),
+                soft: false
             }
         );
     }
@@ -1564,14 +1811,16 @@ mod tests {
             classify_shell("rg UserService"),
             ShellIntent::Grep {
                 pattern: "UserService".into(),
-                path: None
+                path: None,
+                soft: false
             }
         );
         assert_eq!(
             classify_shell("grep -rn UserService src"),
             ShellIntent::Grep {
                 pattern: "UserService".into(),
-                path: Some("src".into())
+                path: Some("src".into()),
+                soft: false
             }
         );
     }
@@ -1585,9 +1834,30 @@ mod tests {
             "rg --files -g 'AGENTS.md' .",
             "rg -t rust UserService",
             "rg -m 5 UserService",
-            "rg -l UserService",
         ] {
             assert_eq!(classify_shell(cmd), ShellIntent::Other, "{cmd}");
         }
+    }
+
+    #[test]
+    fn output_bounded_shell_greps_are_soft() {
+        // Bounded output = still a broad search, but the agent showed
+        // restraint — classify as Grep{soft} so it gets the advisory tier.
+        for cmd in [
+            "rg -l UserService",
+            "rg -c UserService",
+            "grep -rn --count UserService src",
+            "rg -C3 UserService",
+            "rg -C 3 UserService",
+            "rg --context=2 UserService",
+            "rg -A 2 UserService src",
+        ] {
+            match classify_shell(cmd) {
+                ShellIntent::Grep { soft: true, .. } => {}
+                other => panic!("expected soft Grep for {cmd}, got {other:?}"),
+            }
+        }
+        // A context flag with a non-numeric value is untrustworthy → Other.
+        assert_eq!(classify_shell("rg -C x UserService"), ShellIntent::Other);
     }
 }

@@ -125,7 +125,7 @@ struct FindArgs {
     #[arg(long)]
     kind: Option<String>,
     #[arg(long, default_value_t = defaults::FIND_LIMIT)]
-    limit: i64,
+    limit: usize,
     /// Only symbols in files under this path prefix (file or directory)
     #[arg(long)]
     path: Option<String>,
@@ -321,7 +321,11 @@ struct ShapeArgs {
 #[derive(clap::Args)]
 struct DepsArgs {
     /// Only edges from files under this path prefix
+    #[arg(long)]
     path: Option<String>,
+    /// Positional fallback for --path (the pre-0.1 spelling)
+    #[arg(value_name = "PATH", hide = true)]
+    path_pos: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -833,28 +837,19 @@ fn run() -> Result<()> {
         }
         Cmd::Nav(Nav::Tree(a)) | Cmd::Tree(a) => {
             let TreeArgs { budget, path, rank } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = if *rank {
-                cmd_tree_rank(&root, &conn, *budget, path.as_deref(), cli.json)?
-            } else {
-                cmd_tree(&root, &conn, *budget, path.as_deref(), cli.json)?
-            };
-            print!("{out}");
-            finish(
-                &root,
-                "tree",
-                t0,
-                &out,
-                baseline,
-                path.as_deref().unwrap_or(""),
-            );
+            queried(&root, t0, "tree", path.as_deref().unwrap_or(""), |conn| {
+                if *rank {
+                    cmd_tree_rank(&root, conn, *budget, path.as_deref(), cli.json)
+                } else {
+                    cmd_tree(&root, conn, *budget, path.as_deref(), cli.json)
+                }
+            })?;
         }
         Cmd::Nav(Nav::Outline(a)) | Cmd::Outline(a) => {
             let OutlineArgs { file, sig } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_outline(&root, &conn, file, *sig, cli.json)?;
-            print!("{out}");
-            finish(&root, "outline", t0, &out, baseline, file);
+            queried(&root, t0, "outline", file, |conn| {
+                cmd_outline(&root, conn, file, *sig, cli.json)
+            })?;
         }
         Cmd::Nav(Nav::Find(a)) | Cmd::Find(a) => {
             let FindArgs {
@@ -863,18 +858,17 @@ fn run() -> Result<()> {
                 limit,
                 path,
             } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_find(
-                &root,
-                &conn,
-                name,
-                kind.as_deref(),
-                *limit,
-                path.as_deref(),
-                cli.json,
-            )?;
-            print!("{out}");
-            finish(&root, "find", t0, &out, baseline, name);
+            queried(&root, t0, "find", name, |conn| {
+                cmd_find(
+                    &root,
+                    conn,
+                    name,
+                    kind.as_deref(),
+                    *limit,
+                    path.as_deref(),
+                    cli.json,
+                )
+            })?;
         }
         Cmd::Nav(Nav::Show(a)) | Cmd::Show(a) => {
             let ShowArgs {
@@ -925,10 +919,9 @@ fn run() -> Result<()> {
         }
         Cmd::Nav(Nav::Refs(a)) | Cmd::Refs(a) => {
             let RefsArgs { name, limit, path } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_refs(&root, &conn, name, *limit, path.as_deref(), cli.json)?;
-            print!("{out}");
-            finish(&root, "refs", t0, &out, baseline, name);
+            queried(&root, t0, "refs", name, |conn| {
+                cmd_refs(&root, conn, name, *limit, path.as_deref(), cli.json)
+            })?;
         }
         Cmd::Inspect(Inspect::Context(a)) | Cmd::ContextFlat(a) => {
             let ContextArgs {
@@ -936,17 +929,15 @@ fn run() -> Result<()> {
                 budget,
                 no_tests,
             } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_context(&root, &conn, symbol, *budget, *no_tests, cli.json)?;
-            print!("{out}");
-            finish(&root, "context", t0, &out, baseline, symbol);
+            queried(&root, t0, "context", symbol, |conn| {
+                cmd_context(&root, conn, symbol, *budget, *no_tests, cli.json)
+            })?;
         }
         Cmd::Inspect(Inspect::Diff(a)) | Cmd::DiffFlat(a) => {
             let DiffArgs { r#ref } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_diff(&root, &conn, r#ref, cli.json)?;
-            print!("{out}");
-            finish(&root, "diff", t0, &out, baseline, r#ref);
+            queried(&root, t0, "diff", r#ref, |conn| {
+                cmd_diff(&root, conn, r#ref, cli.json)
+            })?;
         }
         Cmd::Nav(Nav::Grep(a)) | Cmd::Grep(a) => {
             let GrepArgs {
@@ -956,21 +947,20 @@ fn run() -> Result<()> {
                 limit,
                 path,
             } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_grep(
-                &root,
-                &conn,
-                pattern,
-                GrepOpts {
-                    ignore_case: *ignore_case,
-                    regex: *regex,
-                    limit: *limit,
-                    path: path.as_deref(),
-                },
-                cli.json,
-            )?;
-            print!("{out}");
-            finish(&root, "grep", t0, &out, baseline, pattern);
+            queried(&root, t0, "grep", pattern, |conn| {
+                cmd_grep(
+                    &root,
+                    conn,
+                    pattern,
+                    GrepOpts {
+                        ignore_case: *ignore_case,
+                        regex: *regex,
+                        limit: *limit,
+                        path: path.as_deref(),
+                    },
+                    cli.json,
+                )
+            })?;
         }
         Cmd::Edit(EditCmd::Edit(a)) | Cmd::EditFlat(a) => {
             let EditArgs {
@@ -979,18 +969,18 @@ fn run() -> Result<()> {
                 range,
                 force,
             } = a;
-            let conn = open_indexed(&root)?;
-            let out = match range {
-                Some(r) => {
-                    let (s, e) = parse_range(r)?;
-                    let code = read_replacement(file.as_deref())?;
-                    // with --range, `symbol` is the file path
-                    cmd_edit_range(&root, &conn, symbol, s, e, &code, *force)?
-                }
-                None => cmd_edit(&root, &conn, symbol, file.as_deref(), *force)?,
-            };
-            print!("{out}");
-            finish(&root, "edit", t0, &out, 0, symbol);
+            queried(&root, t0, "edit", symbol, |conn| {
+                let out = match range {
+                    Some(r) => {
+                        let (s, e) = parse_range(r)?;
+                        let code = read_replacement(file.as_deref())?;
+                        // with --range, `symbol` is the file path
+                        cmd_edit_range(&root, conn, symbol, s, e, &code, *force)?
+                    }
+                    None => cmd_edit(&root, conn, symbol, file.as_deref(), *force)?,
+                };
+                Ok((out, 0))
+            })?;
         }
         Cmd::Edit(EditCmd::Insert(a)) | Cmd::InsertFlat(a) => {
             let InsertArgs {
@@ -1000,7 +990,6 @@ fn run() -> Result<()> {
                 file,
                 force,
             } = a;
-            let conn = open_indexed(&root)?;
             let code = read_replacement(file.as_deref())?;
             let at_pos = match at {
                 Some(v) => {
@@ -1011,101 +1000,79 @@ fn run() -> Result<()> {
                 }
                 None => None,
             };
-            let out = cmd_insert(
-                &root,
-                &conn,
-                symbol.as_deref(),
-                *after,
-                at_pos,
-                &code,
-                *force,
-            )?;
-            print!("{out}");
-            finish(
-                &root,
-                "edit",
-                t0,
-                &out,
-                0,
-                symbol.as_deref().unwrap_or("--at"),
-            );
+            let target = symbol.as_deref().unwrap_or("--at");
+            queried(&root, t0, "edit", target, |conn| {
+                Ok((
+                    cmd_insert(
+                        &root,
+                        conn,
+                        symbol.as_deref(),
+                        *after,
+                        at_pos,
+                        &code,
+                        *force,
+                    )?,
+                    0,
+                ))
+            })?;
         }
         Cmd::Edit(EditCmd::Check(a)) | Cmd::CheckFlat(a) => {
             let CheckArgs { file } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_check(&root, &conn, file.as_deref(), cli.json)?;
-            print!("{out}");
-            finish(
-                &root,
-                "check",
-                t0,
-                &out,
-                baseline,
-                file.as_deref().unwrap_or("*"),
-            );
+            queried(&root, t0, "check", file.as_deref().unwrap_or("*"), |conn| {
+                cmd_check(&root, conn, file.as_deref(), cli.json)
+            })?;
         }
         Cmd::Inspect(Inspect::Impact(a)) | Cmd::ImpactFlat(a) => {
             let ImpactArgs { symbol } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_impact(&root, &conn, symbol, cli.json)?;
-            print!("{out}");
-            finish(&root, "impact", t0, &out, baseline, symbol);
+            queried(&root, t0, "impact", symbol, |conn| {
+                cmd_impact(&root, conn, symbol, cli.json)
+            })?;
         }
         Cmd::Inspect(Inspect::Entries(a)) | Cmd::EntriesFlat(a) => {
             let EntriesArgs { path, limit } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_entries(&conn, path.as_deref(), *limit, cli.json)?;
-            print!("{out}");
-            finish(
+            queried(
                 &root,
-                "entries",
                 t0,
-                &out,
-                baseline,
+                "entries",
                 path.as_deref().unwrap_or(""),
-            );
+                |conn| cmd_entries(conn, path.as_deref(), *limit, cli.json),
+            )?;
         }
         Cmd::Inspect(Inspect::Tests(a)) | Cmd::TestsFlat(a) => {
             let TestsArgs { symbol } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_tests(&root, &conn, symbol, cli.json)?;
-            print!("{out}");
-            finish(&root, "tests", t0, &out, baseline, symbol);
+            queried(&root, t0, "tests", symbol, |conn| {
+                cmd_tests(&root, conn, symbol, cli.json)
+            })?;
         }
         Cmd::History(History::Blame(a)) | Cmd::BlameFlat(a) => {
             let BlameArgs { symbol, limit } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_blame(&root, &conn, symbol, *limit, cli.json)?;
-            print!("{out}");
-            finish(&root, "blame", t0, &out, baseline, symbol);
+            queried(&root, t0, "blame", symbol, |conn| {
+                cmd_blame(&root, conn, symbol, *limit, cli.json)
+            })?;
         }
         Cmd::History(History::Hot(a)) | Cmd::HotFlat(a) => {
             let HotArgs { since, limit } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_hot(&root, &conn, since, *limit, cli.json)?;
-            print!("{out}");
-            finish(&root, "hot", t0, &out, baseline, "");
+            queried(&root, t0, "hot", "", |conn| {
+                cmd_hot(&root, conn, since, *limit, cli.json)
+            })?;
         }
         Cmd::History(History::Coupling(a)) | Cmd::CouplingFlat(a) => {
             let CouplingArgs { file, since, limit } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_coupling(&root, &conn, file, since, *limit, cli.json)?;
-            print!("{out}");
-            finish(&root, "coupling", t0, &out, baseline, file);
+            queried(&root, t0, "coupling", file, |conn| {
+                cmd_coupling(&root, conn, file, since, *limit, cli.json)
+            })?;
         }
         Cmd::Inspect(Inspect::Callers(a)) | Cmd::CallersFlat(a) => {
             let CallsArgs { symbol, depth } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_calls(&root, &conn, symbol, *depth, true, cli.json)?;
-            print!("{out}");
-            finish(&root, "callers", t0, &out, baseline, symbol);
+            queried(&root, t0, "callers", symbol, |conn| {
+                cmd_calls(&root, conn, symbol, *depth, true, cli.json)
+            })?;
         }
         Cmd::Inspect(Inspect::Callees(a)) | Cmd::CalleesFlat(a) => {
             let CallsArgs { symbol, depth } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_calls(&root, &conn, symbol, *depth, false, cli.json)?;
-            print!("{out}");
-            finish(&root, "callees", t0, &out, baseline, symbol);
+            queried(&root, t0, "callees", symbol, |conn| {
+                cmd_calls(&root, conn, symbol, *depth, false, cli.json)
+            })?;
         }
         Cmd::Inspect(Inspect::Path(a)) | Cmd::PathFlat(a) => {
             let PathArgs {
@@ -1113,17 +1080,15 @@ fn run() -> Result<()> {
                 to,
                 max_depth,
             } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_path(&root, &conn, from, to, *max_depth, cli.json)?;
-            print!("{out}");
-            finish(&root, "path", t0, &out, baseline, &format!("{from}→{to}"));
+            queried(&root, t0, "path", &format!("{from}→{to}"), |conn| {
+                cmd_path(&root, conn, from, to, *max_depth, cli.json)
+            })?;
         }
         Cmd::Edit(EditCmd::Note(a)) | Cmd::NoteFlat(a) => {
             let NoteArgs { symbol, text, rm } = a;
-            let conn = open_indexed(&root)?;
-            let out = cmd_note(&conn, symbol.as_deref(), text, *rm)?;
-            print!("{out}");
-            finish(&root, "note", t0, &out, 0, symbol.as_deref().unwrap_or(""));
+            queried(&root, t0, "note", symbol.as_deref().unwrap_or(""), |conn| {
+                Ok((cmd_note(conn, symbol.as_deref(), text, *rm)?, 0))
+            })?;
         }
         Cmd::Inspect(Inspect::Shape(a)) | Cmd::ShapeFlat(a) => {
             let ShapeArgs {
@@ -1131,25 +1096,16 @@ fn run() -> Result<()> {
                 budget,
                 kind,
             } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) =
-                cmd_shape(&root, &conn, symbol, *budget, kind.as_deref(), cli.json)?;
-            print!("{out}");
-            finish(&root, "shape", t0, &out, baseline, symbol);
+            queried(&root, t0, "shape", symbol, |conn| {
+                cmd_shape(&root, conn, symbol, *budget, kind.as_deref(), cli.json)
+            })?;
         }
         Cmd::Inspect(Inspect::Deps(a)) | Cmd::DepsFlat(a) => {
-            let DepsArgs { path } = a;
-            let conn = open_indexed(&root)?;
-            let (out, baseline) = cmd_deps(&root, &conn, path.as_deref(), cli.json)?;
-            print!("{out}");
-            finish(
-                &root,
-                "deps",
-                t0,
-                &out,
-                baseline,
-                path.as_deref().unwrap_or(""),
-            );
+            let DepsArgs { path, path_pos } = a;
+            let path = path.as_deref().or(path_pos.as_deref());
+            queried(&root, t0, "deps", path.unwrap_or(""), |conn| {
+                cmd_deps(&root, conn, path, cli.json)
+            })?;
         }
         Cmd::Edit(EditCmd::Rename(a)) | Cmd::RenameFlat(a) => {
             let RenameArgs {
@@ -1157,10 +1113,9 @@ fn run() -> Result<()> {
                 new_name,
                 force,
             } = a;
-            let conn = open_indexed(&root)?;
-            let out = cmd_rename(&root, &conn, symbol, new_name, *force)?;
-            print!("{out}");
-            finish(&root, "rename", t0, &out, 0, symbol);
+            queried(&root, t0, "rename", symbol, |conn| {
+                Ok((cmd_rename(&root, conn, symbol, new_name, *force)?, 0))
+            })?;
         }
         Cmd::Project(Project::Stats(a)) | Cmd::StatsFlat(a) => {
             let StatsArgs { project } = a;
@@ -1175,7 +1130,7 @@ fn run() -> Result<()> {
             dashboard::run(&root)?;
         }
         Cmd::Maint(Maint::Doctor) | Cmd::DoctorFlat => {
-            install::cmd_doctor(&root)?;
+            install::cmd_doctor(&root, cli.json)?;
         }
         Cmd::Project(Project::Tidy(a)) | Cmd::TidyFlat(a) => {
             let TidyArgs { orphans } = a;
@@ -1312,6 +1267,25 @@ fn run() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// The one shape shared by every query arm in `run()`: open the index, run the
+/// body against it, print its output, log it via `finish`. `target` is the
+/// stats detail (symbol/file) — the caller computes it up front, and a failed
+/// body logs nothing. Mutations reuse it with a baseline of 0 (nothing was
+/// "read instead").
+fn queried(
+    root: &Path,
+    t0: Instant,
+    cmd: &'static str,
+    target: &str,
+    body: impl FnOnce(&rusqlite::Connection) -> Result<(String, i64)>,
+) -> Result<()> {
+    let conn = open_indexed(root)?;
+    let (out, baseline) = body(&conn)?;
+    print!("{out}");
+    finish(root, cmd, t0, &out, baseline, target);
     Ok(())
 }
 
@@ -1508,7 +1482,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
     // --- 3. agents — pick per scope (interactive) or take every detected ---
     // `(project_agents, global_agents)`.
     let (proj_plan, glob_plan) = if interactive {
-        match pick_agents(root, do_project, do_global)? {
+        match install::pick_agents(root, do_project, do_global)? {
             Some(p) => p,
             None => {
                 println!("{}", ui::dim("setup cancelled — nothing changed"));
@@ -1519,7 +1493,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
         // non-interactive: install every detected agent in the active scopes.
         // Nothing is removed — an unattended run never takes integrations away.
         let home = dirs::home_dir().unwrap_or_default();
-        let detected = |on: bool, global: bool| ScopePlan {
+        let detected = |on: bool, global: bool| install::ScopePlan {
             add: if on {
                 install::detected_agents(root, &home, global)
             } else {
@@ -1578,73 +1552,4 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
         ])
     );
     Ok(())
-}
-
-/// The agents to add and to remove within ONE scope, as decided by the picker.
-#[derive(Default)]
-struct ScopePlan {
-    add: Vec<install::AgentName>,
-    remove: Vec<install::AgentName>,
-}
-
-/// The one interactive agent picker: a single checklist spanning both scopes
-/// (PROJECT + HOME sections). A row starts checked when the agent is already
-/// installed in that scope, else when it is merely detected on disk (the
-/// first-run suggestion). Unchecking an installed agent is a REMOVAL — the
-/// picker doubles as the manage surface, so setup must be able to take
-/// integrations away, not only add them. Returns the `(project, home)` plans,
-/// or `None` if cancelled.
-type ScopedPicks = (ScopePlan, ScopePlan);
-fn pick_agents(root: &Path, do_project: bool, do_global: bool) -> Result<Option<ScopedPicks>> {
-    let home = dirs::home_dir().unwrap_or_default();
-
-    // `items[ordinal]` = the (agent, global, was_installed) that item row maps
-    // back to; the ordinal is exactly what `multiselect` hands back for
-    // checked rows. Descriptions carry the row's current state — a pre-checked
-    // box alone can't tell "already installed (uncheck = remove)" apart from
-    // "detected, suggested".
-    let mut rows: Vec<ui::Row> = Vec::new();
-    let mut items: Vec<(install::AgentName, bool, bool)> = Vec::new();
-    for (global, header) in [
-        (false, "PROJECT — this repo"),
-        (true, "HOME — global configs (~/.claude, ~/.codex, …)"),
-    ] {
-        if (global && !do_global) || (!global && !do_project) {
-            continue;
-        }
-        let scoped = install::agents_in_scope(root, &home, global);
-        if scoped.is_empty() {
-            continue;
-        }
-        if !rows.is_empty() {
-            rows.push(ui::Row::Header("")); // spacer between sections
-        }
-        rows.push(ui::Row::Header(header));
-        for a in scoped {
-            let was = a.installed(root, &home, global);
-            let on = was || a.detected(root, &home, global);
-            rows.push(ui::Row::Item(a.slug(), a.state_desc(was, on).into(), on));
-            items.push((a, global, was));
-        }
-    }
-
-    match ui::multiselect("configure cona agents", &rows)? {
-        None => Ok(None),
-        Some(picked) => {
-            // Diff checked-now against installed-before: newly on → add,
-            // newly off → remove. Still-on agents are re-installed too —
-            // idempotent, and it refreshes marker blocks after a version bump.
-            let now_on: std::collections::HashSet<usize> = picked.into_iter().collect();
-            let (mut proj, mut glob) = (ScopePlan::default(), ScopePlan::default());
-            for (i, &(agent, global, was)) in items.iter().enumerate() {
-                let plan = if global { &mut glob } else { &mut proj };
-                if now_on.contains(&i) {
-                    plan.add.push(agent);
-                } else if was {
-                    plan.remove.push(agent);
-                }
-            }
-            Ok(Some((proj, glob)))
-        }
-    }
 }

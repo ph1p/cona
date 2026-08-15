@@ -425,9 +425,9 @@ impl AgentName {
     /// `Mark::render`'s `LABEL_COL` column — a longer one shifts that row's verb
     /// and path out of line with every other row (`label_widths_fit_the_column`).
     ///
-    /// Only the guide-only harnesses read this; the hand-written blocks above
-    /// label several targets each ("claude skill" / "claude hooks" / …), which
-    /// no single per-agent string could express.
+    /// Only the guide-file loop reads this; Claude's hand-written block labels
+    /// several targets ("claude skill" / "claude hooks" / …), which no single
+    /// per-agent string could express.
     pub fn mark_label(self) -> &'static str {
         match self {
             AgentName::Opencode => "opencode guide",
@@ -441,6 +441,18 @@ impl AgentName {
             AgentName::Cursor => "cursor rule",
             AgentName::Gemini => "gemini memory",
             AgentName::Pi => "pi memory",
+        }
+    }
+
+    /// The content a `Presence::Exists` guide file carries. Everyone gets
+    /// GUIDE_MD verbatim; Cursor wraps it in `.mdc` frontmatter because its
+    /// rule loader needs `alwaysApply` to inject the guide unprompted.
+    pub fn guide_body(self) -> String {
+        match self {
+            AgentName::Cursor => format!(
+                "---\ndescription: cona — token-efficient code navigation\nalwaysApply: true\n---\n\n{GUIDE_MD}"
+            ),
+            _ => GUIDE_MD.to_string(),
         }
     }
 
@@ -661,55 +673,97 @@ pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
 /// checked ones and uninstalls the newly unchecked ones — the one-screen way to
 /// add or remove any single agent. TTY-only; callers gate on that.
 pub fn cmd_agents_interactive(project_root: &Path, global: bool) -> Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
-    // Only agents that have a target in this scope are actionable.
-    let choices = agents_in_scope(project_root, &home, global);
-    let before: Vec<bool> = choices
-        .iter()
-        .map(|a| a.installed(project_root, &home, global))
-        .collect();
-    let rows: Vec<ui::Row> = choices
-        .iter()
-        .zip(&before)
-        .map(|(a, on)| ui::Row::Item(a.slug(), a.state_desc(*on, *on).into(), *on))
-        .collect();
-
-    let title = if global {
-        "configure agents (home configs)"
-    } else {
-        "configure agents (this project)"
+    // One scope of the same checklist `cona setup` shows — same pre-checks
+    // (installed OR detected), same diff, same refresh-on-still-checked.
+    let Some((proj, glob)) = pick_agents(project_root, !global, global)? else {
+        println!("{}", ui::dim("cancelled — nothing changed"));
+        return Ok(());
     };
-    let picked = match ui::multiselect(title, &rows)? {
-        Some(p) => p,
-        None => {
-            println!("{}", ui::dim("cancelled — nothing changed"));
-            return Ok(());
-        }
-    };
-    // `picked` = ordinals of the now-checked items (1:1 with `choices`). Diff
-    // against `before`: newly on → add, newly off → remove, unchanged → skip.
-    let now_on: std::collections::HashSet<usize> = picked.into_iter().collect();
-    let mut to_add = Vec::new();
-    let mut to_remove = Vec::new();
-    for (i, (&a, &was)) in choices.iter().zip(&before).enumerate() {
-        match (was, now_on.contains(&i)) {
-            (false, true) => to_add.push(a),
-            (true, false) => to_remove.push(a),
-            _ => {}
-        }
-    }
-
-    if to_add.is_empty() && to_remove.is_empty() {
+    let plan = if global { glob } else { proj };
+    if plan.add.is_empty() && plan.remove.is_empty() {
         println!("{}", ui::dim("no changes"));
         return Ok(());
     }
-    if !to_remove.is_empty() {
-        cmd_agents(project_root, "uninstall", &to_remove, false, global)?;
+    if !plan.remove.is_empty() {
+        cmd_agents(project_root, "uninstall", &plan.remove, false, global)?;
     }
-    if !to_add.is_empty() {
-        cmd_agents(project_root, "install", &to_add, false, global)?;
+    if !plan.add.is_empty() {
+        cmd_agents(project_root, "install", &plan.add, false, global)?;
     }
     Ok(())
+}
+
+/// The agents to add and to remove within ONE scope, as decided by the picker.
+#[derive(Default)]
+pub struct ScopePlan {
+    pub add: Vec<AgentName>,
+    pub remove: Vec<AgentName>,
+}
+
+/// ONE agent checklist across the requested scopes, diffed into per-scope
+/// plans. THE interactive manage surface — `cona setup` (both scopes) and
+/// `cona agents` (one scope) share it, so the two can never drift in
+/// pre-check policy or diff semantics. A row starts checked when the agent is
+/// already installed in that scope, else when it is merely detected on disk
+/// (the first-run suggestion). Unchecking an installed agent is a REMOVAL —
+/// the picker doubles as the manage surface, so it must be able to take
+/// integrations away, not only add them. `None` = user cancelled.
+pub fn pick_agents(
+    root: &Path,
+    do_project: bool,
+    do_global: bool,
+) -> Result<Option<(ScopePlan, ScopePlan)>> {
+    let home = dirs::home_dir().unwrap_or_default();
+
+    // `items[ordinal]` = the (agent, global, was_installed) that item row maps
+    // back to; the ordinal is exactly what `multiselect` hands back for
+    // checked rows. Descriptions carry the row's current state — a pre-checked
+    // box alone can't tell "already installed (uncheck = remove)" apart from
+    // "detected, suggested".
+    let mut rows: Vec<ui::Row> = Vec::new();
+    let mut items: Vec<(AgentName, bool, bool)> = Vec::new();
+    for (global, header) in [
+        (false, "PROJECT — this repo"),
+        (true, "HOME — global configs (~/.claude, ~/.codex, …)"),
+    ] {
+        if (global && !do_global) || (!global && !do_project) {
+            continue;
+        }
+        let scoped = agents_in_scope(root, &home, global);
+        if scoped.is_empty() {
+            continue;
+        }
+        if !rows.is_empty() {
+            rows.push(ui::Row::Header("")); // spacer between sections
+        }
+        rows.push(ui::Row::Header(header));
+        for a in scoped {
+            let was = a.installed(root, &home, global);
+            let on = was || a.detected(root, &home, global);
+            rows.push(ui::Row::Item(a.slug(), a.state_desc(was, on).into(), on));
+            items.push((a, global, was));
+        }
+    }
+
+    match ui::multiselect("configure cona agents", &rows)? {
+        None => Ok(None),
+        Some(picked) => {
+            // Diff checked-now against installed-before: newly on → add,
+            // newly off → remove. Still-on agents are re-installed too —
+            // idempotent, and it refreshes marker blocks after a version bump.
+            let now_on: std::collections::HashSet<usize> = picked.into_iter().collect();
+            let (mut proj, mut glob) = (ScopePlan::default(), ScopePlan::default());
+            for (i, &(agent, global, was)) in items.iter().enumerate() {
+                let plan = if global { &mut glob } else { &mut proj };
+                if now_on.contains(&i) {
+                    plan.add.push(agent);
+                } else if was {
+                    plan.remove.push(agent);
+                }
+            }
+            Ok(Some((proj, glob)))
+        }
+    }
 }
 
 /// How deep a `.claude/agents` tree is walked. Shipped collections nest one
@@ -821,6 +875,9 @@ fn mcp_register(agent: AgentName, ctx: &Ctx, install: bool, done: &mut Vec<super
         .parent()
         .is_some_and(|d| d.exists() || d == ctx.project_root);
     if install && !dir_ok {
+        // Say so instead of vanishing: a user who expected the MCP server
+        // registered otherwise has no clue why doctor lists nothing.
+        mark(done, "mcp server", "skipped (no config dir)", &path);
         return;
     }
     let is_toml = path.extension().and_then(|e| e.to_str()) == Some("toml");
@@ -980,101 +1037,19 @@ pub fn cmd_agents_q(
         sync_subagents(&claude_dir.join("agents"), install, &mut done)?;
     } // 'claude
 
-    // --- generic AGENTS.md (Codex, OpenCode, Amp, Jules, …) ----------------
-    if sel.want(
-        AgentName::Agents,
-        AgentName::Agents.detected(project_root, &home, global),
-    ) {
-        let agents_md = if global {
-            home.join(".codex/AGENTS.md")
-        } else {
-            project_root.join("AGENTS.md")
-        };
-        let label = if global { "codex memory" } else { "AGENTS.md" };
-        if install {
-            let ch = upsert_block_file(&agents_md, GUIDE_MD)?;
-            mark(&mut done, label, ch.verb(), &agents_md);
-        } else if remove_block_file(&agents_md)? {
-            mark(&mut done, label, "removed", &agents_md);
+    // --- guide-file harnesses ---------------------------------------------
+    // Every agent but Claude (whose skill/hooks/subagents block sits above)
+    // reads one guide file per scope, so none needs a hand-written block:
+    // `config_paths` already IS the per-scope target list, and its `Presence`
+    // tag says how the file is written — `Marker` = splice a block into a file
+    // the user also owns, `Exists` = the file is ours alone (content from
+    // `guide_body`, which lets Cursor carry its .mdc frontmatter). Driving all
+    // of them from that ONE list keeps the writer and the installed()/uninstall
+    // probe from ever disagreeing about which file an agent owns.
+    for a in AgentName::ALL {
+        if a == AgentName::Claude {
+            continue;
         }
-    }
-
-    // --- Cursor ------------------------------------------------------------
-    let cursor = if global {
-        home.join(".cursor/rules/cona.mdc")
-    } else {
-        project_root.join(".cursor/rules/cona.mdc")
-    };
-    if sel.want(
-        AgentName::Cursor,
-        AgentName::Cursor.detected(project_root, &home, global),
-    ) {
-        if install {
-            let content = format!(
-                "---\ndescription: cona — token-efficient code navigation\nalwaysApply: true\n---\n\n{GUIDE_MD}"
-            );
-            let ch = write_if_changed(&cursor, &content)?;
-            mark(&mut done, "cursor rule", ch.verb(), &cursor);
-        } else if cursor.exists() {
-            std::fs::remove_file(&cursor)?;
-            prune_empty_dirs(&cursor, scope_root);
-            mark(&mut done, "cursor rule", "removed", &cursor);
-        }
-    }
-
-    // --- Gemini CLI ----------------------------------------------------------
-    let gemini = if global {
-        home.join(".gemini/GEMINI.md")
-    } else {
-        project_root.join("GEMINI.md")
-    };
-    if sel.want(
-        AgentName::Gemini,
-        AgentName::Gemini.detected(project_root, &home, global),
-    ) {
-        if install {
-            let ch = upsert_block_file(&gemini, GUIDE_MD)?;
-            mark(&mut done, "gemini memory", ch.verb(), &gemini);
-        } else if remove_block_file(&gemini)? {
-            mark(&mut done, "gemini memory", "removed", &gemini);
-        }
-    }
-
-    // --- pi.dev --------------------------------------------------------------
-    // Project scope reads the project's own AGENTS.md, already handled by the
-    // generic Agents bucket above — only global has a path of its own
-    // (~/.pi/agent/AGENTS.md, distinct from Codex's ~/.codex/AGENTS.md).
-    if global
-        && sel.want(
-            AgentName::Pi,
-            AgentName::Pi.detected(project_root, &home, global),
-        )
-    {
-        let pi_agents = home.join(".pi/agent/AGENTS.md");
-        if install {
-            let ch = upsert_block_file(&pi_agents, GUIDE_MD)?;
-            mark(&mut done, "pi memory", ch.verb(), &pi_agents);
-        } else if remove_block_file(&pi_agents)? {
-            mark(&mut done, "pi memory", "removed", &pi_agents);
-        }
-    }
-
-    // --- guide-only harnesses -------------------------------------------------
-    // OpenCode, Windsurf, Zed, Qwen, Crush, Copilot each read one guide file per
-    // scope, so they need no hand-written block: `config_paths` already IS the
-    // per-scope target list, and its `Presence` tag says how the file is
-    // written — `Marker` = splice a block into a file the user also owns,
-    // `Exists` = the file is ours alone. Driving both from that ONE list keeps
-    // the writer and the installed()/uninstall probe from ever disagreeing
-    // about which file an agent owns.
-    for a in [
-        AgentName::Opencode,
-        AgentName::Windsurf,
-        AgentName::Zed,
-        AgentName::Qwen,
-        AgentName::Crush,
-        AgentName::Copilot,
-    ] {
         if !sel.want(a, a.detected(project_root, &home, global)) {
             continue;
         }
@@ -1084,7 +1059,7 @@ pub fn cmd_agents_q(
                 // Ours alone: a whole-file write, removed outright.
                 Presence::Exists => {
                     if install {
-                        let ch = write_if_changed(&path, GUIDE_MD)?;
+                        let ch = write_if_changed(&path, &a.guide_body())?;
                         mark(&mut done, label, ch.verb(), &path);
                     } else if path.exists() {
                         std::fs::remove_file(&path)?;

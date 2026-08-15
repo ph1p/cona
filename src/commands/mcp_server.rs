@@ -43,7 +43,7 @@ fn all_tools() -> Vec<serde_json::Value> {
             mcp_tool(
                 "find",
                 "Locate a symbol by name: file, line range, signature. Use instead of grepping for a definition",
-                json!({"name": s("symbol name (exact, then substring; case-insensitive)"), "kind": s("filter: fn, struct, class, method, …"), "path": s("only symbols in files under this prefix (file or directory)")}),
+                json!({"name": s("symbol name (exact, then substring; case-insensitive)"), "kind": s("filter: fn, struct, class, method, …"), "path": s("only symbols in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 25)"}}),
                 &["name"],
                 read_only("Find symbol"),
             ),
@@ -64,7 +64,7 @@ fn all_tools() -> Vec<serde_json::Value> {
             mcp_tool(
                 "refs",
                 "Usage sites of a name as file:line (semantic — strings/comments don't match). Use instead of grepping for callers/usages",
-                json!({"name": s("identifier name"), "path": s("only references in files under this prefix (file or directory)")}),
+                json!({"name": s("identifier name"), "path": s("only references in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 100)"}}),
                 &["name"],
                 read_only("Find references"),
             ),
@@ -91,21 +91,21 @@ fn all_tools() -> Vec<serde_json::Value> {
         mcp_tool(
             "tree",
             "Compact tree of files and top-level symbols (rank: by reference fan-in). Use to orient in an unknown codebase instead of listing/reading files",
-            json!({"path": s("only files under this prefix"), "rank": {"type": "boolean", "description": "rank symbols by fan-in"}}),
+            json!({"path": s("only files under this prefix"), "rank": {"type": "boolean", "description": "rank symbols by fan-in"}, "budget": {"type": "integer", "description": "output token budget (default 2000)"}}),
             &[],
             read_only("Project tree"),
         ),
         mcp_tool(
             "grep",
             "Code-only search; hits labeled with their enclosing symbol. Use instead of ripgrep over the repo — it skips strings, comments, and non-code. Matching is LITERAL unless regex is set",
-            json!({"pattern": s("substring to search — literal unless regex is true"), "ignore_case": {"type": "boolean"}, "regex": {"type": "boolean", "description": "treat pattern as a regular expression (Rust regex syntax)"}, "path": s("only search files under this prefix (file or directory)")}),
+            json!({"pattern": s("substring to search — literal unless regex is true"), "ignore_case": {"type": "boolean"}, "regex": {"type": "boolean", "description": "treat pattern as a regular expression (Rust regex syntax)"}, "path": s("only search files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max hits (default 50)"}}),
             &["pattern"],
             read_only("Code grep"),
         ),
         mcp_tool(
             "context",
             "One pack: symbol source + callee signatures + call sites. Use instead of reading a symbol plus every file it touches",
-            json!({"symbol": s("symbol name"), "no_tests": {"type": "boolean", "description": "hide test call sites so production callers aren't crowded out"}}),
+            json!({"symbol": s("symbol name"), "no_tests": {"type": "boolean", "description": "hide test call sites so production callers aren't crowded out"}, "budget": {"type": "integer", "description": "output token budget (default 3000)"}}),
             &["symbol"],
             read_only("Symbol context"),
         ),
@@ -168,7 +168,7 @@ fn all_tools() -> Vec<serde_json::Value> {
         mcp_tool(
             "path",
             "Shortest call chain between two symbols",
-            json!({"from": s("start symbol"), "to": s("target symbol")}),
+            json!({"from": s("start symbol"), "to": s("target symbol"), "max_depth": {"type": "integer", "description": "max chain length (default 8)"}}),
             &["from", "to"],
             read_only("Call path"),
         ),
@@ -182,14 +182,14 @@ fn all_tools() -> Vec<serde_json::Value> {
         mcp_tool(
             "shape",
             "A symbol's source + the types it references, expanded one level",
-            json!({"symbol": s("symbol name"), "kind": s("narrow to a kind (optional)")}),
+            json!({"symbol": s("symbol name"), "kind": s("narrow to a kind (optional)"), "budget": {"type": "integer", "description": "output token budget (default 2000)"}}),
             &["symbol"],
             read_only("Symbol shape"),
         ),
         mcp_tool(
             "entries",
             "Entry points: mains, exported/public API, tests",
-            json!({"path": s("only files under this prefix (optional)")}),
+            json!({"path": s("only files under this prefix (optional)"), "limit": {"type": "integer", "description": "max entries per section (default 40)"}}),
             &[],
             read_only("Entry points"),
         ),
@@ -272,8 +272,14 @@ pub fn mcp_tools(expanded: bool) -> Vec<serde_json::Value> {
 fn mcp_more() -> Result<String> {
     let extended: Vec<serde_json::Value> =
         all_tools().into_iter().filter(|t| !is_core(t)).collect();
+    // Name the CLI fallback: the schemas only become callable after the
+    // harness refreshes tools/list, and not every client honours
+    // list_changed. The shell spelling works either way.
     Ok(format!(
-        "{} advanced cona tools are now available — call any of them by name:\n\n{}",
+        "{} advanced cona tools are now available — call any of them by name. \
+         If one is rejected as unknown (your client did not refresh its tool list), \
+         every one of them is also a CLI command: run `cona <tool> …` in a shell, \
+         e.g. `cona impact <Symbol>` or `cona callers <Symbol>`.\n\n{}",
         extended.len(),
         serde_json::to_string_pretty(&extended)?
     ))
@@ -299,6 +305,7 @@ fn mcp_call(
             .map(|n| n as usize)
             .unwrap_or(d)
     };
+    let int64 = |k: &str, d: i64| args.get(k).and_then(|v| v.as_i64()).unwrap_or(d);
 
     let (out, baseline, detail) = match name {
         "find" => {
@@ -308,7 +315,7 @@ fn mcp_call(
                 conn,
                 n,
                 opt("kind"),
-                defaults::FIND_LIMIT,
+                uint("limit", defaults::FIND_LIMIT),
                 opt("path"),
                 false,
             )?;
@@ -348,7 +355,14 @@ fn mcp_call(
         }
         "refs" => {
             let n = sarg("name")?;
-            let (o, b) = cmd_refs(root, conn, n, defaults::REFS_LIMIT, opt("path"), false)?;
+            let (o, b) = cmd_refs(
+                root,
+                conn,
+                n,
+                uint("limit", defaults::REFS_LIMIT),
+                opt("path"),
+                false,
+            )?;
             (o, b, n.to_string())
         }
         "outline" => {
@@ -358,10 +372,11 @@ fn mcp_call(
             (o, b, f.to_string())
         }
         "tree" => {
+            let budget = int64("budget", defaults::TREE_BUDGET);
             let (o, b) = if flag("rank") {
-                cmd_tree_rank(root, conn, defaults::TREE_BUDGET, opt("path"), false)?
+                cmd_tree_rank(root, conn, budget, opt("path"), false)?
             } else {
-                cmd_tree(root, conn, defaults::TREE_BUDGET, opt("path"), false)?
+                cmd_tree(root, conn, budget, opt("path"), false)?
             };
             (o, b, opt("path").unwrap_or("").to_string())
         }
@@ -374,7 +389,7 @@ fn mcp_call(
                 GrepOpts {
                     ignore_case: flag("ignore_case"),
                     regex: flag("regex"),
-                    limit: defaults::GREP_LIMIT,
+                    limit: uint("limit", defaults::GREP_LIMIT),
                     path: opt("path"),
                 },
                 false,
@@ -387,7 +402,7 @@ fn mcp_call(
                 root,
                 conn,
                 sym,
-                defaults::CONTEXT_BUDGET,
+                int64("budget", defaults::CONTEXT_BUDGET),
                 flag("no_tests"),
                 false,
             )?;
@@ -491,7 +506,14 @@ fn mcp_call(
         "path" => {
             let from = sarg("from")?;
             let to = sarg("to")?;
-            let (o, b) = cmd_path(root, conn, from, to, 8, false)?;
+            let (o, b) = cmd_path(
+                root,
+                conn,
+                from,
+                to,
+                uint("max_depth", defaults::PATH_DEPTH),
+                false,
+            )?;
             (o, b, format!("{from}→{to}"))
         }
         "deps" => {
@@ -500,11 +522,23 @@ fn mcp_call(
         }
         "shape" => {
             let sym = sarg("symbol")?;
-            let (o, b) = cmd_shape(root, conn, sym, defaults::SHAPE_BUDGET, opt("kind"), false)?;
+            let (o, b) = cmd_shape(
+                root,
+                conn,
+                sym,
+                int64("budget", defaults::SHAPE_BUDGET),
+                opt("kind"),
+                false,
+            )?;
             (o, b, sym.to_string())
         }
         "entries" => {
-            let (o, b) = cmd_entries(conn, opt("path"), defaults::ENTRIES_LIMIT, false)?;
+            let (o, b) = cmd_entries(
+                conn,
+                opt("path"),
+                uint("limit", defaults::ENTRIES_LIMIT),
+                false,
+            )?;
             (o, b, opt("path").unwrap_or("").to_string())
         }
         "tests" => {
@@ -541,6 +575,8 @@ fn mcp_call(
         Err(_) => ToolOut::text(out.clone()),
     };
     Ok(match name {
+        // The second pass MUST read the same caller-supplied limit as the
+        // first — otherwise structuredContent and the text render disagree.
         "find" => structured_out(
             "symbols",
             cmd_find(
@@ -548,7 +584,7 @@ fn mcp_call(
                 conn,
                 sarg("name")?,
                 opt("kind"),
-                defaults::FIND_LIMIT,
+                uint("limit", defaults::FIND_LIMIT),
                 opt("path"),
                 true,
             ),
@@ -559,7 +595,7 @@ fn mcp_call(
                 root,
                 conn,
                 sarg("name")?,
-                defaults::REFS_LIMIT,
+                uint("limit", defaults::REFS_LIMIT),
                 opt("path"),
                 true,
             ),

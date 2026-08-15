@@ -2,8 +2,8 @@
 //! context, diff, grep.
 
 use super::{
-    jout, locate_fresh, push_numbered_lines, render_symbol_body, scan_ref_sites, BudgetOut,
-    GrepOpts, PathFilter, ShowOpts, ENCLOSING_SYMBOL_SQL,
+    clip, defaults, jout, locate_fresh, push_numbered_lines, render_symbol_body, scan_ref_sites,
+    BudgetOut, GrepOpts, PathFilter, ShowOpts, ENCLOSING_SYMBOL_SQL, LIMIT_TRAILER,
 };
 use crate::{db, diffmap, entries, fuzzy, gitmap, graph, indexer, lang, resolve};
 use anyhow::{anyhow, bail, Result};
@@ -275,7 +275,26 @@ pub fn cmd_outline(
         if is_dir {
             bail!("'{file}' is a directory — try `cona tree --path {file}`");
         }
-        bail!("no symbols for '{file}' — file not indexed or has none");
+        // Distinguish the three remaining causes — each has a different next
+        // step, and the hook may have redirected an agent here, so a dead-end
+        // error would strand it with no route back to the content.
+        let in_index = conn
+            .query_row(
+                "SELECT 1 FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' LIMIT 1",
+                rusqlite::params![file, like],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if in_index {
+            bail!(
+                "'{file}' is indexed but has no extractable symbols — read it directly, \
+                 or search it with `cona grep <pattern> --path {file}`"
+            );
+        }
+        if root.join(file).is_file() {
+            bail!("'{file}' exists but is not in the index — run `cona index`, then retry");
+        }
+        bail!("no file '{file}' in the index — `cona find <name>` locates symbols by name");
     }
     // Baseline: sum each matched file's size once (rows are path-ordered).
     let mut bytes: i64 = 0;
@@ -337,7 +356,7 @@ pub fn cmd_find(
     conn: &Connection,
     name: &str,
     kind: Option<&str>,
-    limit: i64,
+    limit: usize,
     path_filter: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
@@ -361,7 +380,7 @@ pub fn cmd_find(
         limit.saturating_mul(20).clamp(1000, 5000)
     } else {
         limit
-    };
+    } as i64;
     let mut stmt = conn.prepare(&sql)?;
     let mapper =
         |r: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, i64, String, i64)> {
@@ -384,10 +403,11 @@ pub fn cmd_find(
             .flatten()
             .collect()
     };
+    let mut truncated = false;
     if pf.is_scoped() {
         let had_rows = !rows.is_empty();
         rows.retain(|(p, ..)| pf.ok(p));
-        rows.truncate(limit.max(0) as usize);
+        truncated = clip(&mut rows, limit);
         // Distinguish "name exists, just not here" from "no such name" — the
         // fuzzy fallback would misleadingly answer the second question.
         if rows.is_empty() && had_rows {
@@ -425,6 +445,9 @@ pub fn cmd_find(
     let mut out = String::new();
     for (path, kind, q, s, e, sig, _) in rows {
         out.push_str(&format!("{kind} {q}  {path}:{s}-{e}  {sig}\n"));
+    }
+    if truncated {
+        out.push_str(LIMIT_TRAILER);
     }
     Ok((out, baseline))
 }
@@ -530,7 +553,22 @@ pub fn cmd_show(
     if super::split_locator(symbol).is_none() && root.join(symbol).exists() {
         return cmd_outline(root, conn, symbol, sig, json);
     }
-    if all {
+    // Without --all, a SMALL ambiguity pool is auto-expanded instead of
+    // erroring: showing 2–3 short definitions answers the question the agent
+    // actually asked, where the error costs a whole retry round-trip. Big
+    // pools (or big bodies) still raise `locate_symbol`'s guided error via
+    // `show_one` — printing them all would be the token sink this tool exists
+    // to avoid. `locate_all` only reports >1 when locate erred on ambiguity.
+    let auto_all = !all
+        && super::locate_all(conn, symbol, kind)
+            .map(|cands| {
+                cands.len() > 1
+                    && cands.len() <= defaults::AUTO_ALL_MAX_CANDIDATES
+                    && cands.iter().map(|c| c.2 - c.1 + 1).sum::<i64>()
+                        <= defaults::AUTO_ALL_MAX_LINES
+            })
+            .unwrap_or(false);
+    if all || auto_all {
         let cands = super::locate_all(conn, symbol, kind)?;
         if cands.len() > 1 {
             // Render each candidate from the row locate_all already resolved —
@@ -546,6 +584,13 @@ pub fn cmd_show(
                 cands
             };
             let mut out = String::new();
+            if auto_all {
+                out.push_str(&format!(
+                    "· '{symbol}' is ambiguous — showing all {} (narrow with \
+                     Parent.Name, file.rs:Name, or --kind)\n",
+                    cands.len()
+                ));
+            }
             let mut baseline = 0;
             for c in &cands {
                 match show_located(root, conn, c, opts, false, false) {

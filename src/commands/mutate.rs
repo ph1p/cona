@@ -74,16 +74,11 @@ pub(crate) fn cmd_edit_code(
     if replacement.trim().is_empty() {
         bail!("replacement is empty — pass --file or pipe code via stdin");
     }
-    // first locate to learn which file, then re-index THAT file and locate
-    // again — guarantees line numbers are fresh even if the file changed
-    // since the last `cona index`.
-    let (path0, _, _, _) = locate_symbol(conn, symbol)?;
-    indexer::reindex_file(root, conn, &path0)?;
-    let (path, s, e, q) = locate_symbol(conn, symbol)?;
+    let (path, s, e, q) = super::locate_for_write(root, conn, symbol)?;
     let abs = project_path(root, &path)?;
     let original = std::fs::read_to_string(&abs)?;
     let new_src = editing::splice_lines(&original, s as usize, e as usize, replacement);
-    write_verified(root, conn, &path, &new_src, force)?;
+    write_verified(root, &path, &new_src, force)?;
     let n = indexer::reindex_file(root, conn, &path)?;
     Ok(format!(
         "edited {q} in {path} (was :{s}-{e}), re-indexed {n} symbols, syntax OK\n"
@@ -93,13 +88,7 @@ pub(crate) fn cmd_edit_code(
 /// Syntax-verify (unless force) then write — the ONE gate shared by every
 /// mutation path (edit / edit --range / insert). Invariant 3: on a parse error
 /// the file is left untouched and an error returned.
-fn write_verified(
-    root: &Path,
-    _conn: &Connection,
-    path: &str,
-    new_src: &str,
-    force: bool,
-) -> Result<()> {
+fn write_verified(root: &Path, path: &str, new_src: &str, force: bool) -> Result<()> {
     let abs = project_path(root, path)?;
     if !force {
         let language = lang::detect_lang(path).ok_or_else(|| anyhow!("unknown language"))?;
@@ -155,7 +144,7 @@ pub fn cmd_edit_range(
     indexer::reindex_file(root, conn, file)?;
     let original = std::fs::read_to_string(&abs)?;
     let new_src = editing::splice_lines(&original, start, end, replacement);
-    write_verified(root, conn, file, &new_src, force)?;
+    write_verified(root, file, &new_src, force)?;
     let n = indexer::reindex_file(root, conn, file)?;
     Ok(format!(
         "edited {file} lines {start}-{end}, re-indexed {n} symbols, syntax OK\n"
@@ -182,9 +171,7 @@ pub fn cmd_insert(
     // resolve the target file + the insertion line
     let (path, at_line, label) = match (symbol, &at) {
         (Some(sym), None) => {
-            let (path0, _, _, _) = locate_symbol(conn, sym)?;
-            indexer::reindex_file(root, conn, &path0)?;
-            let (path, s, e, q) = locate_symbol(conn, sym)?;
+            let (path, s, e, q) = super::locate_for_write(root, conn, sym)?;
             // before → at line s-1; after → just past line e
             let line = if after {
                 e as usize
@@ -202,7 +189,7 @@ pub fn cmd_insert(
     let abs = project_path(root, &path)?;
     let original = std::fs::read_to_string(&abs).unwrap_or_default();
     let new_src = editing::splice_insert(&original, at_line, code);
-    write_verified(root, conn, &path, &new_src, force)?;
+    write_verified(root, &path, &new_src, force)?;
     let n = indexer::reindex_file(root, conn, &path)?;
     Ok(format!(
         "inserted {label} {path}, re-indexed {n} symbols, syntax OK\n"

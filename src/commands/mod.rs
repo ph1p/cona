@@ -37,7 +37,9 @@ pub fn open_indexed(root: &Path) -> Result<Connection> {
     let conn = if db::is_read_only() {
         db::open_existing_project_db(root).map_err(|_| {
             anyhow!(
-                "no existing index for {} in read-only mode — run `cona index` from a writable environment first",
+                "no existing index for {} in read-only mode — run `cona index` from a \
+                 writable environment first (if one exists elsewhere, point CONA_DATA_DIR \
+                 at the directory that holds it)",
                 root.display()
             )
         })?
@@ -48,7 +50,9 @@ pub fn open_indexed(root: &Path) -> Result<Connection> {
     if n == 0 {
         if db::is_read_only() {
             bail!(
-                "the index for {} is empty in read-only mode — run `cona index` from a writable environment first",
+                "the index for {} is empty in read-only mode — run `cona index` from a \
+                 writable environment first (if one exists elsewhere, point CONA_DATA_DIR \
+                 at the directory that holds it)",
                 root.display()
             );
         }
@@ -93,6 +97,20 @@ pub fn finish(root: &Path, cmd: &str, t0: Instant, out: &str, baseline_tokens: i
 /// savings baseline.
 pub(crate) fn jout<T: serde::Serialize>(value: &T, baseline: i64) -> Result<(String, i64)> {
     Ok((format!("{}\n", serde_json::to_string(value)?), baseline))
+}
+
+/// Trailer for a list clipped by `--limit` — ONE string so every clipped list
+/// names the same escape hatch. Budget-clipped output has its own trailer in
+/// [`BudgetOut::finish`].
+pub(crate) const LIMIT_TRAILER: &str = "… truncated (raise --limit)\n";
+
+/// Clip `v` to `limit`, reporting whether rows were dropped. Callers append
+/// [`LIMIT_TRAILER`] on `true`: an agent that sees exactly `limit` rows
+/// cannot otherwise tell "that is everything" from "there was more".
+pub(crate) fn clip<T>(v: &mut Vec<T>, limit: usize) -> bool {
+    let clipped = v.len() > limit;
+    v.truncate(limit);
+    clipped
 }
 
 /// Token-budget accumulator shared by tree/context/shape: chunks are appended
@@ -183,7 +201,7 @@ pub(crate) fn push_numbered_lines(out: &mut String, lines: &[&str], start: usize
 /// so the two surfaces can't drift.
 pub mod defaults {
     pub const TREE_BUDGET: i64 = 2000;
-    pub const FIND_LIMIT: i64 = 25;
+    pub const FIND_LIMIT: usize = 25;
     pub const SHOW_CONTEXT: usize = 0;
     pub const REFS_LIMIT: usize = 100;
     pub const CONTEXT_BUDGET: i64 = 3000;
@@ -195,6 +213,12 @@ pub mod defaults {
     pub const HOT_LIMIT: usize = 20;
     pub const COUPLING_LIMIT: usize = 15;
     pub const PATH_DEPTH: usize = 8;
+    /// `show` auto-expands an ambiguous name instead of erroring when the
+    /// pool is at most this many candidates …
+    pub const AUTO_ALL_MAX_CANDIDATES: usize = 3;
+    /// … and their bodies sum to at most this many lines. Past either bound
+    /// the guided ambiguity error is the cheaper answer.
+    pub const AUTO_ALL_MAX_LINES: i64 = 400;
 }
 
 /// How `show` renders a symbol, once the symbol itself is resolved.
@@ -387,6 +411,16 @@ pub(crate) fn locate_fresh(
         return locate_symbol_kind(conn, symbol, kind);
     }
     Ok(located)
+}
+
+/// `locate_fresh` for WRITE paths (edit/insert): always re-index the defining
+/// file before the final locate, no staleness heuristic. A write splices by
+/// these line numbers, so "probably fresh" is not fresh enough — the extra
+/// reindex of one file is cheap next to a mis-spliced edit.
+pub(crate) fn locate_for_write(root: &Path, conn: &Connection, symbol: &str) -> Result<Located> {
+    let (path0, ..) = locate_symbol(conn, symbol)?;
+    indexer::reindex_file(root, conn, &path0)?;
+    locate_symbol(conn, symbol)
 }
 
 /// Every candidate for `symbol`, in the same priority order the ambiguity
