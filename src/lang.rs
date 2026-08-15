@@ -454,20 +454,22 @@ const FIXED_NAME: &str = "\0fixedname";
 /// Resolves names for the NESTED sentinel: grammars where the identifier is a
 /// known child kind buried past keywords/wrappers. Returns None → symbol skipped.
 fn nested_name(lang: &str, node: Node, src: &str) -> Option<String> {
-    // first descendant (BFS-ish, shallow) whose kind is in `kinds`
+    // first descendant (shallow-first per node) whose kind is in `kinds` —
+    // worklist, not recursion, so a pathological declaration can't blow the stack
     fn first_of<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
-        let mut cur = node.walk();
-        for ch in node.named_children(&mut cur) {
-            if kinds.contains(&ch.kind()) {
-                return Some(ch);
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            let mut cur = n.walk();
+            for ch in n.named_children(&mut cur) {
+                if kinds.contains(&ch.kind()) {
+                    return Some(ch);
+                }
             }
-        }
-        // one level deeper (signatures/type_head wrap the identifier)
-        let mut cur = node.walk();
-        for ch in node.named_children(&mut cur) {
-            if let Some(hit) = first_of(ch, kinds) {
-                return Some(hit);
-            }
+            // no direct hit → descend (signatures/type_head wrap the identifier)
+            let base = stack.len();
+            let mut cur = n.walk();
+            stack.extend(n.named_children(&mut cur));
+            stack[base..].reverse();
         }
         None
     }
@@ -823,11 +825,12 @@ fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<S
     }
     // Pre-order = pop order, so children go on the stack reversed.
     fn push_children<'t>(stack: &mut Vec<Job<'t>>, node: Node<'t>, parent: Option<Rc<str>>) {
+        let base = stack.len();
         let mut cursor = node.walk();
-        let children: Vec<Node> = node.children(&mut cursor).collect();
-        for child in children.into_iter().rev() {
+        for child in node.children(&mut cursor) {
             stack.push(Job::Visit(child, parent.clone()));
         }
+        stack[base..].reverse();
     }
     let mut stack: Vec<Job> = Vec::new();
     push_children(&mut stack, node, parent.map(Rc::from));
@@ -883,10 +886,10 @@ fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<S
                 } else {
                     "fn"
                 };
-                let mut jobs = Vec::new();
+                let base = stack.len();
                 for decl in decls {
                     if let Some((name, value)) = fn_valued_declarator(decl, src) {
-                        jobs.push(Job::FnDecl {
+                        stack.push(Job::FnDecl {
                             name,
                             site: decl,
                             value,
@@ -895,8 +898,8 @@ fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<S
                         });
                     }
                 }
-                if !jobs.is_empty() {
-                    stack.extend(jobs.into_iter().rev());
+                if stack.len() > base {
+                    stack[base..].reverse();
                     continue;
                 }
             }
@@ -987,21 +990,41 @@ pub fn ident_occurrences(lang: &str, src: &str) -> anyhow::Result<Vec<(String, u
     Ok(out)
 }
 
+/// Iterative pre-order over `root` and every descendant. `visit` returns
+/// whether to descend into the node's children. Recursion-free like `walk`:
+/// traversal depth would equal AST depth, and generated/minified files nest
+/// deeper than any thread's stack. TreeCursor keeps it allocation-free.
+fn for_each_node<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>) -> bool) {
+    let mut cursor = root.walk();
+    'down: loop {
+        if visit(cursor.node()) && cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                continue 'down;
+            }
+            if !cursor.goto_parent() {
+                return;
+            }
+        }
+    }
+}
+
 fn collect_idents(node: Node, src: &str, out: &mut Vec<(String, usize)>) {
     // Lean traversal for the flag-less callers (refs / tree --rank): pushes
     // (name, line) directly. Deliberately does NOT run call_node_of per ident —
     // that ancestor walk is pure waste when the call flag is thrown away, and
     // this path runs over every identifier of every file on hot commands.
-    if node.child_count() == 0 && node.kind().ends_with("identifier") {
-        if let Ok(text) = node.utf8_text(src.as_bytes()) {
-            out.push((text.to_string(), node.start_position().row + 1));
+    for_each_node(node, |n| {
+        if n.child_count() == 0 && n.kind().ends_with("identifier") {
+            if let Ok(text) = n.utf8_text(src.as_bytes()) {
+                out.push((text.to_string(), n.start_position().row + 1));
+            }
+            return false;
         }
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_idents(child, src, out);
-    }
+        true
+    });
 }
 
 /// 1-based lines where `name` occurs as an identifier. Semantic via
@@ -1205,22 +1228,21 @@ fn collect_idents_with_call(
     src: &str,
     out: &mut Vec<(String, usize, bool, Option<usize>)>,
 ) {
-    if node.child_count() == 0 && node.kind().ends_with("identifier") {
-        if let Ok(text) = node.utf8_text(src.as_bytes()) {
-            let call = call_node_of(node);
-            out.push((
-                text.to_string(),
-                node.start_position().row + 1,
-                call.is_some(),
-                call.and_then(arg_count_of),
-            ));
+    for_each_node(node, |n| {
+        if n.child_count() == 0 && n.kind().ends_with("identifier") {
+            if let Ok(text) = n.utf8_text(src.as_bytes()) {
+                let call = call_node_of(n);
+                out.push((
+                    text.to_string(),
+                    n.start_position().row + 1,
+                    call.is_some(),
+                    call.and_then(arg_count_of),
+                ));
+            }
+            return false;
         }
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_idents_with_call(child, src, out);
-    }
+        true
+    });
 }
 
 /// Byte-exact positions of `name` as an identifier: (1-based line, byte col).
@@ -1262,16 +1284,15 @@ fn textual_positions(src: &str, name: &str) -> Vec<(usize, usize)> {
 }
 
 fn collect_named_positions(node: Node, src: &str, name: &str, out: &mut Vec<(usize, usize)>) {
-    if node.child_count() == 0 && node.kind().ends_with("identifier") {
-        if node.utf8_text(src.as_bytes()) == Ok(name) {
-            out.push((node.start_position().row + 1, node.start_position().column));
+    for_each_node(node, |n| {
+        if n.child_count() == 0 && n.kind().ends_with("identifier") {
+            if n.utf8_text(src.as_bytes()) == Ok(name) {
+                out.push((n.start_position().row + 1, n.start_position().column));
+            }
+            return false;
         }
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_named_positions(child, src, name, out);
-    }
+        true
+    });
 }
 
 fn ref_lines_textual(src: &str, name: &str) -> Vec<usize> {
@@ -1330,17 +1351,13 @@ pub fn syntax_errors(lang: &str, src: &str) -> anyhow::Result<Vec<usize>> {
 }
 
 fn collect_errors(node: Node, out: &mut Vec<usize>) {
-    if node.is_error() || node.is_missing() {
-        out.push(node.start_position().row + 1);
-        return;
-    }
-    if !node.has_error() {
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_errors(child, out);
-    }
+    for_each_node(node, |n| {
+        if n.is_error() || n.is_missing() {
+            out.push(n.start_position().row + 1);
+            return false;
+        }
+        n.has_error() // subtrees without errors are pruned wholesale
+    });
 }
 
 #[cfg(test)]
@@ -1359,6 +1376,18 @@ mod tests {
         );
         let syms = extract_symbols("javascript", &src).unwrap();
         assert!(syms.iter().any(|s| s.name == "real"));
+        // Every AST walker must survive the same depth, not just `walk`:
+        // refs/grep/rename/edit all traverse the full tree too.
+        let idents = super::ident_occurrences("javascript", &src).unwrap();
+        assert!(idents.iter().any(|(n, _)| n == "real"));
+        assert_eq!(
+            super::ident_positions(Some("javascript"), &src, "real"),
+            (vec![(2, 9)], true)
+        );
+        assert_eq!(
+            super::syntax_errors("javascript", &src).unwrap(),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
