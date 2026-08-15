@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20](https://github.com/ph1p/cona/compare/v0.0.19...v0.0.20) - 2026-08-15
+
+### Added
+
+- *(cli)* flag clipped lists with a shared --limit trailer
+- *(mcp)* expose limit/budget/max_depth knobs on the query tools
+- *(doctor)* report hook liveness and stale Codex plugin caches
+- *(hook)* advise instead of block on output-bounded greps
+- *(hook)* count reads honestly and repeat the nudge on a cadence
+- *(mcp)* name the CLI fallback in more's disclosure
+- *(show)* render small ambiguities instead of erroring
+- *(doctor)* implement the advertised --json output
+
+### Fixed
+
+- *(lang)* make remaining AST walkers iterative
+- *(lang)* walk symbol trees with a worklist, not recursion
+- *(install)* say when the MCP server is skipped for a missing config dir
+- *(cli)* point the read-only bail at CONA_DATA_DIR
+- *(hook)* break the read-redirect loop
+- *(outline)* dead-end error now says which repair applies
+- *(cli)* deps takes --path like every other path filter
+
+### Other
+
+- dedup limit trailers, hook markers, doctor liveness
+- *(cli)* make find's --limit a usize like every other limit
+- *(install)* share ONE agent picker between setup and cona agents
+- *(install)* fold the per-agent guide blocks into the config_paths loop
+- *(edit)* share the write-path locate via locate_for_write
+- *(cli)* fold query dispatch arms into one queried() envelope
+- describe the new hook tiers and show auto-all
+- *(edit)* drop dead conn param from write_verified
+
 ## [0.0.19](https://github.com/ph1p/cona/compare/v0.0.18...v0.0.19) - 2026-08-13
 
 ### Added
