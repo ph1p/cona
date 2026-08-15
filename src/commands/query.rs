@@ -2,8 +2,8 @@
 //! context, diff, grep.
 
 use super::{
-    defaults, jout, locate_fresh, push_numbered_lines, render_symbol_body, scan_ref_sites,
-    BudgetOut, GrepOpts, PathFilter, ShowOpts, ENCLOSING_SYMBOL_SQL,
+    clip, defaults, jout, locate_fresh, push_numbered_lines, render_symbol_body, scan_ref_sites,
+    BudgetOut, GrepOpts, PathFilter, ShowOpts, ENCLOSING_SYMBOL_SQL, LIMIT_TRAILER,
 };
 use crate::{db, diffmap, entries, fuzzy, gitmap, graph, indexer, lang, resolve};
 use anyhow::{anyhow, bail, Result};
@@ -403,10 +403,11 @@ pub fn cmd_find(
             .flatten()
             .collect()
     };
+    let mut truncated = false;
     if pf.is_scoped() {
         let had_rows = !rows.is_empty();
         rows.retain(|(p, ..)| pf.ok(p));
-        rows.truncate(limit);
+        truncated = clip(&mut rows, limit);
         // Distinguish "name exists, just not here" from "no such name" — the
         // fuzzy fallback would misleadingly answer the second question.
         if rows.is_empty() && had_rows {
@@ -444,6 +445,9 @@ pub fn cmd_find(
     let mut out = String::new();
     for (path, kind, q, s, e, sig, _) in rows {
         out.push_str(&format!("{kind} {q}  {path}:{s}-{e}  {sig}\n"));
+    }
+    if truncated {
+        out.push_str(LIMIT_TRAILER);
     }
     Ok((out, baseline))
 }

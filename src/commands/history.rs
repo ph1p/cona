@@ -1,6 +1,6 @@
 //! Git-history commands: blame, hot, coupling.
 
-use super::{jout, locate_fresh};
+use super::{clip, jout, locate_fresh, LIMIT_TRAILER};
 use crate::{db, gitmap};
 use anyhow::Result;
 use rusqlite::Connection;
@@ -15,7 +15,10 @@ pub fn cmd_blame(
     json: bool,
 ) -> Result<(String, i64)> {
     let (path, s, e, q) = locate_fresh(root, conn, symbol, None)?;
-    let (commits, raw_len) = gitmap::log_symbol_range(root, &path, s, e, limit)?;
+    // Ask git for one past the limit so a clipped list is distinguishable
+    // from one that happens to be exactly `limit` long.
+    let (mut commits, raw_len) = gitmap::log_symbol_range(root, &path, s, e, limit + 1)?;
+    let truncated = clip(&mut commits, limit);
     let baseline = db::est_tokens(raw_len);
     if json {
         let items: Vec<_> = commits
@@ -30,10 +33,12 @@ pub fn cmd_blame(
     if commits.is_empty() {
         out.push_str("  no commits touch these lines (new/uncommitted code?)\n");
     }
-    // git already capped the list via -n
     for (h, a, ts, sub) in &commits {
         let short: String = h.chars().take(7).collect();
         out.push_str(&format!("  {short}  {:<4} {a}: {sub}\n", db::ago(*ts)));
+    }
+    if truncated {
+        out.push_str(LIMIT_TRAILER);
     }
     Ok((out, baseline))
 }
@@ -48,11 +53,11 @@ pub fn cmd_hot(
     let mut stmt = conn.prepare("SELECT path FROM files")?;
     let indexed: HashSet<String> = stmt.query_map([], |r| r.get(0))?.flatten().collect();
     let commits = gitmap::log_numstat(root, since)?;
-    let churn: Vec<_> = gitmap::churn(&commits)
+    let mut churn: Vec<_> = gitmap::churn(&commits)
         .into_iter()
         .filter(|(p, ..)| indexed.contains(p))
-        .take(limit)
         .collect();
+    let truncated = clip(&mut churn, limit);
     if json {
         let items: Vec<_> = churn
             .iter()
@@ -72,6 +77,9 @@ pub fn cmd_hot(
             "  {n:>3}×  ~{l:<5} lines  {p}  (last: {a}, {})\n",
             db::ago(*ts)
         ));
+    }
+    if truncated {
+        out.push_str(LIMIT_TRAILER);
     }
     Ok((out, 0))
 }
@@ -93,11 +101,8 @@ pub fn cmd_coupling(
     // full history (not `-- <target>`): co_change needs each commit's complete file list
     let commits = gitmap::log_numstat(root, since)?;
     let (total, riders) = gitmap::co_change(&commits, &target);
-    let top: Vec<_> = riders
-        .into_iter()
-        .filter(|(_, n)| *n >= 2)
-        .take(limit)
-        .collect();
+    let mut top: Vec<_> = riders.into_iter().filter(|(_, n)| *n >= 2).collect();
+    let truncated = clip(&mut top, limit);
     if json {
         let items: Vec<_> = top
             .iter()
@@ -115,6 +120,9 @@ pub fn cmd_coupling(
     for (p, n) in &top {
         let pct = if total > 0 { n * 100 / total } else { 0 };
         out.push_str(&format!("  {n:>3}/{total} ({pct:>2}%)  {p}\n"));
+    }
+    if truncated {
+        out.push_str(LIMIT_TRAILER);
     }
     Ok((out, 0))
 }

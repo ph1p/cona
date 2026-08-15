@@ -99,6 +99,20 @@ pub(crate) fn jout<T: serde::Serialize>(value: &T, baseline: i64) -> Result<(Str
     Ok((format!("{}\n", serde_json::to_string(value)?), baseline))
 }
 
+/// Trailer for a list clipped by `--limit` — ONE string so every clipped list
+/// names the same escape hatch. Budget-clipped output has its own trailer in
+/// [`BudgetOut::finish`].
+pub(crate) const LIMIT_TRAILER: &str = "… truncated (raise --limit)\n";
+
+/// Clip `v` to `limit`, reporting whether rows were dropped. Callers append
+/// [`LIMIT_TRAILER`] on `true`: an agent that sees exactly `limit` rows
+/// cannot otherwise tell "that is everything" from "there was more".
+pub(crate) fn clip<T>(v: &mut Vec<T>, limit: usize) -> bool {
+    let clipped = v.len() > limit;
+    v.truncate(limit);
+    clipped
+}
+
 /// Token-budget accumulator shared by tree/context/shape: chunks are appended
 /// while they fit, `finish` adds the standard truncation trailer.
 pub(crate) struct BudgetOut {
