@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21](https://github.com/ph1p/cona/compare/v0.0.20...v0.0.21) - 2026-08-16
+
+### Fixed
+
+- *(index)* never let the session hook walk $HOME, dedupe concurrent walks
+
+### Other
+
+- skip the $HOME session-start test on Windows
+
 ## [0.0.20](https://github.com/ph1p/cona/compare/v0.0.19...v0.0.20) - 2026-08-15
 
 ### Added
