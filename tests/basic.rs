@@ -1163,6 +1163,13 @@ fn every_mcp_tool_schema_is_well_formed() {
 /// started a multi-hundred-MB walk of the whole home tree. `--session-start`
 /// must bail out there, and quietly: the hook is fail-open, so it exits 0 and
 /// emits no context rather than failing a session over a missing index.
+///
+/// Unix-only because of the harness, not the behaviour: faking a home directory
+/// means overriding `dirs::home_dir`, which reads `$HOME` on unix but calls the
+/// Win32 known-folder API on Windows — no environment variable can redirect it,
+/// so the child would compare the temp dir against the runner's real profile
+/// and index happily. The guard itself is platform-neutral.
+#[cfg(unix)]
 #[test]
 fn session_start_refuses_to_index_the_home_dir() {
     use std::process::Command;
