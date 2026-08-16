@@ -1156,3 +1156,47 @@ fn every_mcp_tool_schema_is_well_formed() {
         }
     }
 }
+
+/// The SessionStart hook fires unattended in whatever directory the harness
+/// happens to be in. When that is $HOME, walking the tree is never what anyone
+/// asked for — several agent sessions launched from the home directory each
+/// started a multi-hundred-MB walk of the whole home tree. `--session-start`
+/// must bail out there, and quietly: the hook is fail-open, so it exits 0 and
+/// emits no context rather than failing a session over a missing index.
+#[test]
+fn session_start_refuses_to_index_the_home_dir() {
+    use std::process::Command;
+    let home = std::env::temp_dir().join(format!("cona-home-{}", std::process::id()));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("a.rs"), "fn hello() {}\n").unwrap();
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let run = |args: &[&str]| {
+        Command::new(bin)
+            .args(args)
+            .env("HOME", &home)
+            .env("CONA_DATA_DIR", home.join(".cona-data"))
+            .current_dir(&home)
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["index", "--quiet", "--session-start"]);
+    assert!(out.status.success(), "hook must never fail a session start");
+    assert!(
+        out.stdout.is_empty(),
+        "no context block from an unindexed home dir: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // A typed `cona index` in $HOME stays allowed — that is a deliberate act,
+    // and it warns rather than refusing.
+    let out = run(&["index"]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("home/filesystem root"),
+        "explicit index in $HOME should warn: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -801,15 +801,39 @@ fn run() -> Result<()> {
                 watch,
                 session_start,
             } = a;
-            if db::is_home_or_fs_root(&root) && !quiet {
-                eprintln!(
-                    "warning: indexing {} (home/filesystem root) walks a huge tree — \
-                     consider running inside a project (or `git init`) instead",
-                    root.display()
-                );
+            if db::is_home_or_fs_root(&root) {
+                // A typed `cona index` in $HOME is a deliberate act: warn, then
+                // do it. The SessionStart hook is not — it fires unattended in
+                // whatever cwd the harness happens to have, and an agent app
+                // launched from $HOME made every session walk the whole home
+                // tree (several concurrent multi-hundred-MB walks). Refuse
+                // there, quietly and with success: the hook is fail-open, a
+                // session must never break over a missing index.
+                if *session_start {
+                    return Ok(());
+                }
+                if !quiet {
+                    eprintln!(
+                        "warning: indexing {} (home/filesystem root) walks a huge tree — \
+                         consider running inside a project (or `git init`) instead",
+                        root.display()
+                    );
+                }
             }
             let conn = db::open_project_db(&root)?;
-            let r = indexer::index_project(&root, &conn)?;
+            // Sessions opening together each fire this hook on the same tree.
+            // Only one walk is useful: the loser reads the counts the winner is
+            // writing and still emits its orientation block, so the session
+            // gets its context without paying for a duplicate walk. Only the
+            // hook dedupes — a typed `cona index` always indexes, because the
+            // user asked for a walk, not for a warm index.
+            let lock = session_start.then(|| db::IndexLock::acquire(&root));
+            let skipped = matches!(lock, Some(None));
+            let r = if skipped {
+                indexer::counts(&conn).unwrap_or_default()
+            } else {
+                indexer::index_project(&root, &conn)?
+            };
             let ms = t0.elapsed().as_millis() as i64;
             if !quiet {
                 println!(
@@ -822,7 +846,9 @@ fn run() -> Result<()> {
                     r.total_symbols
                 );
             }
-            db::log_usage(&root, "index", ms, r.total_symbols, 0, 0);
+            if !skipped {
+                db::log_usage(&root, "index", ms, r.total_symbols, 0, 0);
+            }
             if *session_start {
                 // The SessionStart hook runs `index --quiet --session-start`.
                 // Beyond keeping the index warm, hand the agent repo-specific

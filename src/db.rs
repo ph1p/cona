@@ -538,6 +538,76 @@ pub fn project_db_path(root: &Path) -> PathBuf {
         .unwrap_or_default()
 }
 
+/// Guard for "one walk of this project at a time across processes".
+///
+/// Several agent sessions opening at once each fire the SessionStart hook, and
+/// every one of them used to start its own full walk of the same tree — N times
+/// the CPU and the peak memory for one shared result. The lock is an
+/// exclusively-created marker file next to the project DB; the loser skips its
+/// walk rather than waiting, because the winner is producing exactly the index
+/// it wanted and a few seconds of staleness is invisible (`locate_fresh`
+/// re-checks per query anyway).
+///
+/// Held for the lifetime of the returned guard, which unlinks on drop. A marker
+/// left behind by a killed process would block every later walk, so one older
+/// than `IndexLock::STALE_SECS` is reclaimed.
+pub struct IndexLock(PathBuf);
+
+impl IndexLock {
+    /// Age past which a marker is assumed orphaned. Comfortably longer than any
+    /// real walk (a huge tree indexes in seconds), short enough that a crashed
+    /// process doesn't wedge indexing for a whole session.
+    const STALE_SECS: u64 = 300;
+
+    /// Whether a marker of this age is orphaned. `None` = the age is unknown
+    /// (unreadable mtime, or a clock that moved backwards) and counts as stale:
+    /// one redundant walk beats indexing wedged until the file is removed.
+    fn marker_is_stale(age: Option<std::time::Duration>) -> bool {
+        age.is_none_or(|a| a.as_secs() > Self::STALE_SECS)
+    }
+
+    /// `Some(guard)` if this process may index `root`; `None` if another one is
+    /// already doing it. Any filesystem trouble yields a guard — failing open
+    /// keeps indexing working, which matters more than the deduplication.
+    pub fn acquire(root: &Path) -> Option<Self> {
+        Self::at(&project_db_path(root).with_extension("indexing"))
+    }
+
+    /// `acquire` against an explicit marker path — the whole policy, with the
+    /// data-dir lookup lifted out so it is testable without a global data dir.
+    fn at(path: &Path) -> Option<Self> {
+        if path.as_os_str().is_empty() {
+            return Some(Self(PathBuf::new()));
+        }
+        let path = path.to_path_buf();
+        if let Ok(md) = std::fs::metadata(&path) {
+            let age = md.modified().ok().and_then(|m| m.elapsed().ok());
+            if !Self::marker_is_stale(age) {
+                return None;
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => Some(Self(path)),
+            // Lost the create race to a concurrent process — it is indexing.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+            Err(_) => Some(Self(PathBuf::new())),
+        }
+    }
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        if !self.0.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+}
+
 /// On-disk size (bytes) of a project's index database (incl. WAL/SHM sidecars).
 pub fn project_db_size(root: &Path) -> i64 {
     db_family_size(&project_db_path(root))
@@ -811,7 +881,15 @@ pub fn is_home_or_fs_root(p: &Path) -> bool {
     if p.parent().is_none() {
         return true;
     }
-    dirs::home_dir().is_some_and(|h| h == p)
+    // Compared through `canonicalize` because the two paths reach us by
+    // different routes: the home dir from the environment, the root from the
+    // cwd the process was started in. One side resolving a symlink the other
+    // spells literally (macOS `/tmp` → `/private/tmp` is the everyday case)
+    // would make the guard silently miss and walk the whole tree. Falls back to
+    // the literal path when canonicalize fails — a comparison is better than
+    // none.
+    let real = |q: &Path| q.canonicalize().unwrap_or_else(|_| q.to_path_buf());
+    dirs::home_dir().is_some_and(|h| real(&h) == real(p))
 }
 
 /// Drop a project's index entirely: delete its DB files, registry row and usage
@@ -957,6 +1035,43 @@ pub fn auto_tidy() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn marker(name: &str) -> PathBuf {
+        let p =
+            std::env::temp_dir().join(format!("cona-test-{name}-{}.indexing", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn index_lock_excludes_a_second_holder() {
+        let p = marker("lock-excl");
+        let first = IndexLock::at(&p).expect("first acquire wins");
+        assert!(
+            IndexLock::at(&p).is_none(),
+            "second acquire must be refused"
+        );
+        drop(first);
+        // Released on drop, so the next session can index again.
+        assert!(IndexLock::at(&p).is_some(), "lock must free on drop");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn index_lock_reclaims_a_stale_marker() {
+        // A marker from a killed process must not wedge indexing forever, and a
+        // fresh one must still exclude. Age is judged by `marker_is_stale`, so
+        // the policy is checked without having to backdate a real file.
+        assert!(!IndexLock::marker_is_stale(Some(
+            std::time::Duration::from_secs(1)
+        )));
+        assert!(IndexLock::marker_is_stale(Some(
+            std::time::Duration::from_secs(IndexLock::STALE_SECS + 1)
+        )));
+        // An unreadable/absurd mtime (clock skew makes `elapsed` fail) counts as
+        // stale: better one duplicate walk than indexing wedged for good.
+        assert!(IndexLock::marker_is_stale(None));
+    }
 
     #[test]
     fn baseline_windows_not_whole_file() {

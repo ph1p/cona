@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 219 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic.rs, incl. MCP handshake)
+cargo test                   # 224 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic.rs, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -47,7 +47,12 @@ src/lang.rs      Language detection + tree-sitter symbol extraction. 30+ langs
                  fallback is ONLY here — never rebuild it elsewhere.
 src/indexer.rs   3-phase: walk → parallel parse → one write transaction.
                  EXCLUDED_DIRS + MAX_FILE_BYTES; registered git submodules are
-                 walked back in (parse_gitmodules).
+                 walked back in (parse_gitmodules). The SessionStart hook
+                 (`index --quiet --session-start`) is UNATTENDED: it refuses
+                 $HOME/fs-root outright (exit 0, no context) and takes
+                 db::IndexLock so N sessions opening together produce ONE walk,
+                 not N. A typed `cona index` still warns-and-indexes and never
+                 dedupes — the user asked for a walk.
 src/editing.rs   Pure, tested splice logic for edit/rename (CRLF-preserving)
 src/graph.rs     In-memory call graph; narrow_by_scope = THE scope policy
 src/gitmap.rs    Git mining (churn/co-change/blame), pure parsers + run_git

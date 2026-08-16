@@ -94,12 +94,25 @@ pub fn is_excluded_dir(name: &str) -> bool {
     EXCLUDED_DIRS.contains(&name)
 }
 
+#[derive(Default)]
 pub struct IndexReport {
     pub scanned: usize,
     pub parsed: usize,
     pub removed: usize,
     pub total_files: i64,
     pub total_symbols: i64,
+}
+
+/// The totals an index run would report, read straight from an existing index.
+/// For the caller that skipped its walk because another process holds the index
+/// lock: the walk counters stay zero (this process walked nothing), the totals
+/// describe the index as it stands.
+pub fn counts(conn: &Connection) -> Result<IndexReport> {
+    Ok(IndexReport {
+        total_files: conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?,
+        total_symbols: conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?,
+        ..Default::default()
+    })
 }
 
 struct Candidate {
