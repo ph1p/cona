@@ -96,9 +96,11 @@ Pick one, then run `cona setup` in a project:
 | Prebuilt binary | grab it from [releases](https://github.com/ph1p/cona/releases) (Linux, macOS, Windows), put on `PATH` |
 | From source     | `git clone https://github.com/ph1p/cona && cd cona && ./install.sh`                                   |
 
-The install script downloads a prebuilt binary — no Rust needed. Running
-`./install.sh` from a source checkout builds with cargo (needs Rust ≥ 1.95) and
-wires upgrade hooks.
+The install script downloads a prebuilt binary — no Rust needed. It verifies
+the release's sha256 sidecar and fails closed (`CONA_SKIP_VERIFY=1` bypasses,
+e.g. on an air-gapped mirror); `CONA_VERIFY_ATTESTATION=1` additionally checks
+the SLSA build provenance via the `gh` CLI. Running `./install.sh` from a
+source checkout builds with cargo (needs Rust ≥ 1.95) and wires upgrade hooks.
 
 **Staying current is automatic:** every command cheaply checks (at most once a
 day) for a newer release and updates itself. Force it with `cona upgrade`.
@@ -150,9 +152,8 @@ plugin hook is guarded with `command -v cona`, so without it the plugin is inert
 rather than noisy. Use the plugin **or** `cona agents install`, not both —
 running both is harmless but you'll see the guidance twice.
 
-Codex copies a local plugin into a cache snapshot, so re-run `codex plugin add`
-after editing the plugin, and it gates hooks behind a trust prompt on first run.
-Details for both harnesses: [`plugin/README.md`](plugin/README.md).
+Codex-specific caveats (cache snapshots, hook trust) and details for both
+harnesses: [`plugin/README.md`](plugin/README.md).
 
 ## MCP server
 
@@ -208,7 +209,9 @@ Full tool parity with the CLI. The CLI + hook integration is still recommended
   HTML, Nix, Svelte, Vue, R, XML, GraphQL.
 - **Storage:** everything under `~/.cona/` (override with `CONA_DATA_DIR`) — one
   SQLite index per project plus a global registry + usage stats. Housekeeping
-  runs itself daily; `cona doctor` shows sizes and paths. If the default home
+  runs itself daily — usage rows are kept ≤ 90 days / ≤ 200k rows (tune with
+  `CONA_USAGE_RETENTION_DAYS` / `CONA_MAX_USAGE_ROWS`); `cona doctor` shows
+  sizes and paths. If the default home
   directory is read-only (as it often is for sandboxed agents), cona falls back
   to temporary storage and tells you how to make it persistent.
 - **Strict sandboxes:** `cona --read-only <query>` inspects an existing index

@@ -98,6 +98,12 @@ src/indexer.rs   3-phase: walk → parallel parse → one write transaction.
                  MAX_FILE_BYTES (512 KB) keep index small. watch_project
                  (`index --watch`, notify, 300ms debounce) runs through
                  index_project — the ONE write path.
+                 SessionStart runs `index --quiet --session-start`, the
+                 UNATTENDED variant: it refuses $HOME and the fs root outright
+                 (exit 0, no context — a session opened in ~ must not walk the
+                 whole home dir) and takes db::IndexLock so N sessions opening
+                 at once produce ONE walk, not N. A typed `cona index` still
+                 warns-and-indexes and never dedupes — the user asked for it.
                  Git submodules: `ignore` treats a nested `.git` as a separate
                  repo and walks none of it, so submodule source is invisible to
                  find/refs/grep. parse_gitmodules (pure, tested) reads the
@@ -489,9 +495,12 @@ same `hookSpecificOutput` response), so `src/hook.rs` needs no per-harness
 branch. What differs is the TOOL, not the protocol: Codex has no Read/Grep, only
 a shell — which is what classify_shell in hook.rs exists for (see its entry
 above), and why the PreToolUse matcher lists the shell tool names alongside
-Read|Grep. The matcher is declared in TWO places that must agree:
-plugin/hooks/hooks.json (plugin path) and the `specs` table in
-install/agents.rs claude_hooks (`cona agents install` path). The installer
+Read|Grep. The matcher has ONE source: `hook::PRETOOL_MATCHER` (joined from
+`NATIVE_TOOLS` + `SHELL_TOOLS`, the same lists the dispatcher matches on). The
+installer's `specs` table in install/agents.rs claude_hooks imports it;
+plugin/hooks/hooks.json is the one hand-written copy, pinned equal by
+`plugin_hook_matcher_matches_the_installer` (the PostToolUse/SessionStart
+entries are pinned by `plugin_hooks_match_the_installer`). The installer
 reconciles a drifted matcher on reinstall, so widening it self-heals existing
 installs.
 

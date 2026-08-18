@@ -1,8 +1,14 @@
 # Spike: semantic name resolution (stack-graphs)
 
-Status: **investigated, not implemented** (2026-07-20). This is the "eliminate
-`·ambiguous`" item from the CLAUDE.md roadmap. Captured here so the next attempt
-starts from the findings instead of re-discovering them.
+Status: **investigated 2026-07-20, since SHIPPED** as the out-of-process
+helper tier (see the SHIPPED section below; current state in
+docs/architecture.md `src/resolve.rs`). This was the "eliminate `·ambiguous`"
+item from the CLAUDE.md roadmap. Findings kept so the next iteration starts
+from them instead of re-discovering them.
+
+> 2026 caveat: upstream github/stack-graphs was archived 2025-09-09. The
+> helper still works (vendored crates), but the foundation is unmaintained —
+> further investment should weigh an LSP-based tier instead.
 
 ## Problem
 
@@ -135,9 +141,10 @@ query — fail-open, 24h back-off on failure, opt-out `CONA_NO_FETCH_HELPER`.
 `cona doctor` reports which path found it. It is NEVER a cargo dependency of
 cona (the whole point — see the links collision above).
 
-**Scope shipped:** typescript/tsx/javascript/python; same-file ambiguity only
-(the helper sees one file per call). **Still open:** cross-file resolution
-(feed the helper the candidate files too), mtime-keyed caching (currently the
+**Scope shipped:** typescript/tsx/javascript/python via published TSG rules,
+plus rust via a hand-authored rust.tsg (inherent methods, no traits/generics/
+macros — fail-open); cross-file resolution via `deps` stitching landed after
+this spike. **Still open:** mtime-keyed caching (currently the
 graph is rebuilt per call — fine because it only fires on rare ambiguity), and
 **Rust** (still no published TSG — needs hand-authored `.tsg`, the one
 effort-unbounded item). Wiring `refs`/`callers`/`rename` to the same tier is
