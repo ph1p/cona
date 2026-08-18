@@ -9,7 +9,7 @@
       "name": "cona",
       "source": "./plugin",
       "description": "Token-efficient code navigation: read one symbol instead of a whole file, search code semantically, and edit with syntax verification.",
-      "version": "0.1.0",
+      "version": "0.0.21",
       "category": "development",
       "keywords": [
         "code-navigation",
