@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.22](https://github.com/ph1p/cona/compare/v0.0.21...v0.0.22) - 2026-08-18
+
+### Fixed
+
+- *(lang)* deny-list parse-only languages in has_callable_symbols
+- *(install)* harden the install and upgrade paths
+
+### Other
+
+- install verification, matcher single-source, spike status
+- dedupe plugin manifest JSON loading
+- *(plugin)* sync plugin manifest versions in the release flow
+
 ## [0.0.21](https://github.com/ph1p/cona/compare/v0.0.20...v0.0.21) - 2026-08-16
 
 ### Fixed
