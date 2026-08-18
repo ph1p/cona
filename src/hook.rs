@@ -64,6 +64,12 @@ pub static PRETOOL_MATCHER: LazyLock<String> = LazyLock::new(|| {
         .join("|")
 });
 
+/// The `PostToolUse` matcher for the reindex hook — the write tools whose
+/// output can invalidate the index. Single source for the installer
+/// (install/agents.rs `claude_hooks`) and the plugin copy
+/// (`plugin/hooks/hooks.json`, pinned by `plugin_hooks_match_the_installer`).
+pub const POSTTOOL_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit";
+
 /// Default line threshold above which a full read of an indexed code file is
 /// redirected to `cona outline`/`show`. Override with `CONA_READ_MAX_LINES`.
 const DEFAULT_MAX_LINES: i64 = 300;
@@ -1556,6 +1562,10 @@ mod tests {
             ("a.html", "html"),
             ("a.css", "css"),
             ("a.graphql", "graphql"),
+            ("a.nix", "nix"),
+            ("a.svelte", "svelte"),
+            ("a.vue", "vue"),
+            ("a.r", "r"),
         ] {
             assert_eq!(lang::detect_lang(path), Some(lang), "{path}");
             assert!(!lang::has_callable_symbols(lang), "{lang}");

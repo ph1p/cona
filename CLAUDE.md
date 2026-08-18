@@ -102,8 +102,9 @@ src/db.rs        SQLite: per-project DB + global.db (registry/usage/meta)
    kinds in `classify` (label, is_container, name_field)
 3. Test case in `tests/basic.rs`
 4. Language lists in README.md ("Languages") and CLAUDE.md (src/lang.rs entry)
-5. If it is prose/markup/data (no function-like `classify` kind), add it to the
-   `has_callable_symbols` deny-list in `lang.rs` — otherwise the read-advisory
+5. If it indexes no symbols — prose/markup/data, OR a parse-only code language
+   with no `classify` arms (nix/svelte/vue/r) — add it to the
+   `has_callable_symbols` deny-list in `lang.rs`; otherwise the read-advisory
    hook tells the agent to `cona show <Symbol>` on a file that has no such
    symbols. `non_callable_languages_are_reachable` guards the reverse mistake
    (a deny-list entry `detect_lang` can never return).

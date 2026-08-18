@@ -94,6 +94,10 @@ pub fn has_callable_symbols(lang: &str) -> bool {
     !matches!(
         lang,
         "markdown" | "json" | "yaml" | "toml" | "xml" | "html" | "css" | "graphql"
+            // parse-only code languages: reachable from detect_lang and
+            // parseable (refs/grep work), but with NO classify arms — they
+            // index zero symbols, so `show <Symbol>` advice is a dead end
+            | "nix" | "svelte" | "vue" | "r"
     )
 }
 
@@ -1395,7 +1399,7 @@ mod tests {
         // The worklist rewrite must emit the same symbols in the same order
         // as the old recursion: parent before child, child qualified.
         let src = "const outer = () => {\n  const inner = () => {};\n};\nconst after = () => {};\n";
-        let syms = extract_symbols("javascript", &src).unwrap();
+        let syms = extract_symbols("javascript", src).unwrap();
         let got: Vec<(&str, &str)> = syms
             .iter()
             .map(|s| (s.qualified.as_str(), s.kind))
