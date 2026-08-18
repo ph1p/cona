@@ -87,6 +87,7 @@ pub fn fetch_release_archive(ver: &str, target: &str, tmp: &Path) -> Result<()> 
         download_quiet(&checksum_url, &checksum)
             .map_err(|_| anyhow!("no release checksum for v{ver} ({target}) — refusing to install an unverified binary"))?;
         verify_sha256(&archive, &checksum)?;
+        verify_attestation(&archive)?;
         validate_archive_paths(&archive)?;
         // bsdtar (macOS, Windows 10+) and GNU tar both handle .tar.gz; bsdtar
         // also extracts the Windows .zip.
@@ -155,6 +156,27 @@ fn verify_sha256(archive: &Path, checksum_file: &Path) -> Result<()> {
     let actual = format!("{:x}", Sha256::digest(bytes));
     if !actual.eq_ignore_ascii_case(expected) {
         bail!("release archive checksum mismatch");
+    }
+    Ok(())
+}
+
+/// Opt-in SLSA provenance check, the same knob install.sh honours:
+/// `CONA_VERIFY_ATTESTATION=1` verifies (via the `gh` CLI) that the archive
+/// was built by this repo's release workflow. Off by default — it needs an
+/// authenticated `gh` — but once asked for, failure is fatal: the user opted
+/// into the stronger check, so silently downgrading would defeat it.
+fn verify_attestation(archive: &Path) -> Result<()> {
+    if std::env::var("CONA_VERIFY_ATTESTATION").as_deref() != Ok("1") {
+        return Ok(());
+    }
+    let status = std::process::Command::new("gh")
+        .args(["attestation", "verify"])
+        .arg(archive)
+        .args(["--repo", GITHUB_REPO])
+        .status()
+        .map_err(|e| anyhow!("CONA_VERIFY_ATTESTATION=1 needs the gh CLI ({e})"))?;
+    if !status.success() {
+        bail!("attestation verification failed for {}", archive.display());
     }
     Ok(())
 }
@@ -298,6 +320,14 @@ impl Change {
             Change::Unchanged => "unchanged",
         }
     }
+}
+
+/// Single-quote a value for splicing into a shell command line (git hook
+/// lines, settings.json hook commands — both are executed through a shell):
+/// an install path with spaces or quotes would otherwise produce a broken
+/// line that fires on every commit / tool call.
+pub(crate) fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Write `content` to `path` only if it differs from what's already there.

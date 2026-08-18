@@ -81,9 +81,14 @@ trap 'rm -rf "$tmp"' EXIT
 dl "$url" "$tmp/cona.tar.gz" || err "download failed: $url"
 
 # Verify against the release's checksum sidecar — the Rust self-upgrade path
-# refuses unverified binaries, and this path must not be weaker. Mismatch is
-# fatal; a missing sidecar (older release) or missing hash tool only warns.
-if dl "$url.sha256" "$tmp/cona.tar.gz.sha256" 2>/dev/null; then
+# refuses unverified binaries, and this path must not be weaker. Every release
+# publishes a sidecar, so a missing one is a tamper signal, not an old release:
+# fail closed. Escape hatch for air-gapped mirrors: CONA_SKIP_VERIFY=1.
+if [ "${CONA_SKIP_VERIFY:-}" = "1" ]; then
+    echo "warn: CONA_SKIP_VERIFY=1 — skipping checksum verification"
+else
+    dl "$url.sha256" "$tmp/cona.tar.gz.sha256" 2>/dev/null \
+        || err "checksum sidecar missing: $url.sha256 (set CONA_SKIP_VERIFY=1 to bypass)"
     want="$(awk '{print $1}' "$tmp/cona.tar.gz.sha256")"
     if command -v sha256sum >/dev/null 2>&1; then
         got="$(sha256sum "$tmp/cona.tar.gz" | awk '{print $1}')"
@@ -92,15 +97,21 @@ if dl "$url.sha256" "$tmp/cona.tar.gz.sha256" 2>/dev/null; then
     elif command -v openssl >/dev/null 2>&1; then
         got="$(openssl dgst -sha256 -r "$tmp/cona.tar.gz" | awk '{print $1}')"
     else
-        got=""
-        echo "warn: no sha256 tool found — skipping checksum verification"
+        err "no sha256 tool found (need sha256sum, shasum, or openssl; CONA_SKIP_VERIFY=1 to bypass)"
     fi
-    if [ -n "$got" ]; then
-        [ "$got" = "$want" ] || err "checksum mismatch for $url"
-        echo "checksum ok"
-    fi
-else
-    echo "warn: no checksum sidecar for this release — skipping verification"
+    [ -n "$want" ] || err "empty checksum sidecar for $url"
+    [ "$got" = "$want" ] || err "checksum mismatch for $url"
+    echo "checksum ok"
+fi
+
+# Opt-in SLSA provenance check (needs an authenticated `gh` CLI):
+# CONA_VERIFY_ATTESTATION=1 verifies the archive was built by this repo's
+# release workflow. Failure is fatal — you asked for the stronger check.
+if [ "${CONA_VERIFY_ATTESTATION:-}" = "1" ]; then
+    command -v gh >/dev/null 2>&1 || err "CONA_VERIFY_ATTESTATION=1 needs the gh CLI"
+    gh attestation verify "$tmp/cona.tar.gz" --repo "$REPO" \
+        || err "attestation verification failed for $url"
+    echo "attestation ok"
 fi
 
 tar -xf "$tmp/cona.tar.gz" -C "$tmp" || err "extract failed"

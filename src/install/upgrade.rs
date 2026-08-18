@@ -23,7 +23,10 @@ pub fn cmd_hooks(root: &Path, action: &str) -> Result<()> {
     match action {
         "install" => {
             // absolute path so hooks work even when cona isn't on PATH
-            let line = format!("{} index --quiet 2>/dev/null &", agent_exe());
+            let line = format!(
+                "{} index --quiet 2>/dev/null &",
+                super::sh_quote(&agent_exe())
+            );
             for n in names {
                 append_hook_line(&hooks_dir.join(n), &line, "index --quiet")?;
             }
@@ -140,6 +143,7 @@ fn mtime_secs(p: &Path) -> i64 {
 
 /// Atomically place `src` at `dst` (copy to temp sibling, rename over).
 fn replace_binary(src: &Path, dst: &Path) -> Result<Change> {
+    sweep_old_husks(dst);
     let existed = dst.exists();
     if existed && files_identical(src, dst) {
         return Ok(Change::Unchanged);
@@ -157,12 +161,49 @@ fn replace_binary(src: &Path, dst: &Path) -> Result<Change> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     }
+    // Windows refuses to rename over a running exe (self-upgrade replaces the
+    // very binary that spawned us): move the old file aside first — renaming a
+    // running exe TO a new name is allowed — then best-effort-delete the husk.
+    #[cfg(windows)]
+    let aside = if existed {
+        let aside = dst.with_extension(format!("old.{}", std::process::id()));
+        std::fs::rename(dst, &aside)?;
+        Some(aside)
+    } else {
+        None
+    };
     std::fs::rename(&tmp, dst)?;
+    #[cfg(windows)]
+    if let Some(aside) = aside {
+        let _ = std::fs::remove_file(aside);
+    }
     Ok(if existed {
         Change::Updated
     } else {
         Change::Created
     })
+}
+
+/// Collect the previous upgrade's leavings next to `dst`. On Windows the
+/// rename-aside husk (`cona.old.<pid>`) cannot be deleted while it IS the
+/// running process — self-upgrade, the main caller — so each upgrade sweeps
+/// the stale ones the last upgrade had to leave behind. Best-effort: a husk
+/// that is still running stays locked and survives until the next sweep.
+/// Deliberately does NOT touch `tmp-update.*` — a concurrent upgrade may be
+/// mid-copy into its own tmp file.
+fn sweep_old_husks(dst: &Path) {
+    let (Some(dir), Some(stem)) = (dst.parent(), dst.file_stem().and_then(|s| s.to_str())) else {
+        return;
+    };
+    let prefix = format!("{stem}.old.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        if e.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// `cona install [--bin-dir DIR]`
@@ -511,7 +552,10 @@ fn refresh_upgrade_hooks(src_root: &Path, dst: &Path) -> Result<bool> {
         return Ok(false);
     }
     strip_git_hook_lines(&hooks_dir, &["self-update"]);
-    let line = format!("{} upgrade --quiet &", dst.display());
+    let line = format!(
+        "{} upgrade --quiet &",
+        super::sh_quote(&dst.display().to_string())
+    );
     for n in ["post-commit", "post-merge", "post-checkout"] {
         append_hook_line(&hooks_dir.join(n), &line, "upgrade --quiet")?;
     }
@@ -909,6 +953,14 @@ fn remove_binary() -> Result<usize> {
         Some(dst) if Path::new(&dst).exists() => {
             if std::fs::remove_file(&dst).is_ok() {
                 println!("{}", ui::ok(&format!("removed  {dst}")));
+                // the resolve helper is installed beside the binary — take it
+                // along, or uninstall leaks it (uninstall.sh already does this)
+                if let Some(dir) = Path::new(&dst).parent() {
+                    let helper = dir.join(HELPER_EXE);
+                    if helper.exists() && std::fs::remove_file(&helper).is_ok() {
+                        println!("{}", ui::ok(&format!("removed  {}", helper.display())));
+                    }
+                }
                 Ok(1)
             } else {
                 println!("{}", ui::warn(&format!("could not remove {dst}")));

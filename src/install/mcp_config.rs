@@ -86,6 +86,10 @@ impl ServerKey {
 /// `mcpServers.cona` key is touched. An unparsable config is an error rather
 /// than an overwrite — same rule as `claude_hooks` on settings.json
 /// (invariant 6: never clobber foreign file content).
+///
+/// Production code always goes through `json_server_keyed` (the harness table
+/// carries the key); this default-key shorthand survives for the tests below.
+#[cfg(test)]
 pub fn json_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
     json_server_keyed(path, exe, install, ServerKey::McpServers)
 }

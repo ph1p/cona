@@ -1197,7 +1197,9 @@ fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
     if !root.is_object() {
         bail!("settings.json top level is not an object");
     }
-    let exe = agent_exe();
+    // quoted: these commands run through a shell, and an install path with
+    // spaces would otherwise break every hook invocation
+    let exe = super::sh_quote(&agent_exe());
     let index_cmd = format!("{exe} index --quiet");
     // SessionStart also emits a repo-orientation context block (see
     // main.rs session_start_context). Distinct command, but its marker stays
@@ -1218,7 +1220,7 @@ fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
     let specs: [(&str, Option<&str>, &str, &str); 4] = [
         (
             "PostToolUse",
-            Some("Edit|Write|MultiEdit|NotebookEdit"),
+            Some(crate::hook::POSTTOOL_MATCHER),
             &index_cmd,
             "index --quiet",
         ),
