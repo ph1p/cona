@@ -1,0 +1,36 @@
+# Advisory audit of Cargo.lock. Its own workflow (not a CI job) because its
+# result only depends on the lockfile: gating on paths skips it for the
+# doc/source-only pushes that make up most commits, and the weekly cron still
+# catches NEW advisories filed against an unchanged lockfile — a paths filter
+# alone would miss those. Not in release-plz's `workflows: [CI]` gate on
+# purpose: a new upstream advisory should page, not block an unrelated release.
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "src/resolve-helper/Cargo.*"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "src/resolve-helper/Cargo.*"
+      - ".github/workflows/audit.yml"
+  schedule:
+    - cron: "17 6 * * 1" # weekly: new advisories against an unchanged lockfile
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+      - run: cargo audit --file src/resolve-helper/Cargo.lock
