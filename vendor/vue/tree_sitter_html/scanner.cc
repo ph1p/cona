@@ -280,29 +280,43 @@ struct Scanner {
 
 }
 
+// RENAMED from tree_sitter_html_external_scanner_* to
+// tree_sitter_vue_html_external_scanner_*.
+//
+// This file is vue's bundled COPY of the html scanner, included by
+// vendor/vue/scanner.cc. Under the original names its five exports collide with
+// the real `tree-sitter-html` crate's scanner, which links into the same binary:
+// the linker keeps ONE definition, so tree-sitter-html got vue's scanner state
+// layout and EVERY html parse came back as a single ERROR node (silently — a
+// broken parse, not a link error).
+//
+// Nothing calls these: vue's parser.c drives tree_sitter_vue_external_scanner_*
+// (vendor/vue/scanner.cc), which uses the Scanner class directly. The names
+// exist only because the upstream file ends in an extern "C" export block.
+// `html_scanner_exports_do_not_collide` in src/lang.rs pins the behaviour.
 extern "C" {
 
-void *tree_sitter_html_external_scanner_create() {
+void *tree_sitter_vue_html_external_scanner_create() {
   return new Scanner();
 }
 
-bool tree_sitter_html_external_scanner_scan(void *payload, TSLexer *lexer,
+bool tree_sitter_vue_html_external_scanner_scan(void *payload, TSLexer *lexer,
                                             const bool *valid_symbols) {
   Scanner *scanner = static_cast<Scanner *>(payload);
   return scanner->scan(lexer, valid_symbols);
 }
 
-unsigned tree_sitter_html_external_scanner_serialize(void *payload, char *buffer) {
+unsigned tree_sitter_vue_html_external_scanner_serialize(void *payload, char *buffer) {
   Scanner *scanner = static_cast<Scanner *>(payload);
   return scanner->serialize(buffer);
 }
 
-void tree_sitter_html_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {
+void tree_sitter_vue_html_external_scanner_deserialize(void *payload, const char *buffer, unsigned length) {
   Scanner *scanner = static_cast<Scanner *>(payload);
   scanner->deserialize(buffer, length);
 }
 
-void tree_sitter_html_external_scanner_destroy(void *payload) {
+void tree_sitter_vue_html_external_scanner_destroy(void *payload) {
   Scanner *scanner = static_cast<Scanner *>(payload);
   delete scanner;
 }

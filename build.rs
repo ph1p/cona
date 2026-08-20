@@ -37,6 +37,9 @@ fn main() {
     for f in [
         "vendor/vue/parser.c",
         "vendor/vue/scanner.cc",
+        // #included by vue/scanner.cc — without it here, edits to the bundled
+        // html scanner do not trigger a rebuild and the stale object silently wins.
+        "vendor/vue/tree_sitter_html/scanner.cc",
         "vendor/dockerfile/parser.c",
         "vendor/dockerfile/scanner.c",
     ] {
