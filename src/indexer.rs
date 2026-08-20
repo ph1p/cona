@@ -94,6 +94,40 @@ pub fn is_excluded_dir(name: &str) -> bool {
     EXCLUDED_DIRS.contains(&name)
 }
 
+/// Dependency lock files. Machine-generated, and the data grammars (json/yaml)
+/// happily index every mapping key in them — a single pnpm-lock.yaml can
+/// contribute thousands of `key` symbols that bury a project's real symbols in
+/// `tree`/`find` output and inflate the DB. Nobody navigates to a lock entry by
+/// symbol name; when one is genuinely in question it is read or grepped
+/// directly, which still works — only symbol extraction is skipped.
+const EXCLUDED_FILES: &[&str] = &[
+    "pnpm-lock.yaml",
+    "package-lock.json",
+    "yarn.lock",
+    "npm-shrinkwrap.json",
+    "bun.lock",
+    "bun.lockb",
+    "Cargo.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "uv.lock",
+    "pdm.lock",
+    "go.sum",
+    "flake.lock",
+    "pubspec.lock",
+    "Podfile.lock",
+    "packages.lock.json",
+    "mix.lock",
+    "deno.lock",
+];
+
+/// True if this file name is a dependency lock file and should not be indexed.
+pub fn is_excluded_file(name: &str) -> bool {
+    EXCLUDED_FILES.contains(&name)
+}
+
 #[derive(Default)]
 pub struct IndexReport {
     pub scanned: usize,
@@ -202,6 +236,9 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
         let Some(language) = lang::detect_lang(&rel) else {
             continue;
         };
+        if is_excluded_file(entry.file_name().to_str().unwrap_or("")) {
+            continue;
+        }
         let Ok(meta) = entry.metadata() else { continue };
         let (mtime, size) = (file_mtime(&meta), meta.len() as i64);
         seen.insert(rel.clone());
@@ -549,6 +586,24 @@ mod tests {
 \turl = ../core
 ";
         assert_eq!(parse_gitmodules(body), vec!["vendor/sdk", "libs/core"]);
+    }
+
+    #[test]
+    fn lock_files_are_excluded_but_their_manifests_are_not() {
+        for f in [
+            "pnpm-lock.yaml",
+            "package-lock.json",
+            "Cargo.lock",
+            "go.sum",
+            "poetry.lock",
+        ] {
+            assert!(is_excluded_file(f), "{f}");
+        }
+        // the hand-written manifests next to them stay indexed — they are what
+        // an agent actually navigates
+        for f in ["package.json", "Cargo.toml", "pom.xml", "pyproject.toml"] {
+            assert!(!is_excluded_file(f), "{f}");
+        }
     }
 
     #[test]
