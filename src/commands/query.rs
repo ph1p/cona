@@ -342,10 +342,16 @@ pub fn cmd_outline(
         }
         let depth = name.matches('.').count();
         let indent = "  ".repeat(depth + 1);
+        // The indent already encodes the ancestor chain, so repeating it in every
+        // name is redundant — and on deeply nested trees (XML/POM: 10+ levels)
+        // that redundancy is quadratic, which made `outline pom.xml` cost more
+        // than reading the file. Print the leaf; `--json` keeps the full
+        // qualified name, since that is what callers address symbols by.
+        let leaf = name.rsplit('.').next().unwrap_or(&name);
         if show_sig {
-            out.push_str(&format!("{indent}{kind} {name} :{s}-{e}  {sig}\n"));
+            out.push_str(&format!("{indent}{kind} {leaf} :{s}-{e}  {sig}\n"));
         } else {
-            out.push_str(&format!("{indent}{kind} {name} :{s}-{e}\n"));
+            out.push_str(&format!("{indent}{kind} {leaf} :{s}-{e}\n"));
         }
     }
     Ok((out, baseline))
