@@ -464,7 +464,9 @@ fn dockerfile_symbols() {
 
 #[test]
 fn parse_only_langs_parse_without_symbols() {
-    // nix/svelte/vue/r/xml/graphql are parsed for refs/grep but extract no symbols
+    // nix/svelte/vue/r/graphql are parsed for refs/grep but extract no symbols.
+    // xml is NOT in this list any more — it yields element symbols; see
+    // `xml_elements_named_by_identifying_child`.
     for (lang, src) in [
         ("nix", "{ pkgs }: { hello = pkgs.hello; }\n"),
         ("svelte", "<script>let x = 0;</script>\n<b>{x}</b>\n"),
@@ -473,7 +475,6 @@ fn parse_only_langs_parse_without_symbols() {
             "<script setup>\nfunction greet() {}\n</script>\n<template><b>{{ greet() }}</b></template>\n",
         ),
         ("r", "add <- function(a) a\n"),
-        ("xml", "<root><child>x</child></root>\n"),
         ("graphql", "type Query { hello: String }\n"),
     ] {
         // must not error (parser wired), symbol list may be empty
@@ -1276,4 +1277,37 @@ fn session_start_refuses_to_index_the_home_dir() {
     );
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn xml_elements_named_by_identifying_child() {
+    let src = "<project>\n  <artifactId>demo</artifactId>\n  <profiles>\n    <profile>\n      <id>with-frontend-build</id>\n    </profile>\n  </profiles>\n</project>\n";
+    let quals = quals("xml", src);
+    // the tag alone is not addressable in a POM — every <profile> looks alike,
+    // so the identifying child is folded into the name with a `#` separator
+    assert!(
+        quals
+            .iter()
+            .any(|q| q.ends_with("profile#with-frontend-build")),
+        "{quals:?}"
+    );
+    assert!(quals.iter().any(|q| q == "project#demo"), "{quals:?}");
+    assert_eq!(lang::detect_lang("pom.xml"), Some("xml"));
+}
+
+#[test]
+fn html_elements_named_by_attribute_or_directive() {
+    let src = "<html>\n  <body>\n    <main id=\"shell\">\n      <h1 th:text=\"${title}\">t</h1>\n      <div class=\"x\">plain</div>\n    </main>\n  </body>\n</html>\n";
+    let quals = quals("html", src);
+    // structural landmarks earn a symbol with no attributes at all
+    assert!(quals.iter().any(|q| q.ends_with("body")), "{quals:?}");
+    assert!(quals.iter().any(|q| q.ends_with("main#shell")), "{quals:?}");
+    // a framework directive identifies an element when no plain attribute does
+    assert!(
+        quals.iter().any(|q| q.ends_with("h1#@th:text")),
+        "{quals:?}"
+    );
+    // an unidentified, non-structural div is noise and stays out
+    assert!(!quals.iter().any(|q| q.ends_with("div")), "{quals:?}");
+    assert_eq!(lang::detect_lang("templates/home.html"), Some("html"));
 }

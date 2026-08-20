@@ -1541,10 +1541,23 @@ mod tests {
 
     #[test]
     fn callable_languages_classified() {
-        for l in ["rust", "typescript", "tsx", "sql", "hcl", "swift", "perl"] {
+        // xml and html index real symbols (elements, named by tag plus an
+        // identifying child/attribute), so the advisory tier must fire on a
+        // pom.xml or a template like it does on any code file
+        for l in [
+            "rust",
+            "typescript",
+            "tsx",
+            "sql",
+            "hcl",
+            "swift",
+            "perl",
+            "xml",
+            "html",
+        ] {
             assert!(lang::has_callable_symbols(l), "{l} should be advisable");
         }
-        for l in ["markdown", "json", "yaml", "toml", "xml", "html", "css"] {
+        for l in ["markdown", "json", "yaml", "toml", "css"] {
             assert!(!lang::has_callable_symbols(l), "{l} should stay quiet");
         }
     }
@@ -1558,8 +1571,6 @@ mod tests {
             ("a.json", "json"),
             ("a.yaml", "yaml"),
             ("a.toml", "toml"),
-            ("a.xml", "xml"),
-            ("a.html", "html"),
             ("a.css", "css"),
             ("a.graphql", "graphql"),
             ("a.nix", "nix"),

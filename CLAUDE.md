@@ -42,7 +42,8 @@ src/commands/    cmd_* impls: mod.rs (shared helpers + `defaults` = THE limits +
                  write_verified), insight.rs, history.rs, callgraph.rs,
                  stats.rs, mcp_server.rs
 src/lang.rs      Language detection + tree-sitter symbol extraction. 30+ langs
-                 with symbols; refs/grep-only for JSON/HTML/Svelte/Vue/…
+                 with symbols, incl. markup (XML/HTML elements named
+                 `tag#identity`); refs/grep-only for JSON/Svelte/Vue/…
                  Semantic identifier search lives here; fail-open textual
                  fallback is ONLY here — never rebuild it elsewhere.
 src/indexer.rs   3-phase: walk → parallel parse → one write transaction.

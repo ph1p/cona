@@ -93,7 +93,7 @@ pub fn detect_lang(path: &str) -> Option<&'static str> {
 pub fn has_callable_symbols(lang: &str) -> bool {
     !matches!(
         lang,
-        "markdown" | "json" | "yaml" | "toml" | "xml" | "html" | "css" | "graphql"
+        "markdown" | "json" | "yaml" | "toml" | "css" | "graphql"
             // parse-only code languages: reachable from detect_lang and
             // parseable (refs/grep work), but with NO classify arms — they
             // index zero symbols, so `show <Symbol>` advice is a dead end
@@ -219,6 +219,20 @@ fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, bool, &'static
             "preproc_function_def" | "preproc_def" => Some(("macro", false, "name")),
             "class_specifier" if lang == "cpp" => Some(("class", true, "name")),
             "namespace_definition" if lang == "cpp" => Some(("namespace", true, "name")),
+            _ => None,
+        },
+        // XML/POM/csproj: every construct is an `element`; XML_ELEMENT builds the
+        // name from the tag plus an identifying child. is_container so nested
+        // elements (a <profile>'s <plugin>s) are walked too.
+        "xml" => match node_kind {
+            "element" => Some(("element", true, XML_ELEMENT)),
+            _ => None,
+        },
+        // HTML: elements are symbols only when identified or structural (see
+        // HTML_ELEMENT). is_container is irrelevant — the walk descends into
+        // skipped elements anyway, so children of a plain <div> still surface.
+        "html" => match node_kind {
+            "element" | "script_element" | "style_element" => Some(("element", true, HTML_ELEMENT)),
             _ => None,
         },
         // CSS has no `name` fields — FIRST_CHILD tells node_name to use the
@@ -455,6 +469,18 @@ const HCL_BLOCK: &str = "\0hclblock";
 /// `_declaration`, so `Foo.init` stays addressable without a name field.
 const FIXED_NAME: &str = "\0fixedname";
 
+/// XML element sentinel: the tag name, qualified by an identifying child's text
+/// when the element has one (`<profile><id>x</id>` → `profile.x`). Build files
+/// repeat the same tag hundreds of times (`dependency`, `plugin`, `execution`),
+/// so the bare tag is not an addressable name.
+const XML_ELEMENT: &str = "\0xmlelement";
+
+/// HTML element sentinel: only elements that carry an identity (`id`, a framework
+/// directive, a `name`) or structural meaning (landmarks, `script`/`style`,
+/// `template`) become symbols. A template is mostly `<div>`/`<span>` scaffolding;
+/// indexing all of it would bury the handful of elements worth navigating to.
+const HTML_ELEMENT: &str = "\0htmlelement";
+
 /// Resolves names for the NESTED sentinel: grammars where the identifier is a
 /// known child kind buried past keywords/wrappers. Returns None → symbol skipped.
 fn nested_name(lang: &str, node: Node, src: &str) -> Option<String> {
@@ -553,6 +579,183 @@ fn elixir_def_name(node: Node, src: &str) -> Option<String> {
     }
 }
 
+/// Attributes that identify an element, most specific first. Framework
+/// directives (Thymeleaf `th:*`, Vue `v-*`, Alpine `x-*`, Angular, htmx) are
+/// matched by prefix in `html_attr_identity`, not listed here.
+/// `href`/`src` are deliberately absent: a URL is long, unstable, and makes a
+/// worse symbol name than the bare tag.
+const HTML_ID_ATTRS: &[&str] = &["id", "name", "data-testid", "data-test", "slot", "rel"];
+
+/// Tags that are structural landmarks: worth a symbol even with no attributes,
+/// because they are what an agent navigates a template by.
+const HTML_STRUCTURAL_TAGS: &[&str] = &[
+    "html", "head", "body", "main", "header", "footer", "nav", "aside", "section", "article",
+    "form", "table", "script", "style", "template", "dialog", "h1", "h2", "h3", "h4", "h5", "h6",
+];
+
+/// HTML element name: `tag#identity` when the element carries an identifying
+/// attribute, bare `tag` when it is structural, and `None` otherwise — which
+/// makes the walk skip it (its children are still visited, so a nested
+/// `<button id=…>` inside plain `<div>`s is not lost).
+/// shape: (element (start_tag (tag_name TAG) (attribute (attribute_name K)
+///                            (quoted_attribute_value (attribute_value V)))*) …)
+fn html_element_name(node: Node, src: &str) -> Option<String> {
+    let mut cur = node.walk();
+    let tag_node = node
+        .named_children(&mut cur)
+        .find(|c| matches!(c.kind(), "start_tag" | "self_closing_tag"))?;
+    let mut tc = tag_node.walk();
+    let tag = tag_node
+        .named_children(&mut tc)
+        .find(|c| c.kind() == "tag_name")?
+        .utf8_text(src.as_bytes())
+        .ok()?
+        .trim()
+        .to_ascii_lowercase();
+    if tag.is_empty() {
+        return None;
+    }
+    if let Some(identity) = html_attr_identity(tag_node, src) {
+        return Some(format!("{tag}#{identity}"));
+    }
+    HTML_STRUCTURAL_TAGS.contains(&tag.as_str()).then_some(tag)
+}
+
+/// The identifying attribute value of a start tag, if any. Explicit attributes
+/// win over directives: an `id` names the element better than the expression in
+/// a `th:each`, which is why the directive is reported as the attribute NAME
+/// (`li@th:each`) rather than its value — the value is code, not an identifier.
+fn html_attr_identity(tag: Node, src: &str) -> Option<String> {
+    let mut cur = tag.walk();
+    let attrs: Vec<Node> = tag
+        .named_children(&mut cur)
+        .filter(|c| c.kind() == "attribute")
+        .collect();
+    let attr_name = |a: &Node| -> Option<String> {
+        let mut c = a.walk();
+        let n = a
+            .named_children(&mut c)
+            .find(|n| n.kind() == "attribute_name")?;
+        Some(n.utf8_text(src.as_bytes()).ok()?.trim().to_string())
+    };
+    let attr_value = |a: &Node| -> Option<String> {
+        let mut c = a.walk();
+        let v = a
+            .named_children(&mut c)
+            .find(|n| matches!(n.kind(), "quoted_attribute_value" | "attribute_value"))?;
+        let mut vc = v.walk();
+        let inner = v
+            .named_children(&mut vc)
+            .find(|n| n.kind() == "attribute_value")
+            .unwrap_or(v);
+        let t = inner.utf8_text(src.as_bytes()).ok()?.trim();
+        (!t.is_empty() && t.len() <= 60).then(|| t.to_string())
+    };
+    for want in HTML_ID_ATTRS {
+        for a in &attrs {
+            if attr_name(a).as_deref() == Some(*want) {
+                if let Some(v) = attr_value(a) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    // framework directives: the attribute name is the identity
+    for a in &attrs {
+        // a nameless attribute must skip to the next, not abandon the search
+        let Some(n) = attr_name(a) else { continue };
+        let is_directive = n.starts_with("th:")
+            || n.starts_with("v-")
+            || n.starts_with("x-")
+            || n.starts_with("hx-")
+            || n.starts_with('*')
+            || n.starts_with("@")
+            || (n.starts_with('[') && n.ends_with(']'));
+        if is_directive {
+            return Some(format!("@{n}"));
+        }
+    }
+    None
+}
+
+/// Child tags whose text identifies the element that contains them, most
+/// specific first. `artifactId` before `id` so a Maven `<plugin>` is named by
+/// its artifact rather than an `<id>` that may sit deeper in the subtree.
+const XML_ID_CHILDREN: &[&str] = &["artifactId", "id", "name", "key", "Include", "groupId"];
+
+/// XML element name: the tag, plus an identifying child's text when present
+/// (`<profile><id>with-frontend-build</id>` → `profile.with-frontend-build`).
+/// shape: (element (STag (Name TAG) (Attribute …)*) CONTENT* (ETag …))
+fn xml_element_name(node: Node, src: &str) -> Option<String> {
+    let mut cur = node.walk();
+    // the tag sits in the STag (or EmptyElemTag) opener's first Name
+    let tag_node = node
+        .named_children(&mut cur)
+        .find(|c| matches!(c.kind(), "STag" | "EmptyElemTag"))?;
+    let mut tc = tag_node.walk();
+    let tag = tag_node
+        .named_children(&mut tc)
+        .find(|c| c.kind() == "Name")?
+        .utf8_text(src.as_bytes())
+        .ok()?
+        .trim()
+        .to_string();
+    if tag.is_empty() {
+        return None;
+    }
+    // Only DIRECT element children may identify this one — a grandchild's <id>
+    // belongs to that child, and borrowing it would give two elements one name.
+    // Children sit one level down, inside the `content` wrapper:
+    //   (element (STag …) (content (element …)*) (ETag …))
+    let mut kids = node.walk();
+    let children: Vec<Node> = node
+        .named_children(&mut kids)
+        .filter(|c| c.kind() == "content")
+        .flat_map(|c| {
+            let mut cc = c.walk();
+            c.named_children(&mut cc)
+                .filter(|g| g.kind() == "element")
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for want in XML_ID_CHILDREN {
+        for child in &children {
+            let mut cc = child.walk();
+            let Some(stag) = child
+                .named_children(&mut cc)
+                .find(|c| matches!(c.kind(), "STag" | "EmptyElemTag"))
+            else {
+                continue;
+            };
+            let mut sc = stag.walk();
+            let Some(name) = stag.named_children(&mut sc).find(|c| c.kind() == "Name") else {
+                continue;
+            };
+            if name.utf8_text(src.as_bytes()).ok()?.trim() != *want {
+                continue;
+            }
+            let mut vc = child.walk();
+            let text = child
+                .named_children(&mut vc)
+                .find(|c| c.kind() == "content")
+                .and_then(|c| c.utf8_text(src.as_bytes()).ok())
+                .unwrap_or("")
+                .trim();
+            // a value carrying markup is not an identifier
+            if text.contains('<') {
+                continue;
+            }
+            if !text.is_empty() && text.len() <= 80 {
+                // `<tag>#<id>`: one symbol name, but the separator is not `.`,
+                // so qualification (which joins on `.`) still nests this under
+                // its parent instead of treating the id as another level.
+                return Some(format!("{tag}#{text}"));
+            }
+        }
+    }
+    Some(tag)
+}
+
 /// HCL block name: the type identifier plus each string label, joined by `.`.
 /// shape: (block (identifier TYPE) (string_lit … template_literal LABEL)* …)
 fn hcl_block_name(node: Node, src: &str) -> Option<String> {
@@ -636,6 +839,12 @@ fn node_name(node: Node, src: &str, field: &str, lang: &str) -> Option<String> {
             .or_else(|| node.named_child(0))?;
         let t = n.utf8_text(src.as_bytes()).ok()?.trim();
         return (!t.is_empty()).then(|| t.to_string());
+    }
+    if field == HTML_ELEMENT {
+        return html_element_name(node, src);
+    }
+    if field == XML_ELEMENT {
+        return xml_element_name(node, src);
     }
     if field == FIXED_NAME {
         return node.kind().strip_suffix("_declaration").map(str::to_string);
@@ -1369,6 +1578,38 @@ mod tests {
     use super::{extract_symbols, param_count};
 
     #[test]
+    fn xml_elements_are_named_by_tag_and_identifying_child() {
+        let src = r#"<project>
+  <artifactId>demo</artifactId>
+  <profiles>
+    <profile>
+      <id>with-frontend-build</id>
+      <build>
+        <plugins>
+          <plugin>
+            <artifactId>frontend-maven-plugin</artifactId>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>
+"#;
+        let syms = extract_symbols("xml", src).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        // the identifying child qualifies the repeated tag
+        assert!(names.contains(&"profile#with-frontend-build"), "{names:?}");
+        assert!(names.contains(&"plugin#frontend-maven-plugin"), "{names:?}");
+        // a grandchild's id must not name an ancestor: <profiles> wraps the
+        // <profile> that owns the <id>, so it stays the bare tag
+        assert!(names.contains(&"profiles"), "{names:?}");
+        // an element with no identifying child keeps the bare tag
+        assert!(names.contains(&"build"), "{names:?}");
+        // nesting is walked (is_container), not just top level
+        assert!(names.contains(&"plugins"), "{names:?}");
+    }
+
+    #[test]
     fn deeply_nested_source_does_not_overflow_the_stack() {
         // Minified/generated files nest arbitrarily deep; a recursive walk
         // overflowed the parse threads' stack and aborted the whole process.
@@ -1446,5 +1687,28 @@ mod tests {
         assert_eq!(param_count("fn f(   )"), Some(0));
         // comparison operator in a default doesn't unbalance angle brackets
         assert_eq!(param_count("fn f(a: bool = 1 > 0, b: i32)"), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod html_scanner {
+    /// Regression guard for a silent link-time hijack.
+    ///
+    /// `vendor/vue/scanner.cc` includes a bundled COPY of the html scanner. While
+    /// that copy exported `tree_sitter_html_external_scanner_*`, those five symbols
+    /// collided with the real `tree-sitter-html` crate's scanner; the linker kept
+    /// one definition, so html parsed against the wrong scanner state layout and
+    /// EVERY document came back as one ERROR node. No link error, no panic — just
+    /// zero symbols. If someone re-exports those names, this fails.
+    #[test]
+    fn html_scanner_exports_do_not_collide() {
+        let src = "<html><head><meta charset=\"UTF-8\"></head><body><p>hi</p></body></html>";
+        let tree = super::parse("html", src).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "html parsed with errors: {}",
+            tree.root_node().to_sexp()
+        );
+        assert!(!super::extract_symbols("html", src).unwrap().is_empty());
     }
 }

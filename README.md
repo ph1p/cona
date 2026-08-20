@@ -205,8 +205,14 @@ Full tool parity with the CLI. The CLI + hook integration is still recommended
 - **Languages (full symbols):** Rust, Python, JavaScript, TypeScript/TSX, Go,
   Java, C, C++, C#, Ruby, PHP, Kotlin, Swift, Scala, Elixir, Dart, Lua, Bash,
   CSS, TOML, YAML, Markdown, Zig, Haskell, OCaml, Julia, PowerShell, Objective-C,
-  Protobuf, SQL, Perl, HCL/Terraform, Makefile, Dockerfile. **Search-only:** JSON,
-  HTML, Nix, Svelte, Vue, R, XML, GraphQL.
+  Protobuf, SQL, Perl, HCL/Terraform, Makefile, Dockerfile, XML, HTML.
+  **Search-only:** JSON, Nix, Svelte, Vue, R, GraphQL.
+- **Markup (XML, HTML) yields element symbols**, named `tag#identity` — the
+  identity being an identifying child (`artifactId`, `id`, `name`) for XML, or
+  an identifying attribute / framework directive (`id`, `data-testid`, `th:*`,
+  `v-*`, `x-*`, `hx-*`) for HTML. Elements with no identity are kept only when
+  they are structural landmarks (`body`, `main`, `section`, …). So
+  `outline pom.xml` addresses `profile#with-frontend-build` directly.
 - **Storage:** everything under `~/.cona/` (override with `CONA_DATA_DIR`) — one
   SQLite index per project plus a global registry + usage stats. Housekeeping
   runs itself daily — usage rows are kept ≤ 90 days / ≤ 200k rows (tune with
