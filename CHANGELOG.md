@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.23](https://github.com/ph1p/cona/compare/v0.0.22...v0.0.23) - 2026-08-20
+
+### Added
+
+- *(grep)* add --include-deps to search dependency trees
+- *(lang)* index xml and html elements as symbols
+
+### Fixed
+
+- *(test)* gate include_deps test to unix and rg
+- *(html)* stop vue's bundled scanner hijacking tree-sitter-html
+
+### Other
+
+- *(lang)* single-pass markup naming, skip dep reindex on grep
+- *(outline)* print leaf names, not the qualified chain
+- *(index)* skip dependency lock files
+
 ## [0.0.22](https://github.com/ph1p/cona/compare/v0.0.21...v0.0.22) - 2026-08-18
 
 ### Fixed
