@@ -66,6 +66,7 @@ A few more you'll reach for often:
 | ------------------------- | ------------------------------------------------------------- |
 | `cona find <Name>`        | Locate a symbol (file, line range, signature)                 |
 | `cona grep <pattern>`     | Code-only search (`--regex` opt-in), hits labeled by symbol   |
+| `cona grep … --include-deps` | Widen the same search into `node_modules`/`vendor`/… (not indexed, hidden by default) |
 | `cona refs <Name>`        | Every usage site (semantic — skips strings/comments)          |
 | `cona diff [ref]`         | Changed _symbols_ vs a git ref — start code reviews here      |
 | `cona impact <Sym>`       | Blast radius before an edit: refs + callers + tests + history |

@@ -195,6 +195,10 @@ struct GrepArgs {
     /// Only search files under this path prefix (file or directory)
     #[arg(long)]
     path: Option<String>,
+    /// Also search dependency dirs (node_modules, vendor, target, .venv, …),
+    /// which are excluded from the index and hidden by default
+    #[arg(long)]
+    include_deps: bool,
 }
 
 #[derive(clap::Args)]
@@ -972,6 +976,7 @@ fn run() -> Result<()> {
                 regex,
                 limit,
                 path,
+                include_deps,
             } = a;
             queried(&root, t0, "grep", pattern, |conn| {
                 cmd_grep(
@@ -983,6 +988,7 @@ fn run() -> Result<()> {
                         regex: *regex,
                         limit: *limit,
                         path: path.as_deref(),
+                        include_deps: *include_deps,
                     },
                     cli.json,
                 )

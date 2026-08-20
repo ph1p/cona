@@ -256,6 +256,10 @@ pub struct GrepOpts<'a> {
     pub limit: usize,
     /// Restrict the search to this path prefix or directory.
     pub path: Option<&'a str>,
+    /// Search dependency directories (`node_modules`, `vendor`, `target`, …)
+    /// too. Off by default: they are excluded from the index precisely because
+    /// they are not the agent's code, and including them buries repo hits.
+    pub include_deps: bool,
 }
 
 /// THE `--path` policy for every query command (tree/find/refs/grep/…).
@@ -348,7 +352,11 @@ pub(crate) fn scan_ref_sites(
     // out-of-scope preloaded file there is consistent with the scope filter
     // below, which would discard it anyway.
     let matcher = query::Matcher::literal(name);
-    if let Some(candidates) = query::grep_prefilter(root, name, &matcher, false, pf.search_root()) {
+    // include_deps=false: semantic refs are index-scoped by definition — a hit
+    // inside a dependency has no symbol row to resolve against.
+    if let Some(candidates) =
+        query::grep_prefilter(root, name, &matcher, false, pf.search_root(), false)
+    {
         files.retain(|f| candidates.contains(f) || preloaded.map(|(p, _)| p == f).unwrap_or(false));
     }
     // `--path` scoping applies AFTER the content prefilter and overrides the

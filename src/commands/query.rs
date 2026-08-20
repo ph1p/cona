@@ -1271,6 +1271,7 @@ pub fn cmd_grep(
         regex,
         limit,
         path: path_filter,
+        include_deps,
     } = opts;
     let matcher = Matcher::new(pattern, ignore_case, regex)?;
     let pf = PathFilter::new(root, path_filter);
@@ -1280,9 +1281,32 @@ pub fn cmd_grep(
     // everything in-process; on any failure we fall back to the full scan.
     // A directory scope is handed to rg as its search root, so a scoped query
     // walks that subtree instead of the whole repo.
-    if let Some(candidates) = grep_prefilter(root, pattern, &matcher, ignore_case, pf.search_root())
-    {
-        files.retain(|f| candidates.contains(f));
+    match grep_prefilter(
+        root,
+        pattern,
+        &matcher,
+        ignore_case,
+        pf.search_root(),
+        include_deps,
+    ) {
+        // --include-deps searches OUTSIDE the index by design: dependency trees
+        // are deliberately never indexed, so intersecting with the index would
+        // make the flag a no-op. The prefilter's own list becomes the file list;
+        // hits in unindexed files simply carry no enclosing symbol, which the
+        // renderer already handles. Sorted so output stays deterministic.
+        Some(candidates) if include_deps => {
+            files = candidates.into_iter().collect();
+            files.sort();
+        }
+        Some(candidates) => files.retain(|f| candidates.contains(f)),
+        // No rg and no grep: the index is all we have, so the flag cannot widen
+        // the search. Say so rather than silently returning repo-only hits.
+        None if include_deps => {
+            return Err(anyhow::anyhow!(
+                "--include-deps needs `rg` or `grep` on PATH — dependency dirs are not indexed,                  so there is nothing to search without one"
+            ));
+        }
+        None => {}
     }
     files.retain(|f| pf.ok(f));
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
@@ -1473,12 +1497,29 @@ pub(super) fn grep_prefilter(
     matcher: &Matcher,
     ignore_case: bool,
     scope: Option<&str>,
+    include_deps: bool,
 ) -> Option<HashSet<String>> {
     let attempts: [(&str, Vec<&str>); 2] = [
         ("rg", vec!["--files-with-matches", "--no-messages"]),
         ("grep", vec!["-r", "-l", "-I", "-s"]),
     ];
     for (bin, mut args) in attempts {
+        // rg honours .gitignore, which is what usually hides node_modules — so
+        // widening the search means telling rg to stop ignoring. It also needs
+        // --follow: a pnpm `node_modules` is a tree of symlinks into the store,
+        // and without following them the flag finds NOTHING on the package
+        // manager most likely to have a large dep tree. `grep -r` ignores no
+        // files and follows nothing, so `-R` is its counterpart.
+        if include_deps {
+            if bin == "rg" {
+                args.extend(["--no-ignore", "--follow"]);
+            } else {
+                // -R is -r plus symlink following; swap rather than add, since
+                // passing both is a conflicting-flag error on some greps.
+                args.retain(|a| *a != "-r");
+                args.push("-R");
+            }
+        }
         args.extend(matcher.prefilter_flag(bin));
         if ignore_case {
             args.push("-i");
@@ -1575,5 +1616,47 @@ mod tests {
             regexish_literal("tokens_(out|saved)").as_deref(),
             Some("tokens_")
         );
+    }
+}
+
+#[cfg(test)]
+mod include_deps_tests {
+    use super::*;
+    use std::fs;
+
+    /// `--include-deps` has two independent ways to silently find nothing:
+    /// rg's .gitignore filter, and rg not following symlinks. A pnpm
+    /// `node_modules` is a symlink farm, so BOTH must be defeated or the flag
+    /// is a no-op exactly where it matters most.
+    #[test]
+    fn include_deps_reaches_gitignored_and_symlinked_files() {
+        // No tempfile dev-dependency (this crate keeps its dep set lean), so
+        // build a uniquely-named dir by hand and clean it up at the end.
+        let root = std::env::temp_dir().join(format!("cona-deps-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::write(root.join("app.rs"), "let x = NEEDLE_TOKEN;\n").unwrap();
+        // the real payload lives outside node_modules; node_modules only links to it
+        let store = root.join(".store/pkg");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(store.join("lib.js"), "export const NEEDLE_TOKEN = 1;\n").unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        let linked = std::os::unix::fs::symlink(&store, root.join("node_modules/pkg")).is_ok();
+
+        let matcher = Matcher::literal("NEEDLE_TOKEN");
+        let hit = |include_deps| {
+            grep_prefilter(&root, "NEEDLE_TOKEN", &matcher, false, None, include_deps)
+                .map(|c| c.iter().any(|f| f.contains("node_modules")))
+        };
+        let (base, deep) = (hit(false), hit(true));
+        let _ = fs::remove_dir_all(&root);
+
+        // Skip when neither rg nor grep is installed (prefilter returns None).
+        if base.is_none() || !linked {
+            return;
+        }
+        assert_eq!(base, Some(false), "default must not enter node_modules");
+        assert_eq!(deep, Some(true), "--include-deps must reach it");
     }
 }
