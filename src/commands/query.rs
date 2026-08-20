@@ -1303,7 +1303,7 @@ pub fn cmd_grep(
         // the search. Say so rather than silently returning repo-only hits.
         None if include_deps => {
             return Err(anyhow::anyhow!(
-                "--include-deps needs `rg` or `grep` on PATH — dependency dirs are not indexed,                  so there is nothing to search without one"
+                "--include-deps needs `rg` or `grep` on PATH — dependency dirs are not indexed, so there is nothing to search without one"
             ));
         }
         None => {}
@@ -1329,8 +1329,13 @@ pub fn cmd_grep(
             if !matcher.is_match(line) {
                 continue;
             }
-            if match_lines.is_empty() {
-                // symbol ranges come from the index — refresh before labeling
+            // symbol ranges come from the index — refresh before labeling.
+            // Skipped under --include-deps: those hits come from the prefilter,
+            // not the index, so most have no `files` row. is_stale() reports a
+            // missing row as stale, which would make every dependency hit pay a
+            // full parse plus a write txn to insert symbols the indexer
+            // deliberately never creates.
+            if match_lines.is_empty() && !include_deps {
                 indexer::ensure_fresh(root, conn, &rel);
             }
             match_lines.push(ln + 1);

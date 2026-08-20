@@ -600,18 +600,8 @@ const HTML_STRUCTURAL_TAGS: &[&str] = &[
 /// shape: (element (start_tag (tag_name TAG) (attribute (attribute_name K)
 ///                            (quoted_attribute_value (attribute_value V)))*) …)
 fn html_element_name(node: Node, src: &str) -> Option<String> {
-    let mut cur = node.walk();
-    let tag_node = node
-        .named_children(&mut cur)
-        .find(|c| matches!(c.kind(), "start_tag" | "self_closing_tag"))?;
-    let mut tc = tag_node.walk();
-    let tag = tag_node
-        .named_children(&mut tc)
-        .find(|c| c.kind() == "tag_name")?
-        .utf8_text(src.as_bytes())
-        .ok()?
-        .trim()
-        .to_ascii_lowercase();
+    let tag_node = child_of_kind(node, &["start_tag", "self_closing_tag"])?;
+    let tag = node_text(child_of_kind(tag_node, &["tag_name"])?, src)?.to_ascii_lowercase();
     if tag.is_empty() {
         return None;
     }
@@ -626,56 +616,51 @@ fn html_element_name(node: Node, src: &str) -> Option<String> {
 /// a `th:each`, which is why the directive is reported as the attribute NAME
 /// (`li@th:each`) rather than its value — the value is code, not an identifier.
 fn html_attr_identity(tag: Node, src: &str) -> Option<String> {
-    let mut cur = tag.walk();
-    let attrs: Vec<Node> = tag
-        .named_children(&mut cur)
-        .filter(|c| c.kind() == "attribute")
-        .collect();
-    let attr_name = |a: &Node| -> Option<String> {
-        let mut c = a.walk();
-        let n = a
-            .named_children(&mut c)
-            .find(|n| n.kind() == "attribute_name")?;
-        Some(n.utf8_text(src.as_bytes()).ok()?.trim().to_string())
+    let attr_value = |a: Node| -> Option<&str> {
+        let v = child_of_kind(a, &["quoted_attribute_value", "attribute_value"])?;
+        let inner = child_of_kind(v, &["attribute_value"]).unwrap_or(v);
+        let t = node_text(inner, src)?;
+        (!t.is_empty() && t.len() <= 60).then_some(t)
     };
-    let attr_value = |a: &Node| -> Option<String> {
-        let mut c = a.walk();
-        let v = a
-            .named_children(&mut c)
-            .find(|n| matches!(n.kind(), "quoted_attribute_value" | "attribute_value"))?;
-        let mut vc = v.walk();
-        let inner = v
-            .named_children(&mut vc)
-            .find(|n| n.kind() == "attribute_value")
-            .unwrap_or(v);
-        let t = inner.utf8_text(src.as_bytes()).ok()?.trim();
-        (!t.is_empty() && t.len() <= 60).then(|| t.to_string())
-    };
-    for want in HTML_ID_ATTRS {
-        for a in &attrs {
-            if attr_name(a).as_deref() == Some(*want) {
-                if let Some(v) = attr_value(a) {
-                    return Some(v);
-                }
-            }
-        }
-    }
-    // framework directives: the attribute name is the identity
-    for a in &attrs {
-        // a nameless attribute must skip to the next, not abandon the search
-        let Some(n) = attr_name(a) else { continue };
-        let is_directive = n.starts_with("th:")
+    let is_directive = |n: &str| {
+        n.starts_with("th:")
             || n.starts_with("v-")
             || n.starts_with("x-")
             || n.starts_with("hx-")
             || n.starts_with('*')
-            || n.starts_with("@")
-            || (n.starts_with('[') && n.ends_with(']'));
-        if is_directive {
-            return Some(format!("@{n}"));
+            || n.starts_with('@')
+            || (n.starts_with('[') && n.ends_with(']'))
+    };
+    // One pass: keep the best HTML_ID_ATTRS rank and the first directive seen,
+    // rather than re-walking every attribute once per candidate name. Names are
+    // compared borrowed, so a plain <div> (the common case) allocates nothing.
+    let mut cur = tag.walk();
+    let mut best: Option<(usize, &str)> = None;
+    let mut directive: Option<&str> = None;
+    for a in tag
+        .named_children(&mut cur)
+        .filter(|c| c.kind() == "attribute")
+    {
+        // a nameless attribute must skip to the next, not abandon the search
+        let Some(name) = child_of_kind(a, &["attribute_name"]).and_then(|n| node_text(n, src))
+        else {
+            continue;
+        };
+        match HTML_ID_ATTRS.iter().position(|w| *w == name) {
+            Some(rank) if best.is_none_or(|(b, _)| b > rank) => {
+                if let Some(v) = attr_value(a) {
+                    best = Some((rank, v));
+                }
+            }
+            // framework directives: the attribute name is the identity
+            None if directive.is_none() && is_directive(name) => directive = Some(name),
+            _ => {}
         }
     }
-    None
+    match best {
+        Some((_, v)) => Some(v.to_string()),
+        None => directive.map(|n| format!("@{n}")),
+    }
 }
 
 /// Child tags whose text identifies the element that contains them, most
@@ -683,23 +668,32 @@ fn html_attr_identity(tag: Node, src: &str) -> Option<String> {
 /// its artifact rather than an `<id>` that may sit deeper in the subtree.
 const XML_ID_CHILDREN: &[&str] = &["artifactId", "id", "name", "key", "Include", "groupId"];
 
+/// First direct named child of one of `kinds`. The cursor-walk-and-find idiom
+/// is otherwise hand-rolled at every markup call site.
+fn child_of_kind<'t>(node: Node<'t>, kinds: &[&str]) -> Option<Node<'t>> {
+    let mut cur = node.walk();
+    let found = node
+        .named_children(&mut cur)
+        .find(|c| kinds.contains(&c.kind()));
+    found
+}
+
+/// A node's source text, trimmed. Borrowed — callers allocate only on a hit.
+fn node_text<'s>(node: Node, src: &'s str) -> Option<&'s str> {
+    Some(node.utf8_text(src.as_bytes()).ok()?.trim())
+}
+
+/// The tag name of an element, read from its `STag`/`EmptyElemTag` opener.
+fn xml_tag_name<'s>(element: Node, src: &'s str) -> Option<&'s str> {
+    let opener = child_of_kind(element, &["STag", "EmptyElemTag"])?;
+    node_text(child_of_kind(opener, &["Name"])?, src)
+}
+
 /// XML element name: the tag, plus an identifying child's text when present
 /// (`<profile><id>with-frontend-build</id>` → `profile.with-frontend-build`).
 /// shape: (element (STag (Name TAG) (Attribute …)*) CONTENT* (ETag …))
 fn xml_element_name(node: Node, src: &str) -> Option<String> {
-    let mut cur = node.walk();
-    // the tag sits in the STag (or EmptyElemTag) opener's first Name
-    let tag_node = node
-        .named_children(&mut cur)
-        .find(|c| matches!(c.kind(), "STag" | "EmptyElemTag"))?;
-    let mut tc = tag_node.walk();
-    let tag = tag_node
-        .named_children(&mut tc)
-        .find(|c| c.kind() == "Name")?
-        .utf8_text(src.as_bytes())
-        .ok()?
-        .trim()
-        .to_string();
+    let tag = xml_tag_name(node, src)?;
     if tag.is_empty() {
         return None;
     }
@@ -707,53 +701,46 @@ fn xml_element_name(node: Node, src: &str) -> Option<String> {
     // belongs to that child, and borrowing it would give two elements one name.
     // Children sit one level down, inside the `content` wrapper:
     //   (element (STag …) (content (element …)*) (ETag …))
-    let mut kids = node.walk();
-    let children: Vec<Node> = node
-        .named_children(&mut kids)
+    //
+    // One pass over the children, keeping the best XML_ID_CHILDREN rank seen,
+    // rather than re-walking every child once per candidate name.
+    let mut cur = node.walk();
+    let mut best: Option<(usize, &str)> = None;
+    for content in node
+        .named_children(&mut cur)
         .filter(|c| c.kind() == "content")
-        .flat_map(|c| {
-            let mut cc = c.walk();
-            c.named_children(&mut cc)
-                .filter(|g| g.kind() == "element")
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    for want in XML_ID_CHILDREN {
-        for child in &children {
-            let mut cc = child.walk();
-            let Some(stag) = child
-                .named_children(&mut cc)
-                .find(|c| matches!(c.kind(), "STag" | "EmptyElemTag"))
-            else {
+    {
+        let mut cc = content.walk();
+        for child in content
+            .named_children(&mut cc)
+            .filter(|g| g.kind() == "element")
+        {
+            let Some(name) = xml_tag_name(child, src) else {
                 continue;
             };
-            let mut sc = stag.walk();
-            let Some(name) = stag.named_children(&mut sc).find(|c| c.kind() == "Name") else {
+            let Some(rank) = XML_ID_CHILDREN.iter().position(|w| *w == name) else {
                 continue;
             };
-            if name.utf8_text(src.as_bytes()).ok()?.trim() != *want {
+            if best.is_some_and(|(b, _)| b <= rank) {
                 continue;
             }
-            let mut vc = child.walk();
-            let text = child
-                .named_children(&mut vc)
-                .find(|c| c.kind() == "content")
-                .and_then(|c| c.utf8_text(src.as_bytes()).ok())
-                .unwrap_or("")
-                .trim();
+            let text = child_of_kind(child, &["content"])
+                .and_then(|c| node_text(c, src))
+                .unwrap_or("");
             // a value carrying markup is not an identifier
-            if text.contains('<') {
+            if text.is_empty() || text.len() > 80 || text.contains('<') {
                 continue;
             }
-            if !text.is_empty() && text.len() <= 80 {
-                // `<tag>#<id>`: one symbol name, but the separator is not `.`,
-                // so qualification (which joins on `.`) still nests this under
-                // its parent instead of treating the id as another level.
-                return Some(format!("{tag}#{text}"));
-            }
+            best = Some((rank, text));
         }
     }
-    Some(tag)
+    Some(match best {
+        // `<tag>#<id>`: one symbol name, but the separator is not `.`, so
+        // qualification (which joins on `.`) still nests this under its parent
+        // instead of treating the id as another level.
+        Some((_, text)) => format!("{tag}#{text}"),
+        None => tag.to_string(),
+    })
 }
 
 /// HCL block name: the type identifier plus each string label, joined by `.`.
@@ -1688,10 +1675,7 @@ mod tests {
         // comparison operator in a default doesn't unbalance angle brackets
         assert_eq!(param_count("fn f(a: bool = 1 > 0, b: i32)"), Some(2));
     }
-}
 
-#[cfg(test)]
-mod html_scanner {
     /// Regression guard for a silent link-time hijack.
     ///
     /// `vendor/vue/scanner.cc` includes a bundled COPY of the html scanner. While

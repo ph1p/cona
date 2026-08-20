@@ -426,6 +426,15 @@ fn event_is_relevant(root: &Path, ev: &notify::Result<notify::Event>) -> bool {
         if excluded {
             return false;
         }
+        // Same exclusion the walk applies, so a lock-file write doesn't wake the
+        // indexer for a file index_project would then discard.
+        if rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_excluded_file)
+        {
+            return false;
+        }
         match rel.to_str() {
             Some(s) => crate::lang::detect_lang(s).is_some() || !p.exists(),
             None => false,
