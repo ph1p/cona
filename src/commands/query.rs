@@ -1521,6 +1521,8 @@ pub(super) fn grep_prefilter(
             } else {
                 // -R is -r plus symlink following; swap rather than add, since
                 // passing both is a conflicting-flag error on some greps.
+                // Note plain grep never honoured .gitignore, so it was already
+                // searching dep dirs — here -R only adds the symlink farm.
                 args.retain(|a| *a != "-r");
                 args.push("-R");
             }
@@ -1633,8 +1635,22 @@ mod include_deps_tests {
     /// rg's .gitignore filter, and rg not following symlinks. A pnpm
     /// `node_modules` is a symlink farm, so BOTH must be defeated or the flag
     /// is a no-op exactly where it matters most.
+    ///
+    /// Asserted against rg only. The guarantee is genuinely rg-specific: plain
+    /// `grep` has no .gitignore concept, so it already descends into
+    /// `node_modules` and reports the symlink target by its REAL path — under
+    /// the grep fallback the flag is a no-op and there is nothing to assert.
+    /// CI runners without rg would otherwise test the wrong backend.
     #[test]
+    #[cfg(unix)] // symlink farm is the point of the test; std::os::unix builds it
     fn include_deps_reaches_gitignored_and_symlinked_files() {
+        if std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // no rg on this host — the fallback makes no such promise
+        }
         // No tempfile dev-dependency (this crate keeps its dep set lean), so
         // build a uniquely-named dir by hand and clean it up at the end.
         let root = std::env::temp_dir().join(format!("cona-deps-{}", std::process::id()));
@@ -1642,6 +1658,8 @@ mod include_deps_tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
         fs::write(root.join("app.rs"), "let x = NEEDLE_TOKEN;\n").unwrap();
+        // rg only applies .gitignore inside a repo, so make this one
+        fs::create_dir_all(root.join(".git")).unwrap();
         // the real payload lives outside node_modules; node_modules only links to it
         let store = root.join(".store/pkg");
         fs::create_dir_all(&store).unwrap();
@@ -1657,9 +1675,8 @@ mod include_deps_tests {
         let (base, deep) = (hit(false), hit(true));
         let _ = fs::remove_dir_all(&root);
 
-        // Skip when neither rg nor grep is installed (prefilter returns None).
-        if base.is_none() || !linked {
-            return;
+        if !linked {
+            return; // no symlink privileges — nothing to prove
         }
         assert_eq!(base, Some(false), "default must not enter node_modules");
         assert_eq!(deep, Some(true), "--include-deps must reach it");
