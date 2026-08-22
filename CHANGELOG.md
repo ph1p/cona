@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.25](https://github.com/ph1p/cona/compare/v0.0.24...v0.0.25) - 2026-08-22
+
+### Added
+
+- *(install)* skip Claude pieces the enabled plugin already ships
+
+### Other
+
+- *(install)* rustfmt line wrapping in agents.rs
+
 ## [0.0.24](https://github.com/ph1p/cona/compare/v0.0.23...v0.0.24) - 2026-08-22
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "cona",
-  "version": "0.0.24",
+  "version": "0.0.25",
   "description": "Token-efficient code navigation: read one symbol instead of a whole file, search code semantically, and edit with syntax verification. Bundles the cona skill, the read/grep advisory hooks, auto-reindexing, and the MCP server.",
   "author": {
     "name": "ph1p",
