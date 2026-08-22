@@ -13,7 +13,7 @@ mod install;
 mod tests;
 mod uninstall;
 
-pub use binary::*;
+pub(crate) use binary::*;
 pub use hooks::*;
 pub use install::*;
 pub use uninstall::*;
