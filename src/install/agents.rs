@@ -1075,7 +1075,12 @@ pub fn cmd_agents_q(
         // hooks in settings.json — keep the index fresh after agent edits
         let settings = claude_dir.join("settings.json");
         if claude_plugin {
-            mark(&mut done, "claude hooks", "skipped (plugin has them)", &settings);
+            mark(
+                &mut done,
+                "claude hooks",
+                "skipped (plugin has them)",
+                &settings,
+            );
         } else {
             match claude_hooks(&settings, install) {
                 Ok(changed) => {
@@ -1889,7 +1894,9 @@ mod tests {
     }
     #[test]
     fn plugin_enabled_in_detects_only_an_enabled_cona_plugin() {
-        assert!(plugin_enabled_in(r#"{"enabledPlugins":{"cona@cona":true}}"#));
+        assert!(plugin_enabled_in(
+            r#"{"enabledPlugins":{"cona@cona":true}}"#
+        ));
         assert!(plugin_enabled_in(
             r#"{"enabledPlugins":{"other@x":false,"cona@some-marketplace":true}}"#
         ));
@@ -1924,7 +1931,10 @@ mod tests {
 
         std::fs::remove_file(home.join(".claude/settings.json")).unwrap();
         std::fs::write(proj.join(".claude/settings.json"), on).unwrap();
-        assert!(claude_plugin_enabled(&proj, &home), "project settings count too");
+        assert!(
+            claude_plugin_enabled(&proj, &home),
+            "project settings count too"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
