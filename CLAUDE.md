@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 224 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic.rs, incl. MCP handshake)
+cargo test                   # 235 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -33,19 +33,22 @@ module before you change it. Map only:
 
 ```
 src/lib.rs       Module root (binary uses the lib; tests import cona::*)
-src/main.rs      CLI only (clap) + dispatch to commands/*. 6 command groups
-                 (nav/inspect/code/history/project/maint); args live ONCE in
+src/main.rs      Dispatch to commands/* + setup. 6 command groups
+                 (nav/inspect/code/history/project/maint).
+src/cli.rs       Clap surface (binary-only module): args live ONCE in
                  *Args structs, shared by group AND hidden flat alias.
 src/commands/    cmd_* impls: mod.rs (shared helpers + `defaults` = THE limits +
-                 the `--path` policy), query.rs (tree/outline/find/show/refs/
-                 context/diff/grep), mutate.rs (edit/insert/note/rename +
-                 write_verified), insight.rs, history.rs, callgraph.rs,
-                 stats.rs, mcp_server.rs
-src/lang.rs      Language detection + tree-sitter symbol extraction. 30+ langs
+                 the `--path` policy), query/ (one file per read command:
+                 tree/outline/find/show/refs/context/diff/grep), mutate.rs
+                 (edit/insert/note/rename + write_verified), insight.rs,
+                 history.rs, callgraph.rs, stats.rs, mcp_server.rs
+src/lang/        Language detection + tree-sitter symbol extraction. 30+ langs
                  with symbols, incl. markup (XML/HTML elements named
                  `tag#identity`); refs/grep-only for JSON/Svelte/Vue/…
-                 Semantic identifier search lives here; fail-open textual
-                 fallback is ONLY here — never rebuild it elsewhere.
+                 mod.rs (detect/parse/extract), classify.rs, names.rs,
+                 walk.rs, idents.rs. Semantic identifier search lives here;
+                 fail-open textual fallback is ONLY here — never rebuild it
+                 elsewhere.
 src/indexer.rs   3-phase: walk → parallel parse → one write transaction.
                  EXCLUDED_DIRS + MAX_FILE_BYTES; registered git submodules are
                  walked back in (parse_gitmodules). The SessionStart hook
@@ -62,18 +65,26 @@ src/entries.rs   Pure heuristics for entries/tests
 src/fuzzy.rs     fuzzy_score — find's fallback ranking
 src/diffmap.rs   Pure diff helpers (parse_unified/overlaps/has_uncovered)
 src/resolve.rs   Optional stack-graphs tier (fail-open), separate helper binary
-src/hook.rs      PreToolUse/PostToolUse hooks. PreToolUse redirect = the ONLY
+src/hook/        PreToolUse/PostToolUse hooks. PreToolUse redirect = the ONLY
                  permissionDecision (deny); every hint path is additionalContext.
                  Reads arrive in TWO shapes: native Read/Grep, and a shell
                  command line (Codex has no Read/Grep — `cat f`/`sed -n`/`rg`
                  come through as tool_name "Bash"), normalized by classify_shell
                  into the SAME try_read/try_grep. Fail-open: one unrecognised
-                 segment passes the whole line
+                 segment passes the whole line. mod.rs (decide_*), shell.rs
+                 (classify_shell), intercept.rs (redirected queries),
+                 markers.rs (session cadence state)
 src/dashboard.rs `cona ui` — ratatui live TUI, read-only
 src/ui.rs        ANSI styling (zero deps) + select/multiselect primitives
 src/mcp.rs       MCP framing (stdio JSON-RPC 2.0, pure, tested)
-src/install/     install/upgrade/uninstall/agents/doctor; marker-based, idempotent
-src/db.rs        SQLite: per-project DB + global.db (registry/usage/meta)
+src/install/     install/upgrade/uninstall/agents/doctor; marker-based,
+                 idempotent. agents/ (registry.rs roster, select.rs picker,
+                 apply.rs install/uninstall), upgrade/ (mod.rs upgrade +
+                 auto-update, hooks.rs, binary.rs, install.rs, uninstall.rs),
+                 mcp_config.rs, doctor.rs
+src/db/          SQLite: per-project DB + global.db (registry/usage/meta).
+                 mod.rs (paths/open/meta/IndexLock), usage.rs (logging +
+                 savings baseline), stats.rs (aggregates), maint.rs (tidy)
 ```
 ## Invariants — DO NOT break
 
@@ -99,13 +110,13 @@ src/db.rs        SQLite: per-project DB + global.db (registry/usage/meta)
 ## Adding a new language
 
 1. Grammar crate in Cargo.toml (e.g. `tree-sitter-go`)
-2. `lang.rs`: extension in `detect_lang`, language in `language_for`, node
-   kinds in `classify` (label, is_container, name_field)
-3. Test case in `tests/basic.rs`
-4. Language lists in README.md ("Languages") and CLAUDE.md (src/lang.rs entry)
+2. `lang/mod.rs`: extension in `detect_lang`, language in `language_for`, node
+   kinds in `lang/classify.rs` (label, is_container, name_field)
+3. Test case in `tests/basic/langs.rs`
+4. Language lists in README.md ("Languages") and CLAUDE.md (src/lang/ entry)
 5. If it indexes no symbols — prose/markup/data, OR a parse-only code language
    with no `classify` arms (nix/svelte/vue/r) — add it to the
-   `has_callable_symbols` deny-list in `lang.rs`; otherwise the read-advisory
+   `has_callable_symbols` deny-list in `lang/mod.rs`; otherwise the read-advisory
    hook tells the agent to `cona show <Symbol>` on a file that has no such
    symbols. `non_callable_languages_are_reachable` guards the reverse mistake
    (a deny-list entry `detect_lang` can never return).
@@ -146,7 +157,7 @@ structured content is an optimisation, a failed call is a lost answer.
 
 Tool parity with CLI: find/show/refs/outline/tree/grep/context/diff/edit +
 batch_edit/insert/check/impact/callers/callees/path/deps/shape/entries/tests/
-note (tests/basic.rs handshake pins parity across BOTH tiers). batch_edit = multiple symbol edits
+note (tests/basic/mcp.rs handshake pins parity across BOTH tiers). batch_edit = multiple symbol edits
 in ONE call, each syntax-verified; stops at first error (applied edits remain,
 progress reported — no silent partial state). edit runs through cmd_edit_code
 (replacement as &str — stdin belongs to the protocol). Usage logged `mcp:<tool>`.
@@ -163,12 +174,12 @@ and `.codex-plugin/plugin.json` (Codex) over a SHARED payload (`skills/`,
 `.mcp.json`, `hooks/hooks.json`) — nothing to keep in sync. Marketplace manifests
 sit where each CLI looks: `.claude-plugin/marketplace.json` and
 `.agents/plugins/marketplace.json`, both at the repo root.
-Hook payloads are wire-compatible across both harnesses, so hook.rs has NO
+Hook payloads are wire-compatible across both harnesses, so hook/ has NO
 per-harness branch; what differs is the tool (Codex ships only a shell — see the
-hook.rs entry). **The PreToolUse matcher has ONE source**: `hook::PRETOOL_MATCHER`,
+hook/ entry). **The PreToolUse matcher has ONE source**: `hook::PRETOOL_MATCHER`,
 joined from `NATIVE_TOOLS` + `SHELL_TOOLS` — the same `SHELL_TOOLS` the
 dispatcher matches on, so matcher and dispatcher cannot disagree. The installer
-(`specs` in install/agents.rs `claude_hooks`) reads it; `plugin/hooks/hooks.json`
+(`specs` in install/agents/apply.rs `claude_hooks`) reads it; `plugin/hooks/hooks.json`
 is the one hand-written copy, pinned by
 `plugin_hook_matcher_matches_the_installer`. Reinstall reconciles a drifted
 matcher, so widening it self-heals existing installs.

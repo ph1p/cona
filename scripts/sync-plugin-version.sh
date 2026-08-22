@@ -3,7 +3,7 @@
 # Run by release-plz.yml after `release-plz update`; safe to run by hand.
 # Prints the bare version on stdout (the workflow reads it — the ONE place the
 # Cargo.toml version is extracted); diagnostics go to stderr.
-# tests/basic.rs (plugin_versions_match_the_crate) pins the result in CI.
+# tests/basic/plugin.rs (plugin_versions_match_the_crate) pins the result in CI.
 set -eu
 cd "$(dirname "$0")/.."
 ver="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"

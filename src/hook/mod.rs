@@ -75,7 +75,7 @@ pub static PRETOOL_MATCHER: LazyLock<String> = LazyLock::new(|| {
 
 /// The `PostToolUse` matcher for the reindex hook — the write tools whose
 /// output can invalidate the index. Single source for the installer
-/// (install/agents.rs `claude_hooks`) and the plugin copy
+/// (install/agents/apply.rs `claude_hooks`) and the plugin copy
 /// (`plugin/hooks/hooks.json`, pinned by `plugin_hooks_match_the_installer`).
 pub const POSTTOOL_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit";
 

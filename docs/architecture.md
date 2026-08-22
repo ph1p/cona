@@ -7,10 +7,11 @@ Invariants, build/test, and release rules live in CLAUDE.md.
 
 ```
 src/lib.rs       Module root (binary uses the lib; tests import cona::*)
-src/main.rs      CLI only (clap) + dispatch to commands/* (+ cmd_setup).
-                 6 command groups (nav/inspect/code/history/project/maint, one
+src/main.rs      Dispatch to commands/* (+ cmd_setup); clap surface lives in
+                 src/cli.rs (binary-only module). 6 command groups
+                 (nav/inspect/code/history/project/maint, one
                  subcommand enum each) = canonical grouped --help. Args live ONCE
-                 in *Args structs (clap::Args), shared by group AND flat alias;
+                 in *Args structs (clap::Args, in cli.rs), shared by group AND flat alias;
                  every flat shorthand (`cona show …`) kept as hidden alias
                  (backward compat + fewer agent tokens). run() matches Cmd
                  directly; grouped + flat share ONE body via or-pattern — no
@@ -27,14 +28,14 @@ src/commands/    cmd_* implementations, split by concern:
                           policy (find/refs/grep/tree). Directory and prefix
                           readings CONFLICT — `--path src/commands` must exclude
                           `src/commands_old.rs`, `--path src/comm` must include
-                          `src/commands/query.rs`; identical string shape,
+                          `src/commands/query/`; identical string shape,
                           opposite answers. No lexical rule separates them, so
                           path_matches_in asks the filesystem (is_dir) and
                           path_matches_dir (pure, tested) takes the answer as
                           `dir_filter`: real dir → `/`-boundary only, partial
                           name → prefix. locate_all = every candidate for
                           `show --all` (lists, never picks — invariant 4)
-                 query.rs tree/outline (dir arg → points at `tree --path`)/find
+                 query/   tree/outline (dir arg → points at `tree --path`)/find
                           (--path over-fetches so the SQL LIMIT can't clip
                           in-scope rows before the Rust filter; empty-but-exists-
                           elsewhere says so instead of falling through to fuzzy)/
@@ -65,7 +66,10 @@ src/commands/    cmd_* implementations, split by concern:
                  history.rs blame/hot/coupling
                  callgraph.rs callers/callees/path + build_graph
                  stats.rs, mcp_server.rs (mcp_tools/mcp_call/cmd_mcp)
-src/lang.rs      Language detection + tree-sitter symbol extraction (classify()).
+src/lang/        Language detection + tree-sitter symbol extraction: mod.rs
+                 (detect_lang/language_for/parse/extract_symbols), classify.rs
+                 (node-kind table), names.rs (naming heuristics), walk.rs
+                 (symbol walk), idents.rs (identifier scan).
                  Symbols: Rust, Python, JS/TS/TSX, Go, Java, C, C++, CSS, Ruby,
                  PHP, C#, Kotlin, Swift, Bash, Lua, Scala, Elixir, Dart, TOML,
                  YAML, Markdown, Zig, Haskell, OCaml, Julia, PowerShell, ObjC,
@@ -124,10 +128,10 @@ src/graph.rs     In-memory call graph (one pass over all files): callers_of/
                  multiple defs ONE candidate wins (1) same parent scope, (2)
                  same file, (3) same directory, (4) matching arity (call arg
                  count == declared param count; methods minus implicit receiver,
-                 first_param_is_receiver in lang.rs) — each rule fires ONLY on
+                 first_param_is_receiver in lang/mod.rs) — each rule fires ONLY on
                  exactly one survivor, never guessing among equals. Signals in
                  struct Candidate; arg count via call_node_of/arg_count_of
-                 (lang.rs), param count via param_count. Callee EDGES only from
+                 (lang/idents.rs), param count via param_count. Callee EDGES only from
                  call positions (fn call/method call/macro) — locals create no
                  false edges. `uses` (caller side) keeps ALL occurrences (types,
                  callbacks). Residual ambiguity → ·ambiguous
@@ -182,7 +186,7 @@ src/resolve.rs   Optional semantic resolution tier (fail-open): spawns
                  opt-out CONA_NO_FETCH_HELPER); doctor reports status. NEVER
                  a cargo dependency of cona (links collision). Findings:
                  docs/spike-semantic-resolution.md
-src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
+src/hook/        PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  PreToolUse = pure decide_read/decide_grep + fail-open runner;
                  redirects large full reads + broad identifier greps (indexed
                  project, no glob/type/path filter) to cona; hook NEVER creates a
@@ -266,7 +270,7 @@ src/dashboard.rs `cona ui` — ratatui live TUI, read-only. DBs opened ONCE (not
                  panic)
 src/ui.rs        ANSI styling (zero deps): NO_COLOR/CLICOLOR_FORCE/TERM=dumb +
                  IsTerminal — piped output stays plain (agents!). All CLI colors
-                 run through here; clap help styles in main.rs. ui::cmd_table =
+                 run through here; clap help styles in cli.rs. ui::cmd_table =
                  THE two-column `command  description` table (install's next
                  steps, setup's try-it, `agents status`'s manage list) — one
                  alignment + dim/highlight decision, padded BEFORE coloring.
@@ -304,7 +308,9 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           a further symlink); GITHUB_REPO/
                           USER_AGENT + fetch_release_archive = THE release
                           download/extract path (self-upgrade AND helper fetch)
-                 upgrade.rs cmd_install/upgrade/uninstall/hooks; ONE git-hook
+                 upgrade/ cmd_install/upgrade/uninstall/hooks (mod.rs upgrade +
+                          auto-update, hooks.rs git hooks, binary.rs build/
+                          replace/download, install.rs, uninstall.rs); ONE git-hook
                           policy: append_hook_line/strip_git_hook_lines.
                           Auto-upgrade: mtime check + remote check vs crates.io
                           sparse index (curl, fail-open) ≤1×/day (meta
@@ -330,7 +336,10 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           the fs scan + quiet re-sync — self-heals stale project
                           once per version (!= catches downgrades, no unbounded
                           meta rows)
-                 agents.rs GUIDE_MD; subagent_defs = THE .claude/agents
+                 agents/  GUIDE_MD (mod.rs); registry.rs = AgentName roster +
+                          presence probes, select.rs = picker + ScopePlan,
+                          apply.rs = install/uninstall + hooks/MCP wiring.
+                          subagent_defs = THE .claude/agents
                           enumeration, RECURSIVE (collections nest by category:
                           design/, engineering/, …; a flat read_dir misses every
                           def) — consumed by sync_subagents AND Claude's
@@ -412,7 +421,7 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           would let an MCP-only scope be offered in the picker
                           and then receive nothing. installed_agents = THE
                           refresh target set (plain installed() filter) —
-                          upgrade.rs sync_scope_config feeds it as explicit
+                          upgrade/mod.rs sync_scope_config feeds it as explicit
                           names so refresh never autodetects. state_desc = THE
                           picker state wording (`· installed — uncheck to
                           remove` / `· detected`), shared by setup's pick_agents
@@ -472,7 +481,9 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           failure), Codex plugin-cache staleness (cache versions
                           vs binary — editing the checkout does nothing until
                           `codex plugin add` re-runs)
-src/db.rs        SQLite: ~/.cona/projects/<fnv1a-hash>.db per project
+src/db/          SQLite: ~/.cona/projects/<fnv1a-hash>.db per project.
+                 mod.rs paths/open/meta/IndexLock; usage.rs logging + savings
+                 baseline; stats.rs aggregates; maint.rs storage + tidy
                  (data dir overridable via CONA_DATA_DIR — tests set it,
                  real ~/.cona never sees test repos)
                  (files/symbols + notes: persistent symbol annotations,
@@ -508,13 +519,13 @@ Two Codex behaviours shape how this is used and documented:
   first time and after any change to them.
 
 Hook payloads are wire-compatible between the two harnesses (same JSON fields,
-same `hookSpecificOutput` response), so `src/hook.rs` needs no per-harness
+same `hookSpecificOutput` response), so `src/hook/` needs no per-harness
 branch. What differs is the TOOL, not the protocol: Codex has no Read/Grep, only
-a shell — which is what classify_shell in hook.rs exists for (see its entry
+a shell — which is what classify_shell in hook/shell.rs exists for (see its entry
 above), and why the PreToolUse matcher lists the shell tool names alongside
 Read|Grep. The matcher has ONE source: `hook::PRETOOL_MATCHER` (joined from
 `NATIVE_TOOLS` + `SHELL_TOOLS`, the same lists the dispatcher matches on). The
-installer's `specs` table in install/agents.rs claude_hooks imports it;
+installer's `specs` table in install/agents/apply.rs claude_hooks imports it;
 plugin/hooks/hooks.json is the one hand-written copy, pinned equal by
 `plugin_hook_matcher_matches_the_installer` (the PostToolUse/SessionStart
 entries are pinned by `plugin_hooks_match_the_installer`). The installer

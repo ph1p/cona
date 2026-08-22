@@ -54,7 +54,7 @@ Coarse to fine — the usual path through an unfamiliar codebase:
 
 ```sh
 cona tree --rank            # ranked overview of the whole codebase
-cona outline src/db.rs      # every symbol in one file
+cona outline src/indexer.rs # every symbol in one file
 cona show open_project_db   # print just that symbol's source
 cona context open_project_db  # the symbol + what it calls + who calls it
 cona edit open_project_db --file new.rs   # replace its body (syntax-verified)
