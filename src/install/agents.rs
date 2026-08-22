@@ -513,6 +513,41 @@ fn has_marker(p: &Path) -> bool {
     std::fs::read_to_string(p).is_ok_and(|c| c.contains(super::BLOCK_BEGIN))
 }
 
+/// Is the cona Claude Code plugin enabled for sessions in this project?
+/// The plugin ships hooks + skill + MCP in one payload, so with it enabled the
+/// installer's settings.json hooks, skill file, and project `.mcp.json` entry
+/// are pure duplicates — every session would run each hook and inject the
+/// SessionStart context twice. Plugins can be enabled in the global or the
+/// project settings.json; either counts. An unreadable or invalid settings
+/// file counts as "no plugin", so a broken file degrades to a normal install,
+/// never to a silently skipped one.
+pub(crate) fn claude_plugin_enabled(project_root: &Path, home: &Path) -> bool {
+    [
+        home.join(".claude/settings.json"),
+        project_root.join(".claude/settings.json"),
+    ]
+    .iter()
+    .any(|p| {
+        std::fs::read_to_string(p)
+            .map(|t| plugin_enabled_in(&t))
+            .unwrap_or(false)
+    })
+}
+
+/// The parse half of `claude_plugin_enabled`, split out for tests: does this
+/// settings.json enable a cona plugin (`enabledPlugins` key `cona` or
+/// `cona@<marketplace>` set to true)?
+fn plugin_enabled_in(settings_json: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(settings_json) else {
+        return false;
+    };
+    v["enabledPlugins"].as_object().is_some_and(|plugins| {
+        plugins.iter().any(|(key, on)| {
+            (key == "cona" || key.starts_with("cona@")) && on.as_bool() == Some(true)
+        })
+    })
+}
+
 /// Every MCP target cona owns, as `(agent, scope-is-global, path, registered)`.
 /// THE single traversal of `AgentName::ALL × scopes × mcp_path` — `agents
 /// status` folds it to one cell per agent, `doctor` prints the registered rows.
@@ -875,6 +910,12 @@ fn mcp_register(agent: AgentName, ctx: &Ctx, install: bool, done: &mut Vec<super
     let Some(path) = agent.mcp_path(ctx.project_root, ctx.home, ctx.global) else {
         return;
     };
+    // The plugin registers cona's MCP server itself; a project .mcp.json entry
+    // on top would offer every session the same server twice.
+    if agent == AgentName::Claude && ctx.claude_plugin {
+        mark(done, "mcp server", "skipped (plugin has it)", &path);
+        return;
+    }
     // Only create a harness's config directory when that harness is really
     // there; installing into a project scope shouldn't conjure a `.cursor/` or
     // `.gemini/` tree the user never had. `.mcp.json` sits at the project root,
@@ -921,6 +962,9 @@ struct Ctx<'a> {
     home: &'a Path,
     global: bool,
     exe: String,
+    /// This run must skip the Claude pieces the enabled plugin already ships
+    /// (false on uninstall, so a plugin-unaware leftover still gets removed).
+    claude_plugin: bool,
 }
 
 /// `cona agents install|uninstall [names…] [--all] [--global]`
@@ -960,11 +1004,19 @@ pub fn cmd_agents_q(
         all,
         install,
     };
+    // The Claude Code plugin ships hooks + skill + MCP itself; with it enabled,
+    // writing them again just makes every session fire each hook twice and
+    // inject the SessionStart context twice. Install skips those pieces (marked
+    // "skipped"), uninstall still removes what a plugin-unaware install left
+    // behind. Guide files and subagent patches stay ours — the plugin carries
+    // neither.
+    let claude_plugin = install && claude_plugin_enabled(project_root, &home);
     let ctx = Ctx {
         project_root,
         home: &home,
         global,
         exe: agent_exe(),
+        claude_plugin,
     };
 
     // --- Claude Code -------------------------------------------------------
@@ -980,7 +1032,9 @@ pub fn cmd_agents_q(
         };
         // skill
         let skill = claude_dir.join("skills/cona/SKILL.md");
-        if install {
+        if claude_plugin {
+            mark(&mut done, "claude skill", "skipped (plugin has it)", &skill);
+        } else if install {
             let ch = write_if_changed(&skill, SKILL_MD)?;
             mark(&mut done, "claude skill", ch.verb(), &skill);
         } else if skill.exists() {
@@ -1020,24 +1074,28 @@ pub fn cmd_agents_q(
         }
         // hooks in settings.json — keep the index fresh after agent edits
         let settings = claude_dir.join("settings.json");
-        match claude_hooks(&settings, install) {
-            Ok(changed) => {
-                if install {
-                    mark(
-                        &mut done,
-                        "claude hooks",
-                        if changed { "updated" } else { "unchanged" },
-                        &settings,
-                    );
-                } else if changed {
-                    // A settings.json that held only our hooks is deleted by
-                    // `claude_hooks`, which can leave `.claude/` empty in a
-                    // project that had no Claude config before cona.
-                    prune_empty_dirs(&settings, scope_root);
-                    mark(&mut done, "claude hooks", "removed", &settings);
+        if claude_plugin {
+            mark(&mut done, "claude hooks", "skipped (plugin has them)", &settings);
+        } else {
+            match claude_hooks(&settings, install) {
+                Ok(changed) => {
+                    if install {
+                        mark(
+                            &mut done,
+                            "claude hooks",
+                            if changed { "updated" } else { "unchanged" },
+                            &settings,
+                        );
+                    } else if changed {
+                        // A settings.json that held only our hooks is deleted by
+                        // `claude_hooks`, which can leave `.claude/` empty in a
+                        // project that had no Claude config before cona.
+                        prune_empty_dirs(&settings, scope_root);
+                        mark(&mut done, "claude hooks", "removed", &settings);
+                    }
                 }
+                Err(e) => println!("warning: could not edit {}: {e}", settings.display()),
             }
-            Err(e) => println!("warning: could not edit {}: {e}", settings.display()),
         }
         // subagents — they run on their own system prompt and don't reliably see
         // CLAUDE.md, so each existing definition carries the guide itself (never
@@ -1828,5 +1886,46 @@ mod tests {
         assert!(!claude_hooks(&missing, false).unwrap());
         assert!(!missing.exists());
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+    #[test]
+    fn plugin_enabled_in_detects_only_an_enabled_cona_plugin() {
+        assert!(plugin_enabled_in(r#"{"enabledPlugins":{"cona@cona":true}}"#));
+        assert!(plugin_enabled_in(
+            r#"{"enabledPlugins":{"other@x":false,"cona@some-marketplace":true}}"#
+        ));
+        assert!(
+            !plugin_enabled_in(r#"{"enabledPlugins":{"cona@cona":false}}"#),
+            "a disabled plugin provides nothing"
+        );
+        assert!(
+            !plugin_enabled_in(r#"{"enabledPlugins":{"corona@cona":true}}"#),
+            "only `cona` / `cona@…` keys count, not other plugins that contain the word"
+        );
+        assert!(!plugin_enabled_in(r#"{"enabledPlugins":{}}"#));
+        assert!(!plugin_enabled_in("{}"));
+        assert!(
+            !plugin_enabled_in("not json"),
+            "an invalid settings file degrades to a normal install, never a skipped one"
+        );
+    }
+
+    #[test]
+    fn claude_plugin_enabled_reads_global_and_project_settings() {
+        let tmp = std::env::temp_dir().join(format!("cona-plugin-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (home, proj) = (tmp.join("home"), tmp.join("proj"));
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(proj.join(".claude")).unwrap();
+        assert!(!claude_plugin_enabled(&proj, &home), "no settings at all");
+
+        let on = r#"{"enabledPlugins":{"cona@cona":true}}"#;
+        std::fs::write(home.join(".claude/settings.json"), on).unwrap();
+        assert!(claude_plugin_enabled(&proj, &home), "global settings count");
+
+        std::fs::remove_file(home.join(".claude/settings.json")).unwrap();
+        std::fs::write(proj.join(".claude/settings.json"), on).unwrap();
+        assert!(claude_plugin_enabled(&proj, &home), "project settings count too");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

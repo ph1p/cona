@@ -354,7 +354,20 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           cmd_agents (thin) + cmd_agents_q (fully
                           silent, reports changes via per-mark Mark::changed() —
                           no output-string scanning); claude_hooks (settings.json
-                          via serde_json); AgentName ValueEnum + AgentSel::want =
+                          via serde_json); claude_plugin_enabled = THE plugin
+                          probe (enabledPlugins `cona`/`cona@…` true, global OR
+                          project settings.json; invalid/missing file = no
+                          plugin, so a broken file degrades to a normal install,
+                          never a silently skipped one) — an enabled plugin
+                          ships hooks + skill + MCP itself, so install SKIPS
+                          those three (marks "skipped (plugin has …)"; Ctx
+                          carries the flag to mcp_register) or every session
+                          would fire each hook and inject the SessionStart
+                          context twice; the flag is install-only, so uninstall
+                          still strips plugin-unaware leftovers, and doctor
+                          flips polarity (present settings hooks/skill =
+                          duplicate issue, absent = healthy, plugin counts as
+                          hooks_configured); AgentName ValueEnum + AgentSel::want =
                           THE selection rule: named/--all override detection,
                           bare install autodetects, bare uninstall cleans all.
                           prune_empty_dirs = THE post-delete cleanup, called at

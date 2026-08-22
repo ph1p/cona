@@ -184,7 +184,15 @@ Details: docs/architecture.md, user-facing docs: plugin/README.md.
 agents. Installing an agent also registers the MCP server wherever that
 harness keeps its config (mcp_config.rs) — written with the ABSOLUTE binary
 path from agent_exe(). Skipped when the parent dir does not exist (except the project root), and a
-failure there warns instead of aborting the install. Interactive = no `-y`, no explicit scope arg, TTY → pick_agents shows
+failure there warns instead of aborting the install. Claude installs are
+plugin-aware (claude_plugin_enabled): an enabled cona plugin (`enabledPlugins`
+`cona`/`cona@…`, global OR project settings.json) already ships hooks + skill +
+MCP, so install SKIPS those three (marked "skipped (plugin has …)") and writes
+only guide + subagent patches — else every session fires each hook twice and
+gets the SessionStart context twice. Uninstall still removes plugin-unaware
+leftovers. `doctor` flips polarity with the plugin: PRESENT settings
+hooks/skill = duplicate issue (with the uninstall→install de-dupe hint),
+absent = healthy; plugin counts as hooks_configured for the liveness check. Interactive = no `-y`, no explicit scope arg, TTY → pick_agents shows
 ONE ui::multiselect across BOTH scopes (PROJECT + HOME sections via Row::Header,
 items pre-checked by `installed() || detected()` — reality first, detection only
 as the first-run suggestion; descriptions state the row's state via

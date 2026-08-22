@@ -70,6 +70,10 @@ struct DoctorReport {
     /// Hooks are configured in some scope but the stamp is missing or >7 days
     /// old — configured-but-silent, the failure doctor exists to catch.
     hook_silent: bool,
+    /// The Claude Code cona plugin is enabled (it provides hooks + skill +
+    /// MCP itself) — flips what counts as an issue: missing settings-level
+    /// integration is then correct, PRESENT integration is a duplicate.
+    claude_plugin: bool,
     /// Codex plugin cache (cache dir, cached version dirs) when present.
     codex_cache: Option<(PathBuf, Vec<String>)>,
     /// No cached version matches the running binary — the checkout was edited
@@ -133,6 +137,10 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
     }
     let on_path = cona_on_path();
 
+    // With the plugin enabled the polarity flips: settings-level hooks/skill
+    // are DUPLICATES (each hook fires twice per event), their absence is the
+    // healthy state.
+    let claude_plugin = super::agents::claude_plugin_enabled(project_root, &home);
     let mut scopes = Vec::new();
     for (label, root) in [
         ("global", home.clone()),
@@ -144,13 +152,15 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         let skill = skill_path.exists();
         issues += [index_hook, read_hook, skill]
             .iter()
-            .filter(|b| !**b)
+            .filter(|b| **b == claude_plugin)
             .count();
         let config_ver = if skill {
             let v = db::meta_get(&super::upgrade::config_ver_key(&root))
                 .ok()
                 .flatten();
-            if v.as_deref() != Some(current_ver) {
+            // With the plugin the skill is already flagged as a duplicate —
+            // a stale version on top would double-count the same problem.
+            if !claude_plugin && v.as_deref() != Some(current_ver) {
                 issues += 1;
             }
             v
@@ -170,7 +180,7 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
     // Hooks configured anywhere but never (or long ago) actually run = the
     // exact failure this command exists to surface: the harness snapshots
     // hooks at startup, so a stale session keeps ignoring a fresh install.
-    let hooks_configured = scopes.iter().any(|s| s.index_hook || s.read_hook);
+    let hooks_configured = claude_plugin || scopes.iter().any(|s| s.index_hook || s.read_hook);
     let hook_seen_secs = hook_last_seen();
     let hook_silent = hooks_configured
         && hook_seen_secs.is_none_or(|secs| secs > crate::hook::MARKER_MAX_AGE_SECS as i64);
@@ -228,6 +238,7 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         hook_seen_secs,
         hooks_configured,
         hook_silent,
+        claude_plugin,
         codex_cache,
         codex_stale,
         mcp,
@@ -250,6 +261,7 @@ fn render_json(r: &DoctorReport) -> serde_json::Value {
             "exists": r.install_exists,
             "on_path": r.on_path.as_ref().map(|p| p.display().to_string()),
         },
+        "claude_plugin_enabled": r.claude_plugin,
         "claude": r.scopes.iter().map(|s| serde_json::json!({
             "scope": s.label,
             "index_hook": s.index_hook,
@@ -327,6 +339,41 @@ fn render_text(r: &DoctorReport) {
             _ => "project (./.claude)",
         };
         println!("\n{}", ui::heading(&format!("claude {label}")));
+        if r.claude_plugin {
+            // Polarity flips with the plugin: it ships hooks + skill + MCP, so
+            // anything still in settings.json / skills/ is a duplicate that
+            // fires twice per event.
+            let dupes: Vec<&str> = [
+                (s.index_hook, "index hook"),
+                (s.read_hook, "read-guard hook"),
+                (s.skill, "skill"),
+            ]
+            .iter()
+            .filter(|(present, _)| *present)
+            .map(|(_, name)| *name)
+            .collect();
+            if dupes.is_empty() {
+                println!(
+                    "  {}",
+                    ui::ok("cona plugin enabled — it provides hooks, skill, and MCP")
+                );
+            } else {
+                let verb = if dupes.len() == 1 {
+                    "duplicates"
+                } else {
+                    "duplicate"
+                };
+                println!(
+                    "  {}",
+                    ui::warn(&format!(
+                        "{} {verb} the enabled cona plugin — `cona agents uninstall claude` \
+                         then `cona agents install claude` cleans this up",
+                        dupes.join(" + ")
+                    ))
+                );
+            }
+            continue;
+        }
         println!(
             "  {}",
             tag(s.index_hook, "index hook (PostToolUse/SessionStart)")
@@ -388,7 +435,10 @@ fn render_text(r: &DoctorReport) {
     // CLI + skill work without it), and most harnesses only get it once their
     // config directory exists.
     println!("\n{}", ui::heading("mcp server (cona mcp)"));
-    if r.mcp.is_empty() {
+    if r.claude_plugin {
+        println!("  {}", ui::ok("claude: provided by the cona plugin"));
+    }
+    if r.mcp.is_empty() && !r.claude_plugin {
         println!(
             "  {}",
             ui::dim("not registered anywhere — `cona agents install` adds it where a harness config exists")
