@@ -702,16 +702,7 @@ fn session_start_context(
     ctx.push_str("\nMost-referenced symbols (your orientation map):\n\n");
     ctx.push_str(&map);
 
-    let payload = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": ctx,
-        }
-    });
-    match serde_json::to_string(&payload) {
-        Ok(s) => format!("{s}\n"),
-        Err(_) => String::new(),
-    }
+    hook::additional_context("SessionStart", &ctx)
 }
 
 fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {

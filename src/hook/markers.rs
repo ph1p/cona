@@ -104,6 +104,35 @@ pub(crate) fn peek_reads(root: &Path, rel: &str, session: &str) -> (bool, i64) {
     (seen, count)
 }
 
+/// Record one NARROW read of `rel` and report how many this session has now
+/// seen (including this one).
+///
+/// A single bounded read is exactly what the per-call rules want and always
+/// passes — `Read` with an offset/limit, `sed -n '300,330p'`, `head -n 50`. But
+/// paging one file in four separate slices is a worse, more expensive `cona
+/// outline` + `show`: the agent is groping for symbol boundaries it could have
+/// had in one call, and it re-pays the surrounding context on every slice. No
+/// per-call policy can see that — the shape only exists across calls, in the
+/// same way the full-read streak does.
+///
+/// Kept in its own marker kind rather than in `reads`: these never went through
+/// the full-read tiers, must not mark a path as "already fully in context" (a
+/// slice is not the file), and must not move the full-read volume counter.
+/// Best-effort; on any failure we report 0 and stay silent.
+pub(crate) fn bump_partial_reads(root: &Path, rel: &str, session: &str) -> i64 {
+    let Some(log) = session_marker_path(root, "partials", session) else {
+        return 0;
+    };
+    prepare_marker(&log);
+    let prior = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| *l == rel)
+        .count() as i64;
+    append_marker_line(&log, rel);
+    prior + 1
+}
+
 /// Append one read that actually went through to the session's read log.
 /// `counted` = the read carried no advisory (see `peek_reads`). A DENIED read
 /// is never recorded — the bytes never reached the agent, so a retry must not

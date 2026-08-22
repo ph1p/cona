@@ -298,9 +298,24 @@ fn renudge_disabled_at_zero() {
     assert!(!fires_on_cadence(30, 0));
 }
 
+#[test]
+fn partial_read_streak_fires_on_every_multiple() {
+    // Four narrow slices of one file is the shape that passes every per-call
+    // rule and still wastes the context an outline would have covered once.
+    let every = DEFAULT_PARTIAL_STREAK;
+    assert_eq!(every, 3);
+    assert!(!fires_on_cadence(1, every));
+    assert!(!fires_on_cadence(2, every));
+    assert!(fires_on_cadence(3, every));
+    assert!(fires_on_cadence(6, every));
+    // 0 disables the tier outright.
+    assert!(!fires_on_cadence(3, 0));
+}
+
 fn grep_facts() -> GrepFacts {
     GrepFacts {
         surgical: false,
+        single_file: false,
         identifier: true,
         indexed_project: true,
         in_repo: true,
@@ -327,6 +342,41 @@ fn advises_soft_grep_in_indexed_project() {
     assert_eq!(
         decide_grep(&GrepFacts {
             soft: true,
+            indexed_project: false,
+            ..grep_facts()
+        }),
+        Decision::Nudge
+    );
+}
+
+#[test]
+fn advises_single_file_grep_but_never_blocks() {
+    // `grep -n foo one.rs` is `cona show foo` spelled the long way: it hands
+    // back a line number the agent then slices around. Narrow enough that it
+    // must never be blocked, informative enough to be worth a hint.
+    assert_eq!(
+        decide_grep(&GrepFacts {
+            single_file: true,
+            ..grep_facts()
+        }),
+        Decision::Advise
+    );
+}
+
+#[test]
+fn single_file_grep_in_unindexed_repo_stays_silent() {
+    // Too narrow to justify pitching a whole-project index — a broad search in
+    // the same repo still gets the Nudge.
+    assert_eq!(
+        decide_grep(&GrepFacts {
+            single_file: true,
+            indexed_project: false,
+            ..grep_facts()
+        }),
+        Decision::Allow
+    );
+    assert_eq!(
+        decide_grep(&GrepFacts {
             indexed_project: false,
             ..grep_facts()
         }),
@@ -512,7 +562,50 @@ fn narrowed_shell_reads_are_partial() {
         "head -n 50 a.rs",
         "tail -n 50 a.rs",
     ] {
-        assert_eq!(classify_shell(cmd), ShellIntent::PartialRead, "{cmd}");
+        assert_eq!(
+            classify_shell(cmd),
+            ShellIntent::PartialRead {
+                path: Some("a.rs".into())
+            },
+            "{cmd}"
+        );
+    }
+}
+
+/// The slice accounting keys on a file, so a partial read must carry the ONE
+/// file it sliced — and only when that is unambiguous. A metadata probe reads no
+/// content and must not be counted as a slice of anything.
+#[test]
+fn partial_reads_carry_their_file_only_when_unambiguous() {
+    // flag values must not be mistaken for operands
+    for cmd in ["head -n 50 a.rs", "head -50 a.rs", "head --lines=50 a.rs"] {
+        assert_eq!(
+            classify_shell(cmd),
+            ShellIntent::PartialRead {
+                path: Some("a.rs".into())
+            },
+            "{cmd}"
+        );
+    }
+    for cmd in ["head -n 5 a.rs b.rs", "head -n 5", "wc -l a.rs", "ls src"] {
+        assert_eq!(
+            classify_shell(cmd),
+            ShellIntent::PartialRead { path: None },
+            "{cmd}"
+        );
+    }
+    // a probe paired with a slice is judged on the slice, in either order
+    for cmd in [
+        "wc -l a.rs && sed -n '40,80p' a.rs",
+        "sed -n '40,80p' a.rs && wc -l a.rs",
+    ] {
+        assert_eq!(
+            classify_shell(cmd),
+            ShellIntent::PartialRead {
+                path: Some("a.rs".into())
+            },
+            "{cmd}"
+        );
     }
 }
 

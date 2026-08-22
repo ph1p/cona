@@ -65,7 +65,10 @@ src/entries.rs   Pure heuristics for entries/tests
 src/fuzzy.rs     fuzzy_score — find's fallback ranking
 src/diffmap.rs   Pure diff helpers (parse_unified/overlaps/has_uncovered)
 src/resolve.rs   Optional stack-graphs tier (fail-open), separate helper binary
-src/hook/        PreToolUse/PostToolUse hooks. PreToolUse redirect = the ONLY
+src/hook/        PreToolUse/PostToolUse/PreCompact hooks (PreCompact answered in
+                 main.rs — needs index counts, emits context not a decision;
+                 restates the rule because compaction drops the SessionStart
+                 block mid-session). PreToolUse redirect = the ONLY
                  permissionDecision (deny); every hint path is additionalContext.
                  Reads arrive in TWO shapes: native Read/Grep, and a shell
                  command line (Codex has no Read/Grep — `cat f`/`sed -n`/`rg`
@@ -283,7 +286,11 @@ greps as `"hook:grep-block"`, and the advisory (non-blocking) outcomes as
 path already read this session, or the yield on a retried denied read),
 `"hook:grep-advise"` (broad grep whose output is already bounded — `-l`/`-c`/
 context flags), `"hook:read-streak"` (every `CONA_READ_STREAK`-th full read in
-one session) and `"hook:read-nudge"` / `"hook:grep-nudge"` (unindexed repo;
+one session), `"hook:partial-streak"` (every `CONA_PARTIAL_STREAK`-th narrow
+slice of ONE indexed callable file in a session, default 3, 0 = off — its own
+`partials` marker kind so a slice neither marks the file "already read" nor
+moves the full-read counter), `"hook:grep-single-file"` (broad identifier grep
+scoped to one file) and `"hook:read-nudge"` / `"hook:grep-nudge"` (unindexed repo;
 first eligible event per session, repeats every `CONA_NUDGE_EVERY` suppressed
 ones, default 10, 0 = never) — all count lines with
 `tokens_saved = 0` (saving credited to the follow-up query, else

@@ -254,6 +254,19 @@ unrecognised segment passes whole (`sed -n '1,50p' f && cargo build` is a build,
 not a read), an unrecognised wrapper program passes, and a genuinely bounded
 `sed`/`head`/`tail` passes because it is already the cheap thing.
 
+One narrow read is the cheap thing; the fourth narrow read of the _same_ file is
+not — that's `outline` + `show` spelled the long way, re-paying the surrounding
+context each time. After every third slice of one indexed file in a session the
+hook mentions it, as a hint only, never a block (`CONA_PARTIAL_STREAK=<n>`,
+`0` = off). Metadata probes (`wc -l`, `ls`, `stat`) never count: they pull no
+content into context.
+
+**Across a compaction** the hook restates the rule. Compaction summarizes the
+conversation and drops injected context, so the session-start note is gone while
+the session keeps running — the one boundary where the habit reliably lapses.
+It re-states the rule only, not the orientation map: re-spending ~900 tokens on
+that would be the very waste cona exists to prevent.
+
 **The re-nudge hook** is off by default. Current models keep the habit from the
 session-start note alone, and repeating it on a timer is just context noise. On
 a model that drifts in long sessions, set `CONA_RENUDGE_EVERY=<n>` to get a

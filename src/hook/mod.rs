@@ -34,6 +34,28 @@ mod shell;
 mod tests;
 
 pub use markers::{file_age_secs, fires_on_cadence, LIVENESS_FILE, MARKER_MAX_AGE_SECS};
+
+/// The one builder for a hint payload: `additionalContext` carries text to the
+/// agent and decides nothing. Every hint path in cona — advisory, streak, nudge,
+/// re-nudge, compaction — emits exactly this shape and differs only in the event
+/// name, so it lives here rather than being spelled out at each site. (The
+/// `permissionDecision` sibling is deliberately NOT here: the redirect is the
+/// only decision cona ever emits and its single call site should stay visible.)
+///
+/// Serialization of a two-field object cannot realistically fail; if it somehow
+/// does, an empty string means "no hint", which is the fail-open answer.
+pub fn additional_context(event: &str, ctx: &str) -> String {
+    let payload = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": ctx,
+        }
+    });
+    match serde_json::to_string(&payload) {
+        Ok(s) => format!("{s}\n"),
+        Err(_) => String::new(),
+    }
+}
 pub use shell::{
     classify_command, classify_shell, shell_words, split_segments, unwrap_shell_wrapper,
     ShellIntent,
@@ -105,6 +127,14 @@ const DEFAULT_READ_STREAK: i64 = 4;
 /// stays a one-second fix the whole time. Override with `CONA_NUDGE_EVERY`;
 /// 0 = fire once per session and never repeat.
 const DEFAULT_NUDGE_EVERY: i64 = 10;
+
+/// Default number of NARROW reads of the SAME file in one session before the
+/// hook points out that an outline would have given every symbol boundary in one
+/// call. Each such read is individually correct and always passes — the waste
+/// only exists as a pattern (four slices of one file re-pay the surrounding
+/// context four times and usually mean the agent is hunting for boundaries).
+/// Override with `CONA_PARTIAL_STREAK`; 0 disables.
+const DEFAULT_PARTIAL_STREAK: i64 = 3;
 
 /// Default cadence for the periodic re-nudge: OFF. Repeating the same guidance
 /// across SessionStart, the agent guide and a timer is over-constraint for
@@ -196,9 +226,15 @@ pub fn decide_read(f: &ReadFacts) -> Decision {
 /// pure and unit-testable.
 #[derive(Debug, Clone)]
 pub struct GrepFacts {
-    /// The Grep is already narrowed (glob/type filter, head_limit, or a
-    /// single-file path) — the agent is being surgical.
+    /// The Grep is already narrowed by a glob/type filter or a head_limit —
+    /// the agent is being surgical, and cona has nothing better to offer.
     pub surgical: bool,
+    /// The search is scoped to ONE file. Narrow, so it never blocks — but
+    /// "find this identifier inside this one file" is the highest-confidence
+    /// "I want a symbol" signal there is, and it is `cona show`/`refs` spelled
+    /// the long way: grep hands back a line number the agent must then slice
+    /// around, where `show` hands back the symbol. Advisory tier.
+    pub single_file: bool,
     /// The pattern is a plain identifier cona can serve semantically.
     pub identifier: bool,
     /// The search root is an indexed cona project.
@@ -214,6 +250,8 @@ pub struct GrepFacts {
 /// Decide what to do with a candidate `Grep`.
 /// - broad identifier search over an indexed project → Redirect
 ///   (Advise instead when the output is already bounded — `soft`)
+/// - single-file identifier search over an indexed project → Advise (never
+///   blocks: the search is already narrow, but `show`/`refs` beats a line number)
 /// - broad identifier search over an UNINDEXED git repo → Nudge
 /// - surgical / regex / non-repo → Allow
 pub fn decide_grep(f: &GrepFacts) -> Decision {
@@ -221,12 +259,16 @@ pub fn decide_grep(f: &GrepFacts) -> Decision {
         return Decision::Allow;
     }
     if f.indexed_project {
-        if f.soft {
+        // `soft` and `single_file` are both "already restrained" — inform, never
+        // block. A single-file search in an UNINDEXED repo stays Allow rather
+        // than falling through to Nudge: too narrow to justify a hint for a
+        // whole-project index the agent hasn't asked for.
+        if f.soft || f.single_file {
             Decision::Advise
         } else {
             Decision::Redirect
         }
-    } else if f.in_repo {
+    } else if f.in_repo && !f.single_file {
         Decision::Nudge
     } else {
         Decision::Allow
@@ -256,6 +298,10 @@ fn read_streak_every() -> i64 {
     env_i64("CONA_READ_STREAK", DEFAULT_READ_STREAK, 0)
 }
 
+fn partial_streak_every() -> i64 {
+    env_i64("CONA_PARTIAL_STREAK", DEFAULT_PARTIAL_STREAK, 0)
+}
+
 fn renudge_every() -> i64 {
     env_i64("CONA_RENUDGE_EVERY", DEFAULT_RENUDGE_EVERY, 0)
 }
@@ -275,6 +321,9 @@ pub fn run(event: &str) -> Result<()> {
         }
         "PostToolUse" => {
             let _ = intercept::try_posttooluse();
+        }
+        "PreCompact" => {
+            let _ = intercept::try_precompact();
         }
         _ => {}
     }

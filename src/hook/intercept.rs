@@ -1,8 +1,11 @@
 //! The two tool-call intercepts (Read and Grep, native or via a shell tool)
-//! and the PostToolUse re-nudge: payload parsing, fact gathering, and the
-//! emitted decision. The pure policy they consult lives in the parent module.
+//! plus the PostToolUse re-nudge and the PreCompact restatement: payload
+//! parsing, fact gathering, and the emitted decision. The pure policy they
+//! consult lives in the parent module.
 
-use super::markers::{note_denied, nudge_due, peek_reads, record_read, session_id, tick_toolcall};
+use super::markers::{
+    bump_partial_reads, note_denied, nudge_due, peek_reads, record_read, session_id, tick_toolcall,
+};
 use super::*;
 use crate::{db, indexer, lang};
 use std::io::Read;
@@ -31,8 +34,7 @@ pub(crate) fn try_pretooluse() -> Result<()> {
             let path = input["path"].as_str();
             let surgical = !input["glob"].is_null()
                 || !input["type"].is_null()
-                || !input["head_limit"].is_null()
-                || path.map(|p| Path::new(p).is_file()).unwrap_or(false);
+                || !input["head_limit"].is_null();
             // bounded output (file list, counts, context windows) = the same
             // restraint the shell path reads from -l/-c/-C — advisory tier
             let soft = matches!(
@@ -66,12 +68,47 @@ fn try_shell(v: &serde_json::Value, cmd: &str) -> Result<()> {
             pattern,
             path,
             soft,
-        } => {
-            let surgical = path.as_deref().map(|p| Path::new(p).is_file()) == Some(true);
-            try_grep(v, &pattern, path.as_deref(), surgical, soft)
-        }
-        ShellIntent::PartialRead | ShellIntent::Other => Ok(()),
+        } => try_grep(v, &pattern, path.as_deref(), false, soft),
+        // A slice of a named file feeds the cross-call accounting; a pathless
+        // metadata probe (`wc -l`, `ls`) read no content and is ignored.
+        ShellIntent::PartialRead { path: Some(p) } => try_partial_read(v, &p),
+        ShellIntent::PartialRead { path: None } | ShellIntent::Other => Ok(()),
     }
+}
+
+/// Is this path present in the project index? Fail-open: any DB trouble reads
+/// as "not indexed", which can only ever soften the decision.
+fn file_indexed(conn: &rusqlite::Connection, rel: &str) -> bool {
+    conn.query_row("SELECT 1 FROM files WHERE path = ?1", [rel], |_| Ok(true))
+        .unwrap_or(false)
+}
+
+/// The biggest few symbols in an indexed file, longest first, as a
+/// ready-to-paste `cona show` example.
+///
+/// The redirect used to spell `cona show <Symbol>` — a template the agent has to
+/// translate into a real command before it can act, which is exactly the step
+/// that gets skipped under momentum. The grep intercept has always interpolated
+/// its real pattern; the read path has the same information available (it is
+/// indexed by definition here) and should name it too. Longest-first because a
+/// redirect answers "what is in this file" and the largest symbols carry most of
+/// it. Fully fail-open: any DB trouble yields None and the caller falls back to
+/// the placeholder wording.
+fn top_symbols(conn: &rusqlite::Connection, rel: &str, limit: usize) -> Option<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.qualified FROM symbols s JOIN files f ON f.id = s.file_id
+             WHERE f.path = ?1 AND s.qualified <> ''
+             ORDER BY (s.end_line - s.start_line) DESC, s.start_line
+             LIMIT ?2",
+        )
+        .ok()?;
+    let names: Vec<String> = stmt
+        .query_map(rusqlite::params![rel, limit as i64], |r| r.get(0))
+        .ok()?
+        .flatten()
+        .collect();
+    (!names.is_empty()).then_some(names)
 }
 
 /// Build a non-blocking read advisory: the caller's specific observation, then
@@ -120,26 +157,73 @@ pub(crate) fn try_posttooluse() -> Result<()> {
     let reason = "Reminder: this project is cona-indexed. Before a full Read or broad \
                   Grep of code, reach for `cona outline`/`show`/`grep`/`refs` — one \
                   symbol, not the whole file.";
-    let out = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": reason,
-        }
-    });
-    println!("{}", serde_json::to_string(&out)?);
+    print!("{}", super::additional_context("PostToolUse", reason));
     Ok(())
 }
 
-/// The shared read intercept. `partial` is the caller's "the agent already
-/// narrowed this" signal; `upto` is a shell-side upper line bound (see
-/// `ShellIntent::Read`) that only counts as narrowing once we know the file is
-/// actually longer than it.
-fn try_read(
-    v: &serde_json::Value,
-    file_path: &str,
-    partial: bool,
-    upto: Option<i64>,
-) -> Result<()> {
+/// Restate the navigation habit across a compaction boundary.
+///
+/// Compaction summarizes the CONVERSATION and drops injected hook context, so
+/// the SessionStart block is gone from here on while the session keeps running.
+/// That is the one moment the habit reliably lapses: the post-compact agent
+/// resumes from a summary full of concrete `file.rs:120` pointers, which makes
+/// `sed -n`/`grep` feel like the shortest path, and nothing in the live hook
+/// path restates the rule (the re-nudge is off by default — see
+/// DEFAULT_RENUDGE_EVERY). This is deliberately NOT the SessionStart block: the
+/// orientation map is re-orientation the agent no longer needs mid-task, and
+/// re-spending ~900 tokens of a freshly-compacted window on it would be the
+/// very waste cona exists to prevent. Rule only, no map.
+pub(crate) fn try_precompact() -> Result<()> {
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    let v: serde_json::Value = serde_json::from_str(&buf)?;
+
+    let root = v["cwd"]
+        .as_str()
+        .map(PathBuf::from)
+        .map(|c| db::git_root_from(&c))
+        .unwrap_or_else(|| db::git_root_from(Path::new(".")));
+
+    // Cheap stat before the DB open; never create a project DB from a hook.
+    // `counts` needs the connection anyway, so it doubles as the index check —
+    // an empty index reports zero files and is treated as no index.
+    if !db::project_db_path(&root).exists() {
+        return Ok(());
+    }
+    let Ok(report) = db::open_project_db(&root).and_then(|c| indexer::counts(&c)) else {
+        return Ok(());
+    };
+    if report.total_files == 0 {
+        return Ok(());
+    }
+    let ctx = format!(
+        "cona still has this project indexed ({} files, {} symbols) — the index \
+         survived the compaction, and so does the habit. Reading a whole code file \
+         or grepping for a name is the expensive path: `cona outline <file>` \
+         \u{2192} `cona show <Symbol>` reads ONE symbol, `cona context <Symbol>` \
+         adds its callers/callees in the same call, and `cona grep`/`refs <Name>` \
+         search code semantically (strings and comments never match, build \
+         artifacts are not in the index). Line pointers carried over in the \
+         summary are `cona show` targets, not `sed -n` ranges.\n",
+        report.total_files, report.total_symbols
+    );
+    print!("{}", super::additional_context("PreCompact", &ctx));
+    Ok(())
+}
+
+/// One read target, resolved against the tool call's cwd and classified.
+struct Target {
+    file_abs: PathBuf,
+    root: PathBuf,
+    rel: String,
+    is_code: bool,
+    callable: bool,
+}
+
+/// Locate the file a read names and classify its language. Shared by the full
+/// and partial read paths so the two agree on which repo root and relative path
+/// a given tool call refers to — the marker keys are derived from both.
+fn resolve_target(v: &serde_json::Value, file_path: &str) -> Target {
     // A relative path (`sed -n '1,240p' main.rs`) resolves against the tool
     // call's cwd, not ours — the hook runs wherever the harness launched it.
     let cwd = v["cwd"].as_str().map(PathBuf::from);
@@ -160,9 +244,82 @@ fn try_read(
         .unwrap_or_else(|_| file_path.to_string());
 
     let detected = lang::detect_lang(&rel);
-    let is_code = detected.is_some();
-    let callable = detected.map(lang::has_callable_symbols).unwrap_or(false);
-    let in_repo = root.join(".git").exists();
+    Target {
+        file_abs,
+        root,
+        rel,
+        is_code: detected.is_some(),
+        callable: detected.map(lang::has_callable_symbols).unwrap_or(false),
+    }
+}
+
+/// Cross-call accounting for narrow reads of ONE file.
+///
+/// Every individual slice here is exactly what the per-call rules want and
+/// always passes. What no per-call rule can see is the SHAPE: four separate
+/// slices of one file is `cona outline` + `show` spelled the long way, with the
+/// surrounding context re-paid each time. So this only ever advises, never
+/// blocks — and only for indexed callable source, where an outline really is
+/// the better call.
+fn try_partial_read(v: &serde_json::Value, file_path: &str) -> Result<()> {
+    let streak = partial_streak_every();
+    if streak == 0 {
+        return Ok(());
+    }
+    let t = resolve_target(v, file_path);
+    if !t.is_code || !t.callable {
+        return Ok(());
+    }
+    // Cheap stat gate before any DB work: an unindexed repo has nothing to
+    // point at, and a hook must never create a project DB.
+    if !db::project_db_path(&t.root).exists() {
+        return Ok(());
+    }
+    // Tick + cadence BEFORE opening SQLite, as in try_posttooluse: only a call
+    // that actually lands on a streak boundary pays for a connection, which is
+    // then used to confirm THIS file is really in the index (not just that a db
+    // file exists).
+    let n = bump_partial_reads(&t.root, &t.rel, &session_id(v));
+    if !fires_on_cadence(n, streak) {
+        return Ok(());
+    }
+    let indexed = db::open_project_db(&t.root).is_ok_and(|c| file_indexed(&c, &t.rel));
+    if !indexed {
+        return Ok(());
+    }
+    let rel = &t.rel;
+    let reason = format!(
+        "That's {n} separate narrow reads of {rel} this session. \
+         `cona outline {rel}` gives every symbol with its line range in ONE call, \
+         then `cona show <Symbol>` reads the one you want without hunting for its \
+         bounds (`cona context <Symbol>` adds its callers/callees too). \
+         This read ran as-is."
+    );
+    allow_with_reason(&t.root, "hook:partial-streak", rel, &reason)
+}
+
+/// The shared read intercept. `partial` is the caller's "the agent already
+/// narrowed this" signal; `upto` is a shell-side upper line bound (see
+/// `ShellIntent::Read`) that only counts as narrowing once we know the file is
+/// actually longer than it.
+fn try_read(
+    v: &serde_json::Value,
+    file_path: &str,
+    partial: bool,
+    upto: Option<i64>,
+) -> Result<()> {
+    if partial {
+        // A narrowed read is never blocked; it only feeds the cross-call slice
+        // accounting, which resolves the target itself.
+        return try_partial_read(v, file_path);
+    }
+    let Target {
+        file_abs,
+        root,
+        rel,
+        is_code,
+        callable,
+    } = resolve_target(v, file_path);
 
     // Cheap gates BEFORE reading any bytes: partial/non-code reads are Allow
     // regardless of size, and a multi-GB data file must never be slurped into
@@ -175,7 +332,7 @@ fn try_read(
     // would bail here before we ever check the index (that was the bug).
     let max_lines = max_lines();
     let advise_min_lines = advise_min_lines();
-    if partial || !is_code {
+    if !is_code {
         return Ok(());
     }
     // A file of N lines is >= N bytes, so a size below the threshold proves the
@@ -221,10 +378,7 @@ fn try_read(
     } else {
         None
     };
-    let indexed: bool = conn.as_ref().is_some_and(|c| {
-        c.query_row("SELECT 1 FROM files WHERE path = ?1", [&rel], |_| Ok(true))
-            .unwrap_or(false)
-    });
+    let indexed: bool = conn.as_ref().is_some_and(|c| file_indexed(c, &rel));
 
     // Track full reads of indexed source files: re-read detection and the
     // read-volume streak are both size-blind, so this applies even to files
@@ -248,7 +402,7 @@ fn try_read(
         partial,
         is_code,
         indexed,
-        in_repo,
+        in_repo: root.join(".git").exists(),
         lines,
         max_lines,
         advise_min_lines,
@@ -331,11 +485,23 @@ fn try_read(
                  ranges that stop short of the end)"
                     .to_string()
             };
+            // Name real symbols from this very file when we can, so the redirect
+            // hands over a runnable command instead of a template to fill in
+            // (the grep intercept has always interpolated its real pattern).
+            // The reindex above ran first, so these names are current.
+            let show_hint = match conn.as_ref().and_then(|c| top_symbols(c, &rel, 3)) {
+                Some(names) => format!(
+                    "then `cona show <Symbol>` prints only those lines — in this file, \
+                     e.g. `cona show {}`",
+                    names.join("`, `cona show ")
+                ),
+                None => "then `cona show <Symbol>` prints only those lines".to_string(),
+            };
             let reason = format!(
                 "{rel} is {size_desc}. cona can take you straight to \
                  the right spot for a fraction of the tokens: `cona outline {rel}` lists \
-                 every symbol with its line range, then `cona show <Symbol>` prints only \
-                 those lines. To understand a symbol (its body + what it calls + who calls it) \
+                 every symbol with its line range, {show_hint}. To understand a symbol \
+                 (its body + what it calls + who calls it) \
                  in ONE call, prefer `cona context <Symbol>`; before changing one, \
                  `cona impact <Symbol>` shows its blast radius. (Also `cona find <Name>` \
                  / `cona refs <Name>`.) If you genuinely need the whole file, {chunk_hint}."
@@ -384,16 +550,21 @@ fn try_grep(
     surgical: bool,
     soft: bool,
 ) -> Result<()> {
-    // cheap gates first — only a broad identifier search pays for the DB check
+    // cheap gates first — only a broad identifier search pays for the stat and
+    // the DB check below
     if surgical || !lang::is_valid_ident(pattern) {
         return Ok(());
     }
 
+    // Tracked separately from `surgical`: narrow enough never to block, but the
+    // one shape `cona show`/`refs` answers strictly better.
+    let single_file = path.map(|p| Path::new(p).is_file()).unwrap_or(false);
     let start = grep_start(path, v["cwd"].as_str());
     let root = db::git_root_from(&start);
 
     let facts = GrepFacts {
         surgical,
+        single_file,
         identifier: true,
         // only projects the user already indexed — never create a DB from a hook
         indexed_project: db::has_index(&root),
@@ -403,15 +574,33 @@ fn try_grep(
     match decide_grep(&facts) {
         Decision::Allow => Ok(()),
         Decision::Advise => {
-            // Output already bounded (-l/-c/context) — respect the restraint,
-            // let it run, and point at the semantic equivalent.
-            let reason = format!(
-                "this project is cona-indexed — `cona grep {pattern}` searches code only \
-                 and labels every hit with its enclosing symbol; `cona refs {pattern}` \
-                 gives semantic usage sites (strings/comments never match). This search \
-                 ran as-is."
-            );
-            allow_with_reason(&root, "hook:grep-advise", pattern, &reason)
+            // Two restrained shapes land here and want different advice: a
+            // single-file search is looking for a definition it could have had
+            // whole, while a -l/-c/context search is a broad search with bounded
+            // output. Both ran as-is.
+            let (tag, reason) = if single_file {
+                (
+                    "hook:grep-single-file",
+                    format!(
+                        "searching one file for `{pattern}` returns a line number you then \
+                         have to slice around — `cona show {pattern}` returns the whole \
+                         symbol, and `cona context {pattern}` adds its callers/callees in \
+                         the same call. `cona refs {pattern}` gives every usage site \
+                         project-wide (strings/comments never match). This search ran as-is."
+                    ),
+                )
+            } else {
+                (
+                    "hook:grep-advise",
+                    format!(
+                        "this project is cona-indexed — `cona grep {pattern}` searches code \
+                         only and labels every hit with its enclosing symbol; \
+                         `cona refs {pattern}` gives semantic usage sites (strings/comments \
+                         never match). This search ran as-is."
+                    ),
+                )
+            };
+            allow_with_reason(&root, tag, pattern, &reason)
         }
         Decision::Redirect => {
             let reason = format!(
@@ -461,12 +650,6 @@ fn deny(root: &Path, cmd: &str, target: &str, reason: &str) -> Result<()> {
 /// read); additionalContext leaves the permission flow untouched.
 fn allow_with_reason(root: &Path, cmd: &str, target: &str, reason: &str) -> Result<()> {
     db::log_usage_detail(root, cmd, 0, 1, 0, 0, target);
-    let out = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "additionalContext": reason,
-        }
-    });
-    println!("{}", serde_json::to_string(&out)?);
+    print!("{}", super::additional_context("PreToolUse", reason));
     Ok(())
 }

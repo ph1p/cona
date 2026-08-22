@@ -490,6 +490,10 @@ pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> 
     // this one on reinstall).
     let session_cmd = format!("{exe} index --quiet --session-start");
     let pretool_cmd = format!("{exe} hook PreToolUse");
+    // Compaction drops injected hook context (it summarizes the conversation),
+    // so the SessionStart block is gone while the session keeps running — the
+    // one boundary where the habit reliably lapses. Restate the rule there.
+    let precompact_cmd = format!("{exe} hook PreCompact");
     // Shell-gated: the re-nudge is off by default (see DEFAULT_RENUDGE_EVERY in
     // hook.rs), and this entry fires on EVERY tool call — without the gate each
     // call would fork the cona binary just to exit at the disabled check. The
@@ -499,7 +503,7 @@ pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> 
         "[ \"${{CONA_RENUDGE_EVERY:-0}}\" -gt 0 ] 2>/dev/null && {exe} hook PostToolUse || :"
     );
     // (event, matcher, command, marker that identifies our entry)
-    let specs: [(&str, Option<&str>, &str, &str); 4] = [
+    let specs: [(&str, Option<&str>, &str, &str); 5] = [
         (
             "PostToolUse",
             Some(crate::hook::POSTTOOL_MATCHER),
@@ -520,6 +524,8 @@ pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> 
         // Distinct marker from the index PostToolUse entry above, so both
         // coexist.
         ("PostToolUse", None, &posttool_cmd, "hook PostToolUse"),
+        // re-state the navigation rule across a compaction boundary
+        ("PreCompact", None, &precompact_cmd, "hook PreCompact"),
     ];
     let mut changed = false;
     // Uninstall never CREATES structure — only an install may. Without this an

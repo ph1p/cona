@@ -10,6 +10,16 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v cona >/dev/null 2>&1 && cona hook PreCompact || :"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Read|Grep|Bash|Shell|shell|exec|run_command|local_shell",

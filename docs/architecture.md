@@ -186,7 +186,8 @@ src/resolve.rs   Optional semantic resolution tier (fail-open): spawns
                  opt-out CONA_NO_FETCH_HELPER); doctor reports status. NEVER
                  a cargo dependency of cona (links collision). Findings:
                  docs/spike-semantic-resolution.md
-src/hook/        PreToolUse + PostToolUse hooks (`cona hook <event>`):
+src/hook/        PreToolUse + PostToolUse + PreCompact hooks
+                 (`cona hook <event>`):
                  PreToolUse = pure decide_read/decide_grep + fail-open runner;
                  redirects large full reads + broad identifier greps (indexed
                  project, no glob/type/path filter) to cona; hook NEVER creates a
@@ -213,8 +214,8 @@ src/hook/        PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  (Codex sends tool_name "Bash" with command
                  `/bin/zsh -lc "sed -n '1,400p' f"`) never emits Read or Grep, so
                  classify_shell normalizes the command line into a ShellIntent
-                 (Read{path,upto} | PartialRead | Grep{pattern,path,soft} |
-                 Other) and
+                 (Read{path,upto} | PartialRead{path} |
+                 Grep{pattern,path,soft} | Other) and
                  try_shell routes it into the SAME try_read/try_grep — the matcher
                  therefore lists the shell tool names too. Pipeline: unwrap_shell
                  _wrapper peels `sh|bash|zsh|… -lc "<script>"` → split_segments
@@ -223,8 +224,13 @@ src/hook/        PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  the line Other (blocking it would block that segment too —
                  `sed -n … f && cargo build` is a build); among recognised
                  segments the strongest intent wins (rank). Metadata probes
-                 (wc/ls/file/stat/echo/…) are PartialRead, not Other, because an
-                 agent routinely pairs one with the read it is about to do.
+                 (wc/ls/file/stat/echo/…) are PartialRead{path:None}, not Other,
+                 because an agent routinely pairs one with the read it is about
+                 to do — they carry no path because they pull no content into
+                 context and so are not slices of anything. A PartialRead that
+                 DOES name one file (sed range, head/tail with a sole operand)
+                 outranks a pathless probe, so `wc -l f && sed -n '40,80p' f` is
+                 judged on the slice regardless of segment order.
                  `sed -n '1,N p'` is Read{upto:N}, NOT PartialRead: that is
                  exactly how a shell-only harness spells "read the whole file"
                  (it picks an N it expects to exceed the length). The bound is
@@ -238,6 +244,25 @@ src/hook/        PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  bug). Fail-open by construction: an
                  unrecognised wrapper (a shell proxy prefixing commands) yields
                  Other and passes.
+                 Narrow reads are never blocked, but a REPEATED slice of one
+                 file is `cona outline` + `show` spelled the long way, re-paying
+                 the surrounding context each time — a shape no per-call rule can
+                 see. try_partial_read counts slices per (project,session,path)
+                 in its own `partials` marker kind (NOT `reads`: a slice must not
+                 mark the file "already in context" nor move the full-read volume
+                 counter) and advises on every CONA_PARTIAL_STREAK-th
+                 (default 3, 0 = off), only for indexed callable source.
+                 Both shapes feed it: native Read with offset/limit and the
+                 shell PartialRead{path:Some}.
+                 PreCompact (no matcher) restates the navigation rule, because
+                 compaction summarizes the CONVERSATION and drops injected hook
+                 context — the SessionStart block is gone while the session keeps
+                 running, the one boundary where the habit reliably lapses. Rule
+                 only, no orientation map: re-spending ~900 tokens on it is the
+                 very waste cona exists to prevent. Answered in main.rs rather
+                 than hook::run (it needs the index counts and emits context, not
+                 a decision) and fail-open the same way — no index, no DB, no
+                 counts means no output, never a broken compaction.
                  PostToolUse (no matcher) = periodic re-nudge,
                  OFF by default (DEFAULT_RENUDGE_EVERY = 0): repeating the same
                  rule across SessionStart + guide + timer is over-constraint for

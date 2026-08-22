@@ -23,7 +23,14 @@ pub enum ShellIntent {
     /// A read the agent already narrowed (line range, `head -n`, …) — the
     /// shell-side equivalent of Read with offset/limit. Never intercepted, but
     /// distinguished from `Other` so the intent is explicit.
-    PartialRead,
+    ///
+    /// `path` is `Some` only when the command actually pulls a slice of ONE
+    /// named file into context, which is what the cross-call slice accounting
+    /// counts. Metadata probes (`wc`, `ls`, `stat`, `echo`) share this variant
+    /// so they cannot poison an otherwise-recognised line, but they carry no
+    /// path: they read no content, and counting them would nag an agent for
+    /// commands that cost it nothing.
+    PartialRead { path: Option<String> },
     /// A broad content search for `pattern` under an optional path. `soft`
     /// marks a search whose output is already bounded (`-l`, `-c`, context
     /// flags) — still broad, but the redirect softens to an advisory.
@@ -180,13 +187,43 @@ pub fn classify_shell(cmd: &str) -> ShellIntent {
     best
 }
 
+/// The one file operand of a flag-carrying command, or `None` when there isn't
+/// exactly one (`head -n 5 a.rs b.rs`, or a pipe-fed `head -n 5` with no
+/// operand at all). Flag VALUES are the trap: `-n 50` must not read as a file,
+/// so a numeric word following a bare short flag is skipped.
+fn sole_operand(args: &[String]) -> Option<String> {
+    let mut files: Vec<&String> = Vec::new();
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a.starts_with('-') {
+            // `-n50` / `--lines=50` carry their value; a bare `-n` takes the
+            // next word.
+            skip_next = a.len() <= 2 && !a.contains('=');
+        } else {
+            files.push(a);
+        }
+    }
+    match files.as_slice() {
+        [one] => Some((*one).clone()),
+        _ => None,
+    }
+}
+
 /// Precedence among recognised intents (see `classify_shell`).
 fn rank(i: &ShellIntent) -> u8 {
     match i {
         ShellIntent::Other => 0,
-        ShellIntent::PartialRead => 1,
-        ShellIntent::Grep { .. } => 2,
-        ShellIntent::Read { .. } => 3,
+        // A pathless metadata probe is the weakest recognised intent; a partial
+        // read that names a file outranks it, so `wc -l f && sed -n '40,80p' f`
+        // is judged on the slice rather than on whichever segment came first.
+        ShellIntent::PartialRead { path: None } => 1,
+        ShellIntent::PartialRead { path: Some(_) } => 2,
+        ShellIntent::Grep { .. } => 3,
+        ShellIntent::Read { .. } => 4,
     }
 }
 
@@ -225,13 +262,15 @@ pub fn classify_command(cmd: &str) -> ShellIntent {
             _ => ShellIntent::Other,
         },
         // head/tail are line-bounded by definition — always partial.
-        "head" | "tail" => ShellIntent::PartialRead,
+        "head" | "tail" => ShellIntent::PartialRead {
+            path: sole_operand(args),
+        },
         // Metadata probes: they pull no file content into context, and an agent
         // routinely pairs one with the read it is about to do (`wc -l f &&
         // sed -n '1,500p' f`). Treated as harmless company so they cannot
         // poison an otherwise-recognised line.
         "wc" | "ls" | "pwd" | "file" | "stat" | "basename" | "dirname" | "echo" => {
-            ShellIntent::PartialRead
+            ShellIntent::PartialRead { path: None }
         }
         // `sed -n '<range>p' FILE`. A range that starts past line 1 or stops
         // early is a partial read; `1,$p` / `1,99999p` over a shorter file is
@@ -269,15 +308,18 @@ fn classify_sed(args: &[String]) -> ShellIntent {
     let Some(range) = script.strip_suffix('p') else {
         return ShellIntent::Other;
     };
+    let narrowed = ShellIntent::PartialRead {
+        path: Some((*file).clone()),
+    };
     let (start, end) = match range.split_once(',') {
         Some((s, e)) => (s, e),
         // A single-line script (`sed -n '5p'`) is as partial as it gets.
-        None => return ShellIntent::PartialRead,
+        None => return narrowed,
     };
     // Only a read that starts at line 1 can be a full read; `sed -n '40,80p'`
     // is the agent already narrowing.
     if start.trim() != "1" {
-        return ShellIntent::PartialRead;
+        return narrowed;
     }
     match end.trim() {
         "$" => ShellIntent::Read {
