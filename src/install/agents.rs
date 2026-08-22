@@ -16,15 +16,23 @@ use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
 
 /// Compact variant for CLAUDE.md / AGENTS.md / rule files.
-pub const GUIDE_MD: &str = r#"## cona — token-efficient code navigation
+pub const GUIDE_MD: &str = r#"## cona — code navigation (use FIRST, not as fallback)
 
-Once a repo is cona-indexed, reading ONE symbol costs a fraction of a whole
-file, and `cona grep`/`refs` search code semantically (identifier nodes — never
-strings or comments). Prefer them over a full Read or a broad Grep when you want
-a specific function, class, or usage site.
+In a cona-indexed repo, cona IS how you read and search code. It reads one
+symbol instead of a whole file and searches identifier nodes instead of raw
+text, so it replaces the generic read-the-file / grep-the-tree habit:
 
-Coarse → fine: `cona tree --rank` (orient) → `cona outline <file>` (map a file) →
-`cona show <Sym>` (read one symbol) → `cona edit <Sym>` (syntax-verified write).
+- Need ONE function/class/method → `cona show <Sym>`, or `cona context <Sym>`
+  for source + callees + call sites. Do not read a whole file for one symbol.
+- Searching for an identifier (definition, call site, usage) →
+  `cona grep <name>` / `cona refs <Name>`. Do not run plain grep/rg over
+  source trees for identifiers.
+- Opening an unfamiliar file → `cona outline <file>` first; read the full
+  file only if the outline shows you truly need every line.
+- Orienting in an unknown repo → `cona tree --rank`.
+
+Whole-file reads are for files you are about to rewrite, unindexed files, and
+non-code (docs, configs, data). `cona edit <Sym>` writes syntax-verified.
 
 `<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name`. Index auto-refreshes;
 `cona index` (~1s) if a repo isn't indexed yet. In a sandbox where `~/.cona`
