@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "cona"
-version = "0.0.25"
+version = "0.0.26"
 dependencies = [
  "anyhow",
  "cc",

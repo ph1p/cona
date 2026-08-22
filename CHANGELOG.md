@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.26](https://github.com/ph1p/cona/compare/v0.0.25...v0.0.26) - 2026-08-22
+
+### Added
+
+- *(hook)* close the three gaps the rule keeps falling through
+
+### Other
+
+- sync module maps with the directory splits
+- *(tests)* split tests/basic.rs into tests/basic/ modules
+- *(install)* split upgrade.rs into upgrade/ module
+- *(db)* split db.rs into db/ module
+- *(cli)* extract clap definitions from main.rs into cli.rs
+- *(install)* split agents.rs into agents/ module
+- *(commands)* split query.rs into query/ module
+- *(lang)* split lang.rs into lang/ module
+- *(hook)* split hook.rs into hook/ module
+
 ## [0.0.25](https://github.com/ph1p/cona/compare/v0.0.24...v0.0.25) - 2026-08-22
 
 ### Added
