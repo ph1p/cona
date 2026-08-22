@@ -227,7 +227,11 @@ src/hook.rs      PreToolUse + PostToolUse hooks (`cona hook <event>`):
                  applied only after the real line count is known (upto < lines →
                  genuinely partial → pass), so the caller, not the parser, decides.
                  Relative paths resolve against the payload `cwd` — the hook runs
-                 wherever the harness launched it. Fail-open by construction: an
+                 wherever the harness launched it. This holds for BOTH shapes:
+                 try_read joins the file path, grep_start joins the search path
+                 (skipping the join walks to a relative "root" whose hash matches
+                 no project DB, so an indexed repo answers Nudge — that was the
+                 bug). Fail-open by construction: an
                  unrecognised wrapper (a shell proxy prefixing commands) yields
                  Other and passes.
                  PostToolUse (no matcher) = periodic re-nudge,

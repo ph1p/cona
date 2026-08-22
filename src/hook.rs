@@ -1092,13 +1092,14 @@ fn try_read(
             }
             // Only promise a chunked escape we can honour: a range is partial
             // when it ends BEFORE the last line, so name that bound concretely
-            // when we measured it (an unmeasured `lines` is a floor, not a count).
+            // when we measured it (an unmeasured `lines` is a floor, not a
+            // count). State the rule but never pre-compute the split — a
+            // copy-paste recipe turns the redirect into a two-call full read
+            // for agents that never needed every line.
             let chunk_hint = if measured {
-                let mid = (lines / 2).max(1);
                 format!(
-                    "read it in ranges that stop short of line {lines} — Read \
-                     offset/limit, or `sed -n '1,{mid}p'` then `sed -n '{},$p'`",
-                    mid + 1
+                    "read it in bounded ranges (Read offset/limit, or `sed -n` \
+                     ranges) that stop short of line {lines}"
                 )
             } else {
                 "read it in bounded ranges (Read offset/limit, or `sed -n` \
@@ -1136,6 +1137,21 @@ fn try_read(
 /// The shared grep intercept. `surgical` is the caller's "already narrowed"
 /// signal — the native path derives it from glob/type/head_limit, the shell
 /// path from the command's own flags.
+/// Where a grep starts searching: an absolute path argument wins; a relative
+/// one (`grep -rn foo src/`, `rg foo .`) resolves against the tool call's cwd
+/// — the hook runs wherever the harness launched it, same rule as try_read.
+/// Without the join, `src/` resolved against the HOOK's own cwd, walked to a
+/// relative "root" whose hash matches no project DB, and a fully-indexed repo
+/// answered Nudge ("isn't indexed yet") instead of the redirect.
+fn grep_start(path: Option<&str>, cwd: Option<&str>) -> PathBuf {
+    match (path, cwd) {
+        (Some(p), Some(c)) if !Path::new(p).is_absolute() => Path::new(c).join(p),
+        (Some(p), _) => PathBuf::from(p),
+        (None, Some(c)) => PathBuf::from(c),
+        (None, None) => PathBuf::from("."),
+    }
+}
+
 fn try_grep(
     v: &serde_json::Value,
     pattern: &str,
@@ -1148,10 +1164,7 @@ fn try_grep(
         return Ok(());
     }
 
-    let start = path
-        .map(PathBuf::from)
-        .or_else(|| v["cwd"].as_str().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let start = grep_start(path, v["cwd"].as_str());
     let root = db::git_root_from(&start);
 
     let facts = GrepFacts {
@@ -1883,5 +1896,25 @@ mod tests {
         }
         // A context flag with a non-numeric value is untrustworthy → Other.
         assert_eq!(classify_shell("rg -C x UserService"), ShellIntent::Other);
+    }
+
+    #[test]
+    fn grep_start_resolves_relative_paths_against_payload_cwd() {
+        // The regression: a relative path arg must join the payload cwd, or the
+        // project-root walk lands on a relative "root" no index hash matches.
+        assert_eq!(
+            grep_start(Some("src/"), Some("/repo")),
+            PathBuf::from("/repo/src/")
+        );
+        assert_eq!(
+            grep_start(Some("."), Some("/repo")),
+            PathBuf::from("/repo/.")
+        );
+        assert_eq!(
+            grep_start(Some("/abs/dir"), Some("/repo")),
+            PathBuf::from("/abs/dir")
+        );
+        assert_eq!(grep_start(None, Some("/repo")), PathBuf::from("/repo"));
+        assert_eq!(grep_start(None, None), PathBuf::from("."));
     }
 }
