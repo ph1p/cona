@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.29](https://github.com/ph1p/cona/compare/v0.0.28...v0.0.29) - 2026-09-30
+
+### Fixed
+
+- *(hook)* recognise cd, pipe filters, flag clusters and literal greps
+
 ## [0.0.28](https://github.com/ph1p/cona/compare/v0.0.27...v0.0.28) - 2026-09-30
 
 ### Fixed
