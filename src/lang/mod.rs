@@ -122,7 +122,7 @@ pub fn language_for(lang: &str) -> Option<Language> {
         "lua" => Some(tree_sitter_lua::LANGUAGE.into()),
         "scala" => Some(tree_sitter_scala::LANGUAGE.into()),
         "elixir" => Some(tree_sitter_elixir::LANGUAGE.into()),
-        "dart" => Some(tree_sitter_dart::language()),
+        "dart" => Some(tree_sitter_dart::LANGUAGE.into()),
         "json" => Some(tree_sitter_json::LANGUAGE.into()),
         "yaml" => Some(tree_sitter_yaml::LANGUAGE.into()),
         "toml" => Some(tree_sitter_toml_ng::LANGUAGE.into()),
@@ -274,6 +274,7 @@ pub const TYPE_KINDS: &[&str] = &[
     "record",
     "actor",
     "extension",
+    "mixin",
 ];
 
 pub fn is_type_kind(kind: &str) -> bool {

@@ -160,7 +160,8 @@ pub(crate) fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, boo
         // methods surface as function_signature nested in class_member_definition;
         // top-level fns are function_signature inside a lambda_expression
         "dart" => match node_kind {
-            "class_definition" => Some(("class", true, "name")),
+            "class_declaration" => Some(("class", true, "name")),
+            "mixin_declaration" => Some(("mixin", true, "name")),
             "enum_declaration" => Some(("enum", false, "name")),
             "function_signature" => Some(("fn", false, "name")),
             _ => None,

@@ -6,12 +6,14 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 235 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
+cargo test                   # 245 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
-Deps current (clap 4.6, rusqlite 0.40, tree-sitter 0.26 + grammars 0.24/0.25,
-ratatui 0.30, dirs 6, ignore 0.4, notify 8), caret ranges in `Cargo.toml` (no `=` pins),
+Deps current (clap 4.6, rusqlite 0.40, tree-sitter 0.26 + grammars 0.24–0.26,
+ratatui 0.30, dirs 7, sha2 0.11, ignore 0.4, notify 8; tree-sitter 0.27 blocked:
+tree-sitter-perl 1.1.2 hard-depends on runtime 0.26 (`links`), cc held at 1.2 by
+tree-sitter-sequel `~1.2`), caret ranges in `Cargo.toml` (no `=` pins),
 rustc 1.95. Supply-chain rule: `Cargo.lock` avoids releases <7 days old — after
 `cargo update`, roll back via `cargo update -p <crate> --precise <older>` + `cargo test`.
 

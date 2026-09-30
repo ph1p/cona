@@ -266,12 +266,14 @@ fn elixir_modules_and_functions() {
 
 #[test]
 fn dart_classes_methods_enums() {
-    let src = "class Foo {\n  int bar(int x) { return x; }\n}\nvoid baz() {}\nenum E { a, b }\n";
+    let src = "class Foo {\n  int bar(int x) { return x; }\n}\nvoid baz() {}\nenum E { a, b }\nmixin M { void m() {} }\n";
     let quals = quals("dart", src);
     assert!(quals.iter().any(|q| q == "Foo"), "{quals:?}");
     assert!(quals.iter().any(|q| q == "Foo.bar"), "{quals:?}");
     assert!(quals.iter().any(|q| q == "baz"), "{quals:?}");
     assert!(quals.iter().any(|q| q == "E"), "{quals:?}");
+    assert!(quals.iter().any(|q| q == "M.m"), "{quals:?}");
+    assert!(lang::is_type_kind("mixin"));
     assert_eq!(lang::detect_lang("main.dart"), Some("dart"));
 }
 

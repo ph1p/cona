@@ -143,6 +143,14 @@ fn download_quiet(url: &str, destination: &Path) -> Result<()> {
     }
 }
 
+/// Lowercase hex digest (sha2 0.11 dropped `LowerHex` on its output array).
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn verify_sha256(archive: &Path, checksum_file: &Path) -> Result<()> {
     let text = std::fs::read_to_string(checksum_file)?;
     let expected = text
@@ -153,7 +161,7 @@ fn verify_sha256(archive: &Path, checksum_file: &Path) -> Result<()> {
         bail!("checksum metadata is malformed");
     }
     let bytes = std::fs::read(archive)?;
-    let actual = format!("{:x}", Sha256::digest(bytes));
+    let actual = sha256_hex(&bytes);
     if !actual.eq_ignore_ascii_case(expected) {
         bail!("release archive checksum mismatch");
     }
@@ -518,7 +526,7 @@ mod tests {
         let archive = dir.join("archive");
         let checksum = dir.join("archive.sha256");
         std::fs::write(&archive, b"release bytes").unwrap();
-        let digest = format!("{:x}", Sha256::digest(b"release bytes"));
+        let digest = sha256_hex(b"release bytes");
         std::fs::write(&checksum, format!("{digest}  archive\n")).unwrap();
         assert!(verify_sha256(&archive, &checksum).is_ok());
         std::fs::write(&archive, b"tampered").unwrap();
