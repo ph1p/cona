@@ -53,3 +53,46 @@ fn tree_dirty_tracks_working_changes() {
 
     let _ = std::fs::remove_dir_all(&repo);
 }
+
+#[test]
+fn latest_tag_comes_from_the_redirect_location() {
+    let h = "HTTP/2 302\r\nserver: github.com\r\nLocation: https://github.com/ph1p/cona/releases/tag/v0.0.27\r\n\r\n";
+    assert_eq!(tag_from_redirect(h).as_deref(), Some("0.0.27"));
+    // No release yet → GitHub redirects to /releases, no tag.
+    assert_eq!(
+        tag_from_redirect("location: https://github.com/ph1p/cona/releases\r\n"),
+        None
+    );
+    assert_eq!(
+        tag_from_redirect("location: https://x/releases/tag/nightly\r\n"),
+        None
+    );
+    assert_eq!(tag_from_redirect(""), None);
+}
+
+#[test]
+fn index_newest_is_highest_version_not_last_line() {
+    let idx = [
+        r#"{"vers":"0.0.9","yanked":false}"#,
+        r#"{"vers":"0.1.0","yanked":false}"#,
+        r#"{"vers":"0.2.0","yanked":true}"#,
+        r#"{"vers":"0.3.0-rc1","yanked":false}"#,
+        r#"{"vers":"0.0.10","yanked":false}"#,
+        "not json",
+    ]
+    .join("\n");
+    assert_eq!(newest_in_index(&idx).as_deref(), Some("0.1.0"));
+    assert_eq!(newest_in_index(""), None);
+}
+
+#[test]
+fn remote_check_is_daily_after_success_hourly_after_failure() {
+    let day = 86_400;
+    assert!(check_due(day, 0, 0), "never checked");
+    assert!(!check_due(day + 10, day, day), "answered just now");
+    assert!(check_due(2 * day, day, day), "a day after success");
+    // Last answer is old, last attempt failed 10 min ago → wait …
+    assert!(!check_due(5 * day, day, 5 * day - 600));
+    // … but an hour later try again, not a day later.
+    assert!(check_due(5 * day, day, 5 * day - 3_600));
+}

@@ -1,7 +1,7 @@
 //! Binary install / upgrade / uninstall + the ≤1×/day background
 //! auto-update check (source rebuild, GitHub release binary, cargo fallback).
 
-use super::{Change, USER_AGENT};
+use super::{Change, GITHUB_REPO, USER_AGENT};
 use crate::{db, ui};
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
@@ -100,8 +100,14 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
     //    stays the source of truth (git pull + rebuild — never overwrite a
     //    dev build with a release binary); otherwise prebuilt binary.
     let current = env!("CARGO_PKG_VERSION");
-    match latest_remote_version() {
-        Some(remote) if remote_is_newer(&remote, current) => {
+    let latest = latest_remote_version();
+    if latest.is_some() {
+        // Only a check that ANSWERED counts toward the daily gate — a failed
+        // one (offline, timeout) is retried by the next session, not tomorrow.
+        let _ = db::meta_set("last_remote_check", &db::now().to_string());
+    }
+    match latest {
+        Some((remote, _)) if remote_is_newer(&remote, current) => {
             if !quiet {
                 println!(
                     "{}",
@@ -136,12 +142,12 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
                 println!("\n{}", ui::ok(&ui::bold("upgrade complete")));
             }
         }
-        Some(_) => {
+        Some((remote, source)) => {
             if !quiet {
                 println!(
                     "{}",
                     ui::ok(&format!(
-                        "already up to date — v{current} ({})",
+                        "already up to date — v{current} ({}; latest on {source}: v{remote})",
                         crate::install::short_path(&dst)
                     ))
                 );
@@ -185,34 +191,68 @@ fn remote_is_newer(remote: &str, current: &str) -> bool {
     )
 }
 
-/// Newest non-yanked version on crates.io, via the sparse index (built for
-/// tooling, no rate-limited API). Fail-open: any error → None.
-fn latest_remote_version() -> Option<String> {
+/// Newest release and where it was seen. GitHub first: the release binaries
+/// are downloaded from there, and `cargo publish` lands on crates.io only
+/// after they exist — asking crates.io alone reported "up to date" during
+/// that gap. The crates.io sparse index is the fallback (no rate-limited
+/// API either way). Fail-open: both unreachable → None.
+fn latest_remote_version() -> Option<(String, &'static str)> {
+    let url = format!("https://github.com/{GITHUB_REPO}/releases/latest");
+    if let Some(v) = curl(&["-fsSI", &url])
+        .as_deref()
+        .and_then(tag_from_redirect)
+    {
+        return Some((v, "GitHub"));
+    }
+    let index = curl(&["-fsSL", "https://index.crates.io/co/na/cona"])?;
+    Some((newest_in_index(&index)?, "crates.io"))
+}
+
+/// stdout of a 5 s curl, None on any failure.
+fn curl(args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            "5",
-            "-A",
-            USER_AGENT,
-            "https://index.crates.io/co/na/cona",
-        ])
+        .args(["--max-time", "5", "-A", USER_AGENT])
+        .args(args)
         .output()
         .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8(out.stdout)
-        .ok()?
+    out.status
+        .success()
+        .then(|| String::from_utf8(out.stdout).ok())?
+}
+
+/// `releases/latest` answers with a redirect to `…/releases/tag/vX.Y.Z`;
+/// the version is the tag in its `location` header.
+fn tag_from_redirect(headers: &str) -> Option<String> {
+    headers.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        if !k.trim().eq_ignore_ascii_case("location") {
+            return None;
+        }
+        let tag = v.trim().rsplit_once("/tag/")?.1;
+        parse_semver(tag)?;
+        Some(tag.trim_start_matches('v').to_string())
+    })
+}
+
+/// Highest non-yanked, non-pre-release version in a sparse-index file. By
+/// version, not by line order: a patch to an older series published after a
+/// newer release is the LAST line but not the newest.
+fn newest_in_index(index: &str) -> Option<String> {
+    index
         .lines()
-        .rev()
-        .find_map(|line| {
+        .filter_map(|line| {
             let v: serde_json::Value = serde_json::from_str(line).ok()?;
             if v["yanked"].as_bool().unwrap_or(true) {
                 return None;
             }
-            Some(v["vers"].as_str()?.to_string())
+            let vers = v["vers"].as_str()?;
+            if vers.contains('-') {
+                return None;
+            }
+            Some((parse_semver(vers)?, vers.to_string()))
         })
+        .max_by_key(|(key, _)| *key)
+        .map(|(_, vers)| vers)
 }
 
 /// Rewrite the upgrade git hooks in the source repo: strip legacy lines
@@ -481,14 +521,23 @@ fn maybe_refresh_scope(root: &Path, home: &Path, global: bool) {
 }
 
 fn remote_check_due() -> bool {
+    let read = |k| {
+        db::meta_get(k)
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0)
+    };
     let now = db::now();
-    let last = db::meta_get("last_remote_check")
-        .ok()
-        .flatten()
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(0);
-    if now - last < 86_400 {
+    if !check_due(now, read("last_remote_check"), read("last_remote_attempt")) {
         return false;
     }
-    db::meta_set("last_remote_check", &now.to_string()).is_ok()
+    db::meta_set("last_remote_attempt", &now.to_string()).is_ok()
+}
+
+/// Daily after a check that answered (`last_ok`, stamped by `cmd_upgrade`),
+/// hourly while they keep failing (`last_attempt`) — so one offline start no
+/// longer costs a whole day of updates.
+fn check_due(now: i64, last_ok: i64, last_attempt: i64) -> bool {
+    now - last_ok >= 86_400 && now - last_attempt >= 3_600
 }
