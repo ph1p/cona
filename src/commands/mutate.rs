@@ -94,9 +94,12 @@ fn write_verified(root: &Path, path: &str, new_src: &str, force: bool) -> Result
         let language = lang::detect_lang(path).ok_or_else(|| anyhow!("unknown language"))?;
         let errors = lang::syntax_errors(language, new_src)?;
         if !errors.is_empty() {
+            let lines: Vec<String> = errors.iter().map(|l| l.to_string()).collect();
+            let s = if lines.len() == 1 { "" } else { "s" };
             bail!(
-                "syntax errors at lines {:?} — edit rejected, file unchanged (use --force to override)",
-                errors
+                "syntax error{s} at line{s} {} of {path} — edit rejected, file unchanged \
+                 (fix the code, or --force to write it anyway)",
+                lines.join(", ")
             );
         }
     }
@@ -179,7 +182,7 @@ pub fn cmd_insert(
                 (s as usize).saturating_sub(1)
             };
             let pos = if after { "after" } else { "before" };
-            (path, line, format!("{pos} {q}"))
+            (path, line, format!("{pos} {q} in"))
         }
         (None, Some((file, line))) => (file.clone(), *line, format!("at line {line} of")),
         (Some(_), Some(_)) => bail!("pass either a symbol or --at <file> <line>, not both"),
@@ -188,7 +191,12 @@ pub fn cmd_insert(
     // read what exists (empty string if the --at file is new)
     let abs = project_path(root, &path)?;
     let original = std::fs::read_to_string(&abs).unwrap_or_default();
-    let new_src = editing::splice_insert(&original, at_line, code);
+    // symbol anchor → spaced like hand-written code; --at → verbatim
+    let new_src = if symbol.is_some() {
+        editing::splice_insert_spaced(&original, at_line, code)
+    } else {
+        editing::splice_insert(&original, at_line, code)
+    };
     write_verified(root, &path, &new_src, force)?;
     let n = indexer::reindex_file(root, conn, &path)?;
     Ok(format!(
@@ -342,18 +350,26 @@ pub fn cmd_rename(
         written.push(plan);
     }
     let mut total = 0usize;
-    let mut out = format!("renamed '{name}' → '{new_name}':\n");
+    let mut per_file = String::new();
     for (rel, _, _, hits) in &plans {
         indexer::reindex_file(root, conn, rel).map_err(|e| {
             anyhow!("rename wrote source files, but index refresh failed for {rel}: {e}")
         })?;
-        out.push_str(&format!("  {rel}: {hits}\n"));
+        per_file.push_str(&format!("  {rel}: {hits}\n"));
         total += hits;
     }
-    out.push_str(&format!(
-        "{total} occurrence(s) across {} file(s)\n",
-        plans.len()
-    ));
+    // One line says it all for a single file; the per-file list only earns
+    // its lines when the rename spread.
+    let mut out = format!(
+        "renamed '{name}' → '{new_name}': {} in {}{}\n",
+        crate::ui::plural(total, "occurrence"),
+        crate::ui::plural(plans.len(), "file"),
+        // --force skips the verify gate, so only an unforced run may claim it
+        if force { "" } else { ", syntax OK" }
+    );
+    if plans.len() > 1 {
+        out.push_str(&per_file);
+    }
     if !fallback_files.is_empty() {
         out.push_str(&format!(
             "warning: textual fallback used in: {}\n",

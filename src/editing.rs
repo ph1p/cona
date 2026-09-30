@@ -74,6 +74,37 @@ pub fn apply_renames(src: &str, positions: &[(usize, usize)], old_len: usize, ne
     out
 }
 
+/// `splice_insert` for a SYMBOL-anchored insert: separate the new code from a
+/// neighbouring item by one blank line, the way hand-written code is spaced —
+/// otherwise `insert --after f` glues the new function onto `f`'s closing
+/// brace. No blank is added against an already-blank line, an opening line
+/// (`{`/`(`/`[`/`:` — first item in a block) or a closing one (`}`/`)`/`]` —
+/// last item in a block). Leading/trailing blank lines in `code` are dropped
+/// so the spacing comes out the same however the caller piped it.
+/// `--at <file> <line>` does NOT go through here: there the caller chose the
+/// exact line and gets exactly what it sent.
+pub fn splice_insert_spaced(src: &str, at: usize, code: &str) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    let at = at.min(lines.len());
+    let code = code.replace("\r\n", "\n");
+    let body = code.trim_matches('\n');
+    let blank = |l: &str| l.trim().is_empty();
+    let lead = at > 0
+        && !blank(lines[at - 1])
+        && !lines[at - 1].trim_end().ends_with(['{', '(', '[', ':']);
+    let trail = at < lines.len()
+        && !blank(lines[at])
+        && !lines[at].trim_start().starts_with(['}', ')', ']']);
+    // An empty piece is one blank line; join_lines restores CRLF + final EOL.
+    let mut pieces: Vec<&str> = lines[..at].to_vec();
+    pieces.extend(lead.then_some(""));
+    pieces.extend(body.lines());
+    pieces.extend(trail.then_some(""));
+    pieces.extend_from_slice(&lines[at..]);
+    let had_trailing_nl = src.is_empty() || src.ends_with('\n');
+    join_lines(pieces, had_trailing_nl, src.contains("\r\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +199,46 @@ mod tests {
         assert_eq!(out, "x()\r\nx()\r\n");
         let no_nl = apply_renames("foo", &[(1, 0)], 3, "yy");
         assert_eq!(no_nl, "yy");
+    }
+
+    #[test]
+    fn spaced_insert_separates_top_level_items() {
+        let src = "fn a() {\n}\n\nfn main() {}\n";
+        // after `a` (line 2): blank before the new fn, existing blank after
+        assert_eq!(
+            splice_insert_spaced(src, 2, "fn b() {}\n"),
+            "fn a() {\n}\n\nfn b() {}\n\nfn main() {}\n"
+        );
+        // before `main` (line 4 → at 3): existing blank above, new blank below
+        assert_eq!(
+            splice_insert_spaced(src, 3, "fn b() {}"),
+            "fn a() {\n}\n\nfn b() {}\n\nfn main() {}\n"
+        );
+        // glued neighbours on both sides get a blank each
+        assert_eq!(splice_insert_spaced("x\ny\n", 1, "Z"), "x\n\nZ\n\ny\n");
+    }
+
+    #[test]
+    fn spaced_insert_hugs_block_edges() {
+        // first/last item in a block: no blank against `{` or `}`
+        let src = "impl T {\n    fn a() {}\n}\n";
+        assert_eq!(
+            splice_insert_spaced(src, 2, "    fn b() {}"),
+            "impl T {\n    fn a() {}\n\n    fn b() {}\n}\n"
+        );
+        assert_eq!(
+            splice_insert_spaced(src, 1, "    fn z() {}"),
+            "impl T {\n    fn z() {}\n\n    fn a() {}\n}\n"
+        );
+    }
+
+    #[test]
+    fn spaced_insert_keeps_crlf_and_edges() {
+        assert_eq!(
+            splice_insert_spaced("a\r\nb\r\n", 1, "\nX\n\n"),
+            "a\r\n\r\nX\r\n\r\nb\r\n"
+        );
+        assert_eq!(splice_insert_spaced("", 0, "fn m() {}"), "fn m() {}\n");
+        assert_eq!(splice_insert_spaced("a\n", 1, "b"), "a\n\nb\n");
     }
 }
