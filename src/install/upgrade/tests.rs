@@ -25,6 +25,18 @@ fn git_hooks_have_detects_cona_lines() {
     )
     .unwrap();
     assert!(git_hooks_have(&dir, CONA_HOOK_NEEDLES));
+    // the shape `cona hooks install` actually writes: quoted absolute exe
+    std::fs::write(
+        dir.join("post-commit"),
+        "#!/bin/sh\nmake lint\n'/opt/bin/cona' index --quiet 2>/dev/null &\n",
+    )
+    .unwrap();
+    assert!(git_hooks_have(&dir, CONA_HOOK_NEEDLES));
+    assert!(strip_git_hook_lines(&dir, CONA_HOOK_NEEDLES));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("post-commit")).unwrap(),
+        "#!/bin/sh\nmake lint\n"
+    );
     // a foreign hook must not match
     std::fs::write(dir.join("post-commit"), "#!/bin/sh\nmake lint\n").unwrap();
     assert!(!git_hooks_have(&dir, CONA_HOOK_NEEDLES));
