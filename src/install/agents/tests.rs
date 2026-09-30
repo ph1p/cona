@@ -395,7 +395,7 @@ fn uninstall_keeps_foreign_settings_and_prunes_only_what_it_emptied() {
     .unwrap();
     claude_hooks(&p, true).unwrap();
     claude_hooks(&p, false).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    let v = read_json(&p);
     assert_eq!(v["model"], "opus");
     // PreToolUse still holds the foreign entry, so it survives …
     assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
@@ -421,7 +421,7 @@ fn uninstall_keeps_an_event_array_that_was_empty_before_we_installed() {
         p.exists(),
         "settings.json holding a foreign key must survive"
     );
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    let v = read_json(&p);
     assert!(
         v["hooks"]["Custom"]
             .as_array()
@@ -492,4 +492,158 @@ fn claude_plugin_enabled_reads_global_and_project_settings() {
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+fn read_json(p: &std::path::Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+}
+
+#[test]
+fn permissions_allow_only_read_only_commands() {
+    let rules = cona_allow_rules();
+    for w in [
+        "edit",
+        "insert",
+        "rename",
+        "note",
+        "batch_edit",
+        "setup",
+        "uninstall",
+    ] {
+        assert!(
+            !rules
+                .iter()
+                .any(|r| r == &format!("Bash(cona {w} *)") || r.ends_with(&format!("__{w}"))),
+            "writer/maintenance `{w}` must never get an allow rule"
+        );
+    }
+    assert!(rules.contains(&"Bash(cona show *)".to_string()));
+    assert!(rules.contains(&"mcp__cona__show".to_string()));
+    assert!(rules.contains(&"mcp__plugin_cona_cona__show".to_string()));
+    // No broad rule auto mode would suspend.
+    assert!(!rules
+        .iter()
+        .any(|r| r.contains("(*)") || r == "Bash(cona *)"));
+    // The classifier prose must not pre-approve writers either.
+    for (_, prose) in cona_automode() {
+        for s in prose {
+            assert!(!s.contains("edit") && !s.contains("rename"), "{s}");
+        }
+    }
+}
+
+#[test]
+fn permissions_roundtrip_removes_a_file_that_only_held_ours() {
+    let p = settings_tmp("perm-husk");
+    assert!(
+        claude_permissions(&p, true, true).unwrap(),
+        "install must write"
+    );
+    let v = read_json(&p);
+    assert_eq!(
+        v["permissions"]["allow"].as_array().unwrap().len(),
+        cona_allow_rules().len()
+    );
+    // "$defaults" first, so our prose EXTENDS the built-in rules.
+    assert_eq!(v["autoMode"]["allow"][0], "$defaults");
+    assert_eq!(v["autoMode"]["environment"][0], "$defaults");
+    assert!(
+        !claude_permissions(&p, true, true).unwrap(),
+        "reinstall is a no-op"
+    );
+    assert!(
+        claude_permissions(&p, false, true).unwrap(),
+        "uninstall must change"
+    );
+    assert!(!p.exists(), "cona-only settings.json must be removed");
+    let _ = std::fs::remove_dir_all(p.parent().unwrap());
+}
+
+#[test]
+fn permissions_project_scope_writes_no_automode() {
+    let p = settings_tmp("perm-project");
+    claude_permissions(&p, true, false).unwrap();
+    let v = read_json(&p);
+    assert!(v["permissions"]["allow"].is_array());
+    assert!(
+        v.get("autoMode").is_none(),
+        "autoMode is user-scope only: {v}"
+    );
+    let _ = std::fs::remove_dir_all(p.parent().unwrap());
+}
+
+#[test]
+fn permissions_keep_foreign_entries_and_heal_reworded_prose() {
+    let p = settings_tmp("perm-foreign");
+    std::fs::write(
+        &p,
+        r#"{"model":"opus",
+            "permissions":{"allow":["Bash(ls *)"],"deny":["Bash(rm *)"]},
+            "autoMode":{"allow":["$defaults","my own rule","cona — stale wording"],
+                        "soft_deny":["never push"]}}"#,
+    )
+    .unwrap();
+    claude_permissions(&p, true, true).unwrap();
+    let v = read_json(&p);
+    let allow = v["autoMode"]["allow"].as_array().unwrap();
+    assert!(
+        !allow.iter().any(|s| s == "cona — stale wording"),
+        "stale ours replaced"
+    );
+    assert_eq!(
+        allow
+            .iter()
+            .filter(|s| s.as_str().unwrap().starts_with("cona —"))
+            .count(),
+        1
+    );
+    // An existing array is never re-seeded with a second "$defaults".
+    assert_eq!(allow.iter().filter(|s| *s == "$defaults").count(), 1);
+
+    claude_permissions(&p, false, true).unwrap();
+    let v = read_json(&p);
+    assert_eq!(v["model"], "opus");
+    assert_eq!(v["permissions"]["allow"], serde_json::json!(["Bash(ls *)"]));
+    assert_eq!(v["permissions"]["deny"], serde_json::json!(["Bash(rm *)"]));
+    assert_eq!(
+        v["autoMode"]["allow"],
+        serde_json::json!(["$defaults", "my own rule"])
+    );
+    assert_eq!(
+        v["autoMode"]["soft_deny"],
+        serde_json::json!(["never push"])
+    );
+    // `environment` held only what install seeded → gone, not a husk.
+    assert!(v["autoMode"].get("environment").is_none(), "{v}");
+    let _ = std::fs::remove_dir_all(p.parent().unwrap());
+}
+
+#[test]
+fn permissions_uninstall_without_ours_never_creates_structure() {
+    let p = settings_tmp("perm-noop");
+    std::fs::write(&p, "{\"model\":\"opus\"}").unwrap();
+    assert!(!claude_permissions(&p, false, true).unwrap());
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "{\"model\":\"opus\"}");
+    let missing = p.parent().unwrap().join("absent.json");
+    assert!(!claude_permissions(&missing, false, true).unwrap());
+    assert!(!missing.exists());
+    let _ = std::fs::remove_dir_all(p.parent().unwrap());
+}
+
+#[test]
+fn permissions_refuse_invalid_settings_without_overwriting() {
+    let p = settings_tmp("perm-invalid");
+    std::fs::write(&p, "{not json").unwrap();
+    assert!(claude_permissions(&p, true, true).is_err());
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "{not json");
+    std::fs::write(&p, r#"{"permissions":{"allow":"Bash(ls *)"}}"#).unwrap();
+    assert!(
+        claude_permissions(&p, true, true).is_err(),
+        "non-array allow"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&p).unwrap(),
+        r#"{"permissions":{"allow":"Bash(ls *)"}}"#
+    );
+    let _ = std::fs::remove_dir_all(p.parent().unwrap());
 }

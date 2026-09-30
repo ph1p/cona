@@ -472,13 +472,7 @@ pub fn project_has_cona(project_root: &Path) -> bool {
 /// Add/remove cona hooks in a Claude Code settings.json.
 /// Returns Ok(true) if the file was changed.
 pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
-    let existing = std::fs::read_to_string(settings_path).unwrap_or_else(|_| "{}".into());
-    let mut root: serde_json::Value = serde_json::from_str(&existing).map_err(|e| {
-        anyhow!("existing settings.json is not valid JSON ({e}) — fix it or add the hook manually")
-    })?;
-    if !root.is_object() {
-        bail!("settings.json top level is not an object");
-    }
+    let mut root = load_settings(settings_path, "the hook")?;
     // quoted: these commands run through a shell, and an install path with
     // spaces would otherwise break every hook invocation
     let exe = crate::install::sh_quote(&agent_exe());
@@ -641,19 +635,218 @@ pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> 
         }
     }
     if changed {
-        // A settings.json that only ever held our hooks is ours to remove —
-        // leaving `{}` behind is litter, not preservation.
-        if !install && root.as_object().map(|o| o.is_empty()).unwrap_or(false) {
-            let _ = std::fs::remove_file(settings_path);
-            return Ok(true);
-        }
-        if let Some(dir) = settings_path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(
-            settings_path,
-            format!("{}\n", serde_json::to_string_pretty(&root)?),
-        )?;
+        store_settings(settings_path, &root, install)?;
+    }
+    Ok(changed)
+}
+
+/// A Claude settings.json as a JSON object; a missing file reads as `{}`.
+/// Invalid JSON is an error, never overwritten (invariant 6). `what` names
+/// the manual fallback in the message.
+fn load_settings(path: &Path, what: &str) -> Result<serde_json::Value> {
+    let existing = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
+    let root: serde_json::Value = serde_json::from_str(&existing).map_err(|e| {
+        anyhow!("existing settings.json is not valid JSON ({e}) — fix it or add {what} manually")
+    })?;
+    if !root.is_object() {
+        bail!("settings.json top level is not an object");
+    }
+    Ok(root)
+}
+
+/// Write `root` back. A settings.json that an uninstall left as `{}` held only
+/// ours and is removed — leaving `{}` behind is litter, not preservation.
+fn store_settings(path: &Path, root: &serde_json::Value, install: bool) -> Result<()> {
+    if !install && root.as_object().is_some_and(|o| o.is_empty()) {
+        let _ = std::fs::remove_file(path);
+        return Ok(());
+    }
+    write_if_changed(path, &format!("{}\n", serde_json::to_string_pretty(root)?))?;
+    Ok(())
+}
+
+/// Read-only cona subcommands the Bash allow rules are built from. Writers
+/// (edit/insert/rename/note/batch_edit) and maintenance (uninstall/setup/…) are
+/// deliberately absent — auto mode's classifier keeps judging those; an allow
+/// rule would wave them through. "Read-only" means read-only toward the
+/// project: `index` (and every query's auto-refresh) writes cona's OWN index
+/// under ~/.cona, never a source file. The MCP side needs no list: it derives
+/// from the tools' `readOnlyHint` (`read_only_tool_names`).
+#[allow(dead_code)] // until claude_permissions is wired into `agents install`
+const READ_ONLY_CMDS: &[&str] = &[
+    "tree", "outline", "find", "show", "refs", "context", "grep", "diff", "impact", "callers",
+    "callees", "path", "deps", "shape", "entries", "tests", "check", "blame", "stats", "index",
+];
+/// Prefix of every `autoMode` prose rule we write — how install reconciles and
+/// uninstall finds ours among the user's own rules.
+#[allow(dead_code)] // until claude_permissions is wired into `agents install`
+const AUTOMODE_TAG: &str = "cona —";
+
+/// MCP namespaces a cona server shows up under: registered by `agents install`
+/// (`mcp__cona__*`) and shipped by the plugin, whose name is also cona
+/// (`mcp__plugin_cona_cona__*`).
+#[allow(dead_code)] // until claude_permissions is wired into `agents install`
+fn mcp_prefixes() -> [String; 2] {
+    let s = mcp_config::SERVER_NAME;
+    [format!("mcp__{s}__"), format!("mcp__plugin_{s}_{s}__")]
+}
+
+/// The `permissions.allow` rules cona owns. Narrow per-subcommand rules on
+/// purpose: auto mode suspends broad ones (`Bash(*)`-shaped), narrow ones it
+/// honors without a classifier round-trip.
+#[allow(dead_code)] // until claude_permissions is wired into `agents install`
+pub(super) fn cona_allow_rules() -> Vec<String> {
+    let tools = crate::commands::mcp_server::read_only_tool_names();
+    let mut v: Vec<String> = READ_ONLY_CMDS
+        .iter()
+        .map(|c| format!("Bash(cona {c} *)"))
+        .collect();
+    for p in mcp_prefixes() {
+        v.extend(tools.iter().map(|t| format!("{p}{t}")));
+    }
+    v
+}
+
+/// `autoMode` prose for the classifier: `environment` says what cona is,
+/// `allow` says which of its actions are routine. Every entry starts with
+/// `AUTOMODE_TAG`; the lists in it render from the same consts as the rules.
+#[allow(dead_code)] // until claude_permissions is wired into `agents install`
+pub(super) fn cona_automode() -> [(&'static str, Vec<String>); 2] {
+    let namespaces = mcp_prefixes().map(|p| format!("`{p}*`")).join(", ");
+    [
+        (
+            "environment",
+            vec![format!(
+                "{AUTOMODE_TAG} a trusted, local, read-only code-navigation CLI (`cona`) and \
+                 MCP server ({namespaces}) installed by the user. It reads source through a \
+                 per-project SQLite index under ~/.cona and never touches the network or \
+                 anything outside the project and ~/.cona. It is the PREFERRED way to read \
+                 and search code in this environment."
+            )],
+        ),
+        (
+            // Read-only commands only — writers stay with the classifier (see
+            // READ_ONLY_CMDS), so no prose here may pre-approve them either.
+            "allow",
+            vec![format!(
+                "{AUTOMODE_TAG} running cona navigation/inspection commands ({}) and the \
+                 equivalent read-only cona MCP tools is always allowed: read-only, local, no \
+                 side effects beyond refreshing its own index.",
+                READ_ONLY_CMDS.join(", ")
+            )],
+        ),
+    ]
+}
+
+/// Splice `ours` into `obj[key]` (an array of strings). `is_ours` decides which
+/// present strings are ours; they are replaced wholesale on install (self-heals
+/// reworded prose) and dropped on uninstall. `seed` is prepended only when
+/// install CREATES the array — and an array left holding nothing but the seed
+/// is removed again on uninstall (equivalent to absent).
+#[allow(dead_code)] // until claude_permissions is wired into `agents install`
+fn splice_strings(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    ours: &[String],
+    is_ours: impl Fn(&str) -> bool,
+    seed: Option<&str>,
+    install: bool,
+) -> Result<bool> {
+    use serde_json::json;
+    if !install && !obj.contains_key(key) {
+        return Ok(false);
+    }
+    let arr = obj
+        .entry(key)
+        .or_insert_with(|| json!(seed.map(|s| vec![s]).unwrap_or_default()));
+    let Some(list) = arr.as_array_mut() else {
+        bail!("settings.json '{key}' is not an array");
+    };
+    let before = list.clone();
+    list.retain(|v| !v.as_str().is_some_and(&is_ours));
+    if install {
+        list.extend(ours.iter().map(|s| json!(s)));
+    }
+    let changed = *list != before;
+    let husk = list.is_empty() || (list.len() == 1 && seed.is_some() && list[0].as_str() == seed);
+    if !install && husk && changed {
+        obj.remove(key);
+    }
+    Ok(changed)
+}
+
+/// Run `f` on the object at `obj[key]`, creating it on install; on uninstall
+/// an object left empty is removed. A non-object is an error, never replaced.
+#[allow(dead_code)] // until claude_permissions is wired into `agents install`
+fn with_object(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    install: bool,
+    f: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<bool>,
+) -> Result<bool> {
+    let Some(inner) = obj
+        .entry(key)
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    else {
+        bail!("settings.json '{key}' is not an object");
+    };
+    let changed = f(inner)?;
+    if !install && inner.is_empty() {
+        obj.remove(key);
+    }
+    Ok(changed)
+}
+
+/// Allow rules (+ `autoMode` prose when `automode`) in a Claude settings.json.
+/// `autoMode` is only read from user-level settings, so project installs pass
+/// `automode = false`. Same contract as `claude_hooks`: never touches foreign
+/// entries, uninstall never creates structure and leaves no husk, a file that
+/// held only ours is removed. Runs even with the plugin enabled — a plugin
+/// cannot ship settings, so this is not a duplicate.
+#[allow(dead_code)] // until claude_permissions is wired into `agents install`
+pub(super) fn claude_permissions(
+    settings_path: &Path,
+    install: bool,
+    automode: bool,
+) -> Result<bool> {
+    let mut root = load_settings(settings_path, "the rules")?;
+    let obj = root
+        .as_object_mut()
+        .expect("load_settings checks for an object");
+    let mut changed = false;
+
+    if install || obj.get("permissions").is_some_and(|p| p.is_object()) {
+        let rules = cona_allow_rules();
+        changed |= with_object(obj, "permissions", install, |perms| {
+            splice_strings(
+                perms,
+                "allow",
+                &rules,
+                |s| rules.iter().any(|r| r == s),
+                None,
+                install,
+            )
+        })?;
+    }
+
+    // autoMode (user scope only). On a project install it is still cleaned
+    // on uninstall in case an older/global run left it there.
+    if (install && automode) || (!install && obj.get("autoMode").is_some_and(|a| a.is_object())) {
+        changed |= with_object(obj, "autoMode", install, |am| {
+            let mut changed = false;
+            for (key, prose) in cona_automode() {
+                // "$defaults" keeps Claude Code's built-in rules alongside
+                // ours — without it our array would REPLACE them.
+                let tagged = |s: &str| s.starts_with(AUTOMODE_TAG);
+                changed |= splice_strings(am, key, &prose, tagged, Some("$defaults"), install)?;
+            }
+            Ok(changed)
+        })?;
+    }
+
+    if changed {
+        store_settings(settings_path, &root, install)?;
     }
     Ok(changed)
 }

@@ -266,6 +266,18 @@ pub fn mcp_tools(expanded: bool) -> Vec<serde_json::Value> {
     out
 }
 
+/// Names of every tool annotated `readOnlyHint: true`, `more` included — the
+/// source the installer's MCP allow rules are built from, so flipping a tool
+/// between `read_only` and `writes` moves it in or out of them.
+pub fn read_only_tool_names() -> Vec<String> {
+    all_tools()
+        .iter()
+        .filter(|t| t["annotations"]["readOnlyHint"] == true)
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .chain(std::iter::once("more".to_string()))
+        .collect()
+}
+
 /// `more`'s body: the extended tools' schemas as JSON. Returned as text
 /// because MCP tool results are content blocks; the agent reads them the same
 /// way it reads tools/list.
