@@ -287,7 +287,8 @@ greps as `"hook:grep-block"`, and the advisory (non-blocking) outcomes as
 `"hook:read-advise"` (mid-size ≥`CONA_ADVISE_MIN_LINES`, repeat read of a
 path already read this session, or the yield on a retried denied read),
 `"hook:grep-advise"` (broad grep whose output is already bounded — `-l`/`-c`/
-context flags), `"hook:read-streak"` (every `CONA_READ_STREAK`-th full read in
+context flags), `"hook:grep-literal"` (broad grep for a non-identifier
+pattern — class name, string, regex — pointed at `cona grep`), `"hook:read-streak"` (every `CONA_READ_STREAK`-th full read in
 one session), `"hook:partial-streak"` (every `CONA_PARTIAL_STREAK`-th narrow
 slice of ONE indexed callable file in a session, default 3, 0 = off — its own
 `partials` marker kind so a slice neither marks the file "already read" nor

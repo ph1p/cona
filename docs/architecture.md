@@ -195,7 +195,12 @@ src/hook/        PreToolUse + PostToolUse + PreCompact hooks
                  --count/context flags, native output_mode files_with_matches|
                  count or -A/-B/-C) is `soft`: same search, but the agent showed
                  restraint, so decide_grep answers Advise (hook:grep-advise,
-                 runs as-is) instead of Redirect. try_read gates (partial/
+                 runs as-is) instead of Redirect. A broad search for a NON-
+                 identifier (class name, message string, regex) has no symbol
+                 for refs/show, so it never blocks or nudges: indexed project +
+                 not single-file → Advise (hook:grep-literal) naming a ready-to-
+                 paste `cona grep '<pat>'` (+ `--regex` only when the pattern
+                 uses regex syntax). try_read gates (partial/
                  non-code/metadata-size) BEFORE reading bytes — multi-GB file
                  must not be slurped just to be allowed. A read the redirect
                  denied is retried verbatim by most agents: note_denied marks the
@@ -220,7 +225,19 @@ src/hook/        PreToolUse + PostToolUse + PreCompact hooks
                  therefore lists the shell tool names too. Pipeline: unwrap_shell
                  _wrapper peels `sh|bash|zsh|… -lc "<script>"` → split_segments
                  splits on && || ; | newline (quote-respecting) → classify_command
-                 per segment. Whole-line policy: ONE unrecognised segment makes
+                 per segment (split_pipeline also marks segments fed by a
+                 single `|`). Two segment shapes are neutral, not intents:
+                 `cd DIR`/`pushd DIR` rebases later relative paths onto DIR (a
+                 path-less grep becomes a search of DIR; `cd`, `cd -`, `cd ~…`
+                 are unresolvable → Other), and a PIPED stdin filter (sort/uniq/
+                 cut/tr/awk/jq/head/tail/wc, a grep/rg with no path operand, a
+                 sed with no file and no -i) only reshapes the previous output —
+                 which is also why `ls | grep foo` is never a tree search. grep
+                 short-flag clusters (`-rhno`) are judged letter by letter
+                 (presentation rRniHhowsEFPIa, soft lc, anything else → Other),
+                 plus a list of presentation-only long flags (--color, --no-
+                 heading, --exclude-dir, …; --include/-g narrow, stay Other).
+                 Whole-line policy: ONE unrecognised segment makes
                  the line Other (blocking it would block that segment too —
                  `sed -n … f && cargo build` is a build); among recognised
                  segments the strongest intent wins (rank). Metadata probes

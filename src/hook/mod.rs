@@ -253,10 +253,21 @@ pub struct GrepFacts {
 /// - single-file identifier search over an indexed project → Advise (never
 ///   blocks: the search is already narrow, but `show`/`refs` beats a line number)
 /// - broad identifier search over an UNINDEXED git repo → Nudge
-/// - surgical / regex / non-repo → Allow
+/// - broad literal/regex search over an indexed project → Advise
+/// - surgical / non-repo / other literal or regex searches → Allow
 pub fn decide_grep(f: &GrepFacts) -> Decision {
-    if f.surgical || !f.identifier {
+    if f.surgical {
         return Decision::Allow;
+    }
+    // A literal or regex (`dmf-primary-[a-z]*`, `foo.bar`) has no symbol for
+    // `refs` to answer, but `cona grep` still searches it code-only — worth a
+    // hint in an indexed project, never a block or an index nudge.
+    if !f.identifier {
+        return if f.indexed_project && !f.single_file {
+            Decision::Advise
+        } else {
+            Decision::Allow
+        };
     }
     if f.indexed_project {
         // `soft` and `single_file` are both "already restrained" — inform, never

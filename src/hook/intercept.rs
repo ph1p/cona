@@ -550,22 +550,27 @@ fn try_grep(
     surgical: bool,
     soft: bool,
 ) -> Result<()> {
-    // cheap gates first — only a broad identifier search pays for the stat and
-    // the DB check below
-    if surgical || !lang::is_valid_ident(pattern) {
+    // cheap gate first — only a broad search pays for the stat and the DB
+    // check below
+    if surgical {
         return Ok(());
     }
+    let identifier = lang::is_valid_ident(pattern);
 
     // Tracked separately from `surgical`: narrow enough never to block, but the
-    // one shape `cona show`/`refs` answers strictly better.
-    let single_file = path.map(|p| Path::new(p).is_file()).unwrap_or(false);
+    // one shape `cona show`/`refs` answers strictly better. Resolved against the
+    // payload cwd, like the search itself.
     let start = grep_start(path, v["cwd"].as_str());
+    let single_file = path.is_some() && start.is_file();
+    if !identifier && single_file {
+        return Ok(());
+    }
     let root = db::git_root_from(&start);
 
     let facts = GrepFacts {
         surgical,
         single_file,
-        identifier: true,
+        identifier,
         // only projects the user already indexed — never create a DB from a hook
         indexed_project: db::has_index(&root),
         in_repo: root.join(".git").exists(),
@@ -574,11 +579,14 @@ fn try_grep(
     match decide_grep(&facts) {
         Decision::Allow => Ok(()),
         Decision::Advise => {
-            // Two restrained shapes land here and want different advice: a
-            // single-file search is looking for a definition it could have had
-            // whole, while a -l/-c/context search is a broad search with bounded
-            // output. Both ran as-is.
-            let (tag, reason) = if single_file {
+            // Three shapes land here and want different advice: a broad
+            // literal/regex search has no symbol to name, a single-file search
+            // is looking for a definition it could have had whole, and a
+            // -l/-c/context search is a broad search with bounded output. All
+            // ran as-is.
+            let (tag, reason) = if !identifier {
+                ("hook:grep-literal", literal_advice(pattern))
+            } else if single_file {
                 (
                     "hook:grep-single-file",
                     format!(
@@ -626,6 +634,41 @@ fn try_grep(
             allow_with_reason(&root, "hook:grep-nudge", pattern, &reason)
         }
     }
+}
+
+/// The advisory for a broad search whose pattern is not an identifier: a CSS
+/// class, a message string, a regex. `refs`/`show` have nothing to offer, so
+/// the hint is `cona grep` alone, spelled ready to paste — `--regex` only
+/// when the pattern actually uses regex syntax, since a literal like
+/// `foo.bar` is almost always meant literally.
+pub(super) fn literal_advice(pattern: &str) -> String {
+    let regex = pattern.contains(['[', '*', '+', '?', '(', '|', '^', '$', '{', '\\']);
+    let quoted = shell_quote(pattern);
+    let cmd = if regex {
+        format!("cona grep {quoted} --regex")
+    } else {
+        format!("cona grep {quoted}")
+    };
+    let dialect = if regex {
+        " (`--regex` is Rust regex syntax: `a|b`, not `a\\|b`)"
+    } else {
+        ""
+    };
+    format!(
+        "this project is cona-indexed — `{cmd}` searches code only and labels every hit \
+         with its enclosing symbol{dialect}. This search ran as-is."
+    )
+}
+
+/// Quote a word for pasting into a POSIX shell; bare when nothing needs it.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Emit the PreToolUse deny decision and count the intercept. Credits no

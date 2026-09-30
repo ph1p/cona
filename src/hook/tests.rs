@@ -396,14 +396,48 @@ fn allows_surgical_grep() {
 }
 
 #[test]
-fn allows_regex_pattern() {
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            identifier: false,
-            ..grep_facts()
-        }),
-        Decision::Allow
+fn literal_patterns_advise_but_never_block() {
+    // A class name or regex has no symbol for `refs`, but `cona grep` still
+    // searches it code-only: a hint in an indexed project, nothing more.
+    let literal = GrepFacts {
+        identifier: false,
+        ..grep_facts()
+    };
+    assert_eq!(decide_grep(&literal), Decision::Advise);
+    // Single file, unindexed repo, or surgical → silent.
+    for f in [
+        GrepFacts {
+            single_file: true,
+            ..literal
+        },
+        GrepFacts {
+            indexed_project: false,
+            ..literal
+        },
+        GrepFacts {
+            surgical: true,
+            ..literal
+        },
+    ] {
+        assert_eq!(decide_grep(&f), Decision::Allow, "{f:?}");
+    }
+}
+
+#[test]
+fn literal_advice_is_ready_to_paste() {
+    use super::intercept::literal_advice;
+    let plain = literal_advice("dmf-primary-green-contrast");
+    assert!(
+        plain.contains("`cona grep dmf-primary-green-contrast`"),
+        "{plain}"
     );
+    assert!(!plain.contains("--regex"), "{plain}");
+    let regex = literal_advice("dmf-primary-[a-z-]*");
+    assert!(
+        regex.contains("`cona grep 'dmf-primary-[a-z-]*' --regex`"),
+        "{regex}"
+    );
+    assert!(literal_advice("it's").contains(r"'it'\''s'"));
 }
 
 #[test]
@@ -676,6 +710,103 @@ fn output_bounded_shell_greps_are_soft() {
     }
     // A context flag with a non-numeric value is untrustworthy → Other.
     assert_eq!(classify_shell("rg -C x UserService"), ShellIntent::Other);
+}
+
+fn grep_of(cmd: &str) -> Option<(String, Option<String>, bool)> {
+    match classify_shell(cmd) {
+        ShellIntent::Grep {
+            pattern,
+            path,
+            soft,
+        } => Some((pattern, path, soft)),
+        _ => None,
+    }
+}
+
+#[test]
+fn grep_flag_clusters_are_judged_letter_by_letter() {
+    for cmd in [
+        "grep -rhno 'dmf-[a-z]*' src",
+        "grep -rnw Foo src",
+        "grep -RIn --color=never Foo src",
+        "rg --no-heading --smart-case Foo src",
+        "grep -rn --exclude-dir=node_modules Foo src",
+    ] {
+        assert_eq!(grep_of(cmd).map(|g| g.2), Some(false), "{cmd}");
+    }
+    // A soft letter inside a cluster softens the whole search.
+    assert_eq!(grep_of("grep -rln Foo src").map(|g| g.2), Some(true));
+    // Inverting / pattern-supplying / narrowing letters are not ours.
+    for cmd in [
+        "grep -rv Foo src",
+        "grep -re Foo src",
+        "grep -rn --include=*.rs Foo src",
+    ] {
+        assert_eq!(classify_shell(cmd), ShellIntent::Other, "{cmd}");
+    }
+}
+
+#[test]
+fn cd_prefix_rebases_later_paths() {
+    assert_eq!(
+        grep_of("cd /repo && grep -rn WebButton src"),
+        Some(("WebButton".into(), Some("/repo/src".into()), false))
+    );
+    // A path-less search searches the directory it cd'd into.
+    assert_eq!(
+        grep_of("cd /repo && rg WebButton"),
+        Some(("WebButton".into(), Some("/repo".into()), false))
+    );
+    assert_eq!(read_of("cd x && cat a.rs"), Some(("x/a.rs".into(), None)));
+    assert_eq!(
+        read_of("cd x && cd y && cat /abs/a.rs"),
+        Some(("/abs/a.rs".into(), None))
+    );
+    // Wrapped, as Codex issues it.
+    assert_eq!(
+        read_of("/bin/zsh -lc \"cd /repo && sed -n '1,200p' a.rs\""),
+        Some(("/repo/a.rs".into(), Some(200)))
+    );
+    // A directory we cannot resolve makes every later relative path unknown.
+    for cmd in ["cd && cat a.rs", "cd - && cat a.rs", "cd ~/x && cat a.rs"] {
+        assert_eq!(classify_shell(cmd), ShellIntent::Other, "{cmd}");
+    }
+    // A bare `cd` line is recognised but reads nothing.
+    assert_eq!(
+        classify_shell("cd /repo && cargo build"),
+        ShellIntent::Other
+    );
+}
+
+#[test]
+fn piped_stdin_filters_are_neutral() {
+    for cmd in [
+        "grep -rn Foo src | sort | uniq -c",
+        "grep -rn Foo src | head -20",
+        "grep -rn Foo src | cut -c1-120",
+        "grep -rn Foo src | grep -v test",
+        "grep -rn Foo src | sed 's/^/> /'",
+    ] {
+        assert!(grep_of(cmd).is_some(), "{cmd}");
+    }
+    // `ls | grep foo` searches ls's output, not the tree — never a Grep.
+    assert_eq!(
+        classify_shell("ls | grep foo"),
+        ShellIntent::PartialRead { path: None }
+    );
+    // Non-filters still poison the line, piped or not.
+    for cmd in [
+        "grep -rn Foo src | xargs rm",
+        "cat a.rs | sed -i 's/a/b/' b.rs",
+        "grep -rn Foo src || sort x",
+    ] {
+        assert_eq!(classify_shell(cmd), ShellIntent::Other, "{cmd}");
+    }
+    // A piped grep that names its own path is a search of its own.
+    assert_eq!(
+        grep_of("echo hi | grep -rn Foo src").map(|g| g.1),
+        Some(Some("src".into()))
+    );
 }
 
 #[test]

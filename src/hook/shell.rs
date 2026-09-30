@@ -98,8 +98,22 @@ pub fn shell_words(cmd: &str) -> Option<Vec<String>> {
 ///
 /// `None` when quoting is unbalanced — we cannot tell where a segment ends.
 pub fn split_segments(cmd: &str) -> Option<Vec<String>> {
+    Some(
+        split_pipeline(cmd)?
+            .into_iter()
+            .map(|(seg, _)| seg)
+            .collect(),
+    )
+}
+
+/// `split_segments`, with each segment flagged `true` when it reads the
+/// previous one's output through a single `|`. A piped `sort`/`cut`/`grep -v`
+/// only filters what came before and reads no file of its own, so
+/// `classify_shell` can treat it as neutral instead of unrecognised.
+fn split_pipeline(cmd: &str) -> Option<Vec<(String, bool)>> {
     let mut out = Vec::new();
     let mut cur = String::new();
+    let mut piped = false;
     let mut quote: Option<char> = None;
     let mut chars = cmd.chars().peekable();
     while let Some(c) = chars.next() {
@@ -115,14 +129,19 @@ pub fn split_segments(cmd: &str) -> Option<Vec<String>> {
                     quote = Some(c);
                     cur.push(c);
                 }
-                ';' | '\n' => out.push(std::mem::take(&mut cur)),
+                ';' | '\n' => {
+                    out.push((std::mem::take(&mut cur), piped));
+                    piped = false;
+                }
                 '&' | '|' => {
                     // `&&`/`||` collapse to one separator; a bare `&`
                     // (background) or `|` (pipe) separates just the same.
-                    if chars.peek() == Some(&c) {
+                    let doubled = chars.peek() == Some(&c);
+                    if doubled {
                         chars.next();
                     }
-                    out.push(std::mem::take(&mut cur));
+                    out.push((std::mem::take(&mut cur), piped));
+                    piped = c == '|' && !doubled;
                 }
                 c => cur.push(c),
             },
@@ -131,11 +150,11 @@ pub fn split_segments(cmd: &str) -> Option<Vec<String>> {
     if quote.is_some() {
         return None;
     }
-    out.push(cur);
+    out.push((cur, piped));
     Some(
         out.into_iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .map(|(s, p)| (s.trim().to_string(), p))
+            .filter(|(s, _)| !s.is_empty())
             .collect(),
     )
 }
@@ -166,18 +185,41 @@ pub fn unwrap_shell_wrapper(cmd: &str) -> Option<String> {
 /// recognised segments the strongest intent wins: a full `Read` outranks a
 /// `Grep`, which outranks a `PartialRead`, so `wc -l f && sed -n '1,500p' f`
 /// is judged on the read.
+///
+/// Two segment shapes are recognised without being intents of their own:
+/// `cd DIR` moves the directory later relative paths resolve against (agents
+/// prefix nearly every command with one), and a piped stdin filter (`| sort`,
+/// `| cut -c1-80`, `| grep -v x`) only reshapes the previous segment's output.
 pub fn classify_shell(cmd: &str) -> ShellIntent {
     let inner = unwrap_shell_wrapper(cmd);
     let line = inner.as_deref().unwrap_or(cmd);
-    let Some(segments) = split_segments(line) else {
+    let Some(segments) = split_pipeline(line) else {
         return ShellIntent::Other;
     };
+    let mut dir: Option<String> = None;
     let mut best = ShellIntent::Other;
-    for seg in &segments {
+    for (seg, piped) in &segments {
+        match cd_target(seg) {
+            Some(Some(target)) => {
+                dir = Some(match dir {
+                    Some(d) => shell_join(&d, &target),
+                    None => target,
+                });
+                continue;
+            }
+            // `cd`, `cd -`, `cd ~/x`: a directory we cannot resolve, so every
+            // relative path after it is unknown too.
+            Some(None) => return ShellIntent::Other,
+            None => {}
+        }
+        if *piped && is_stdin_filter(seg) {
+            continue;
+        }
         match classify_command(seg) {
             // One segment we don't understand poisons the whole line.
             ShellIntent::Other => return ShellIntent::Other,
             intent => {
+                let intent = rebase(intent, dir.as_deref());
                 if rank(&intent) > rank(&best) {
                     best = intent;
                 }
@@ -185,6 +227,92 @@ pub fn classify_shell(cmd: &str) -> ShellIntent {
         }
     }
     best
+}
+
+/// `Some(Some(dir))` for a resolvable `cd DIR`/`pushd DIR`, `Some(None)` for a
+/// `cd` whose target we cannot know (none, `-`, `~…`, a flag), `None` when the
+/// segment is not a `cd` at all.
+fn cd_target(seg: &str) -> Option<Option<String>> {
+    let words = shell_words(seg)?;
+    let (prog, args) = words.split_first()?;
+    if !matches!(prog.as_str(), "cd" | "pushd") {
+        return None;
+    }
+    Some(match args {
+        [dir] if !dir.is_empty() && !dir.starts_with(['-', '~']) => Some(dir.clone()),
+        _ => None,
+    })
+}
+
+/// Join a shell path onto a `cd` directory with `/`, not `Path::join`: the
+/// line is shell syntax, and `Path::join` would emit `\` on Windows. An
+/// absolute `p` replaces `dir`, as a shell would.
+fn shell_join(dir: &str, p: &str) -> String {
+    if p.starts_with('/') || Path::new(p).is_absolute() {
+        return p.to_string();
+    }
+    format!("{}/{p}", dir.trim_end_matches(['/', '\\']))
+}
+
+/// Resolve an intent's relative paths against the `cd` directory in effect.
+/// A path-less search (`rg X`) searches the cwd, so it becomes a search of
+/// that directory.
+fn rebase(intent: ShellIntent, dir: Option<&str>) -> ShellIntent {
+    let Some(dir) = dir else {
+        return intent;
+    };
+    let join = |p: &str| shell_join(dir, p);
+    match intent {
+        ShellIntent::Read { path, upto } => ShellIntent::Read {
+            path: join(&path),
+            upto,
+        },
+        ShellIntent::PartialRead { path: Some(p) } => ShellIntent::PartialRead {
+            path: Some(join(&p)),
+        },
+        ShellIntent::Grep {
+            pattern,
+            path,
+            soft,
+        } => ShellIntent::Grep {
+            pattern,
+            path: Some(path.map_or_else(|| dir.to_string(), |p| join(&p))),
+            soft,
+        },
+        other => other,
+    }
+}
+
+/// A command that, fed through a pipe, only filters or reshapes its stdin.
+/// Only consulted for piped segments: `grep x` alone searches the cwd, while
+/// `ls | grep x` searches nothing but `ls`'s output. A grep or sed that names
+/// a file of its own is not a filter and gets classified normally.
+fn is_stdin_filter(seg: &str) -> bool {
+    let Some(words) = shell_words(seg) else {
+        return false;
+    };
+    let Some((prog, args)) = words.split_first() else {
+        return false;
+    };
+    let prog = Path::new(prog.as_str())
+        .file_name()
+        .map_or_else(|| prog.as_str().into(), |s| s.to_string_lossy());
+    let operands = || args.iter().filter(|a| !a.starts_with('-')).count();
+    match prog.as_ref() {
+        "sort" | "uniq" | "cut" | "tr" | "column" | "nl" | "rev" | "tac" | "fold" | "fmt"
+        | "awk" | "jq" | "head" | "tail" | "wc" => true,
+        // No operand after the pattern = it greps stdin. A second operand
+        // would be a path, and that grep is judged as a search of its own.
+        "grep" | "rg" | "ag" | "ack" => operands() <= 1,
+        // Only a script, no file: prints stdin. `-i` needs a file to edit.
+        "sed" => {
+            !args
+                .iter()
+                .any(|a| a.starts_with("-i") || a == "--in-place")
+                && operands() <= 1
+        }
+        _ => false,
+    }
 }
 
 /// The one file operand of a flag-carrying command, or `None` when there isn't
@@ -336,6 +464,32 @@ fn classify_sed(args: &[String]) -> ShellIntent {
     }
 }
 
+/// Short grep/rg flags that change only presentation, recursion or regex
+/// dialect — the search stays exactly as broad.
+const GREP_PRESENTATION_SHORT: &str = "rRniHhowsEFPIa";
+/// Short flags that keep the search broad but bound its output.
+const GREP_SOFT_SHORT: &str = "lc";
+/// Long flags (value after `=` ignored) that leave the search as broad.
+/// `--include`/`--glob` are absent on purpose: they narrow it.
+const GREP_PRESENTATION_LONG: &[&str] = &[
+    "color",
+    "colour",
+    "no-heading",
+    "heading",
+    "line-number",
+    "with-filename",
+    "no-filename",
+    "ignore-case",
+    "smart-case",
+    "recursive",
+    "fixed-strings",
+    "word-regexp",
+    "extended-regexp",
+    "only-matching",
+    "exclude",
+    "exclude-dir",
+];
+
 /// `rg PATTERN [PATH]` → the grep half of `classify_shell`. A narrowing flag
 /// (`-g`, `-t`, `--files`, `-m`, …) makes it surgical and therefore `Other`.
 /// Output-bounding flags (`-l`, `-c`, context windows) keep it a `Grep` but
@@ -353,7 +507,23 @@ fn classify_grep(args: &[String]) -> ShellIntent {
         // `-r`/`-R`/`-n`/`-i` and friends only affect presentation or
         // recursion; anything else narrows the search or changes its shape.
         let plain = flag.trim_start_matches('-');
-        if matches!(plain, "r" | "R" | "n" | "i" | "rn" | "nr" | "ri" | "ir") || plain.is_empty() {
+        if plain.is_empty() {
+            continue;
+        }
+        // A short-flag cluster (`-rn`, `-rhno`, `-rl`) is judged letter by
+        // letter: every letter must be presentation-only or output-bounding.
+        // One narrowing or inverting letter (`-v`, `-e`, `-m`) → not ours.
+        let is_cluster = !flag.starts_with('-') && plain.chars().all(|c| c.is_ascii_alphabetic());
+        if is_cluster
+            && plain
+                .chars()
+                .all(|c| GREP_PRESENTATION_SHORT.contains(c) || GREP_SOFT_SHORT.contains(c))
+        {
+            soft |= plain.chars().any(|c| GREP_SOFT_SHORT.contains(c));
+            continue;
+        }
+        let long_name = plain.split_once('=').map_or(plain, |(name, _)| name);
+        if flag.starts_with('-') && GREP_PRESENTATION_LONG.contains(&long_name) {
             continue;
         }
         // Output-bounding flags: same broad search, bounded presentation.
