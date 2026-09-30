@@ -456,21 +456,28 @@ pub(super) fn has_marker(p: &Path) -> bool {
     std::fs::read_to_string(p).is_ok_and(|c| c.contains(crate::install::BLOCK_BEGIN))
 }
 
-/// Is the cona Claude Code plugin enabled for sessions in this project?
-/// The plugin ships hooks + skill + MCP in one payload, so with it enabled the
-/// installer's settings.json hooks, skill file, and project `.mcp.json` entry
-/// are pure duplicates — every session would run each hook and inject the
-/// SessionStart context twice. Plugins can be enabled in the global or the
-/// project settings.json; either counts. An unreadable or invalid settings
+/// Does the cona Claude Code plugin cover the sessions this SCOPE serves?
+/// The plugin ships hooks + skill + MCP in one payload, so where it is enabled
+/// the installer's settings.json hooks, skill file, and project `.mcp.json`
+/// entry are pure duplicates — every session would run each hook and inject
+/// the SessionStart context twice.
+///
+/// Scope matters: project settings are seen only by sessions in that project,
+/// global settings by every session. So the project scope is covered by a
+/// plugin enabled in either file, but the global scope only by the GLOBAL
+/// file — a plugin enabled in one repo must not strip (or skip) the home-level
+/// hooks every other repo still relies on. An unreadable or invalid settings
 /// file counts as "no plugin", so a broken file degrades to a normal install,
 /// never to a silently skipped one.
-pub(crate) fn claude_plugin_enabled(project_root: &Path, home: &Path) -> bool {
-    [
-        home.join(".claude/settings.json"),
-        project_root.join(".claude/settings.json"),
-    ]
-    .iter()
-    .any(|p| {
+pub(crate) fn claude_plugin_enabled(project_root: &Path, home: &Path, global: bool) -> bool {
+    let global_file = home.join(".claude/settings.json");
+    let project_file = project_root.join(".claude/settings.json");
+    let files: &[&Path] = if global {
+        &[&global_file]
+    } else {
+        &[&global_file, &project_file]
+    };
+    files.iter().any(|p| {
         std::fs::read_to_string(p)
             .map(|t| plugin_enabled_in(&t))
             .unwrap_or(false)

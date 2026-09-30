@@ -72,9 +72,13 @@ pub fn summary(count: usize, noun: &str, tail: &str, ok_msg: &str) -> String {
     if count == 0 {
         ok(ok_msg)
     } else {
-        let plural = if count == 1 { "" } else { "s" };
-        warn(&format!("{count} {noun}{plural} {tail}"))
+        warn(&format!("{} {tail}", plural(count, noun)))
     }
+}
+
+/// `3 files` / `1 file` — count plus an `s`-pluralized noun.
+pub fn plural(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 /// Green check bullet
 pub fn ok(s: &str) -> String {

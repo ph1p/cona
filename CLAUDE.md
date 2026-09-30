@@ -202,12 +202,16 @@ harness keeps its config (mcp_config.rs) — written with the ABSOLUTE binary
 path from agent_exe(). Skipped when the parent dir does not exist (except the project root), and a
 failure there warns instead of aborting the install. Claude installs are
 plugin-aware (claude_plugin_enabled): an enabled cona plugin (`enabledPlugins`
-`cona`/`cona@…`, global OR project settings.json) already ships hooks + skill +
-MCP, so install SKIPS those three (marked "skipped (plugin has …)") and writes
+`cona`/`cona@…`) already ships hooks + skill + MCP, so install never writes
+those three and REMOVES copies a plugin-unaware install left ("removed (plugin
+has …)", else "skipped …") — one `agents install` is the whole de-dupe; writes
 only guide + subagent patches — else every session fires each hook twice and
-gets the SessionStart context twice. Uninstall still removes plugin-unaware
-leftovers. `doctor` flips polarity with the plugin: PRESENT settings
-hooks/skill = duplicate issue (with the uninstall→install de-dupe hint),
+gets the SessionStart context twice. Scope-aware: the global scope counts only
+a plugin in HOME settings (a project-only plugin must not strip the home hooks
+other repos use); the project scope counts home OR project settings.
+`doctor` flips polarity with the plugin: PRESENT settings
+hooks/skill/.mcp.json = duplicate issue (hint: `cona agents install claude
+[--global]`),
 absent = healthy; plugin counts as hooks_configured for the liveness check. Interactive = no `-y`, no explicit scope arg, TTY → pick_agents shows
 ONE ui::multiselect across BOTH scopes (PROJECT + HOME sections via Row::Header,
 items pre-checked by `installed() || detected()` — reality first, detection only
@@ -304,3 +308,36 @@ separates maintenance from query lines; `stats` + TUI show maintenance as
 compact one-liners under the query table, never in savings columns. Aggregate
 helpers (totals/per_command/top_targets/recent/savings_series) feed both
 `stats` and the `ui` dashboard.
+<!-- cona:begin -->
+## cona — code navigation (use FIRST, not as fallback)
+
+In a cona-indexed repo, cona IS how you read and search code. It reads one
+symbol instead of a whole file and searches identifier nodes instead of raw
+text, so it replaces the generic read-the-file / grep-the-tree habit:
+
+- Need ONE function/class/method → `cona show <Sym>`, or `cona context <Sym>`
+  for source + callees + call sites. Do not read a whole file for one symbol.
+- Searching for an identifier (definition, call site, usage) →
+  `cona grep <name>` / `cona refs <Name>`. Do not run plain grep/rg over
+  source trees for identifiers.
+- Opening an unfamiliar file → `cona outline <file>` first; read the full
+  file only if the outline shows you truly need every line.
+- Orienting in an unknown repo → `cona tree --rank`.
+
+Whole-file reads are for files you are about to rewrite, unindexed files, and
+non-code (docs, configs, data). `cona edit <Sym>` writes syntax-verified.
+
+`<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name`. Index auto-refreshes;
+`cona index` (~1s) if a repo isn't indexed yet. In a sandbox where `~/.cona`
+is not writable, cona falls back to temporary storage; set `CONA_DATA_DIR` when
+you need a persistent index. Use `--read-only` to inspect an existing index
+without writing code, indexes, or usage stats.
+
+Too many hits? `--path <dir>` scopes `find`/`refs`/`grep`/`tree` to a subtree.
+Ambiguous name? `cona show <Sym> --all` prints every definition instead of
+erroring. `cona grep` matches literally; add `--regex` for a real regex.
+
+Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
+`insert` `rename` `note` `check` — is listed in `cona --help`, with details per
+group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).
+<!-- cona:end -->

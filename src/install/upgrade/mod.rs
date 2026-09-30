@@ -295,7 +295,7 @@ fn refresh_config(quiet: bool) {
         Some(h) => h,
         None => return,
     };
-    let mut refreshed = 0usize;
+    let (mut home_refreshed, mut projects_refreshed) = (false, 0usize);
     // ONE loop over every scope: the global (~/.claude) scope, then every
     // registered project. `sync_scope_config` itself decides whether a scope
     // has anything installed — no pre-gate, that would double the fs scan.
@@ -310,27 +310,37 @@ fn refresh_config(quiet: bool) {
             if !quiet {
                 // heading prints lazily, only once something actually refreshes
                 // — a run where every scope is empty stays silent
-                if refreshed == 0 {
+                if !home_refreshed && projects_refreshed == 0 {
                     println!("\n{}", ui::heading("config refresh"));
                 }
+                // Say WHICH scope in words: a bare `~` or `.` reads as noise.
+                let scope = if global {
+                    "home configs".to_string()
+                } else {
+                    format!("project {}", crate::install::short_path(&root))
+                };
                 let list: Vec<&str> = names.iter().map(|n| n.slug()).collect();
-                println!(
-                    "  {}",
-                    ui::dim(&format!(
-                        "{} — {}",
-                        crate::install::short_path(&root),
-                        list.join(", ")
-                    ))
-                );
+                println!("  {:<22} {}", scope, ui::dim(&list.join(", ")));
             }
-            refreshed += 1;
+            if global {
+                home_refreshed = true;
+            } else {
+                projects_refreshed += 1;
+            }
         }
     }
 
-    if !quiet && refreshed > 0 {
+    if !quiet && (home_refreshed || projects_refreshed > 0) {
+        let mut parts = Vec::new();
+        if home_refreshed {
+            parts.push("home".to_string());
+        }
+        if projects_refreshed > 0 {
+            parts.push(ui::plural(projects_refreshed, "project"));
+        }
         println!(
             "{}",
-            ui::ok(&format!("config refreshed in {refreshed} scope(s)"))
+            ui::ok(&format!("agent configs refreshed ({})", parts.join(" + ")))
         );
     }
 }

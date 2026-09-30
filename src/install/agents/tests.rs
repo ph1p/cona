@@ -472,23 +472,41 @@ fn plugin_enabled_in_detects_only_an_enabled_cona_plugin() {
 }
 
 #[test]
-fn claude_plugin_enabled_reads_global_and_project_settings() {
+fn claude_plugin_enabled_is_scope_aware() {
     let tmp = std::env::temp_dir().join(format!("cona-plugin-probe-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let (home, proj) = (tmp.join("home"), tmp.join("proj"));
     std::fs::create_dir_all(home.join(".claude")).unwrap();
     std::fs::create_dir_all(proj.join(".claude")).unwrap();
-    assert!(!claude_plugin_enabled(&proj, &home), "no settings at all");
+    assert!(
+        !claude_plugin_enabled(&proj, &home, false),
+        "no settings at all"
+    );
+    assert!(
+        !claude_plugin_enabled(&proj, &home, true),
+        "no settings at all"
+    );
 
     let on = r#"{"enabledPlugins":{"cona@cona":true}}"#;
     std::fs::write(home.join(".claude/settings.json"), on).unwrap();
-    assert!(claude_plugin_enabled(&proj, &home), "global settings count");
+    assert!(
+        claude_plugin_enabled(&proj, &home, false),
+        "global covers project"
+    );
+    assert!(
+        claude_plugin_enabled(&proj, &home, true),
+        "global covers global"
+    );
 
     std::fs::remove_file(home.join(".claude/settings.json")).unwrap();
     std::fs::write(proj.join(".claude/settings.json"), on).unwrap();
     assert!(
-        claude_plugin_enabled(&proj, &home),
-        "project settings count too"
+        claude_plugin_enabled(&proj, &home, false),
+        "project settings cover the project"
+    );
+    assert!(
+        !claude_plugin_enabled(&proj, &home, true),
+        "a project-only plugin must not cover the home hooks other repos use"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

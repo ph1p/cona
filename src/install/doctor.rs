@@ -48,6 +48,8 @@ fn cona_on_path() -> Option<PathBuf> {
 /// One `.claude` scope (global or project) integration snapshot.
 struct ScopeCheck {
     label: &'static str,
+    /// The cona plugin covers this scope (see `claude_plugin_enabled`).
+    plugin: bool,
     index_hook: bool,
     read_hook: bool,
     skill_path: PathBuf,
@@ -79,8 +81,9 @@ struct DoctorReport {
     /// No cached version matches the running binary — the checkout was edited
     /// or upgraded but `codex plugin add` never re-ran.
     codex_stale: bool,
-    /// (agent slug, scope, config path) for every registration found.
-    mcp: Vec<(String, &'static str, PathBuf)>,
+    /// (agent slug, scope, config path, duplicates the plugin's server) for
+    /// every registration found.
+    mcp: Vec<(String, &'static str, PathBuf, bool)>,
     index_files: i64,
     index_symbols: i64,
     index_db_size: i64,
@@ -137,15 +140,16 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
     }
     let on_path = cona_on_path();
 
-    // With the plugin enabled the polarity flips: settings-level hooks/skill
-    // are DUPLICATES (each hook fires twice per event), their absence is the
-    // healthy state.
-    let claude_plugin = super::agents::claude_plugin_enabled(project_root, &home);
+    // Where the plugin covers a scope the polarity flips: settings-level
+    // hooks/skill there are DUPLICATES (each hook fires twice per event), their
+    // absence is the healthy state. Per scope — a project-only plugin leaves
+    // the home hooks every other repo relies on legitimately in place.
     let mut scopes = Vec::new();
     for (label, root) in [
         ("global", home.clone()),
         ("project", project_root.to_path_buf()),
     ] {
+        let plugin = super::agents::claude_plugin_enabled(project_root, &home, label == "global");
         let dir = root.join(".claude");
         let skill_path = dir.join("skills/cona/SKILL.md");
         let (index_hook, read_hook) = settings_cona_hooks(&dir.join("settings.json"));
@@ -155,20 +159,16 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         // gets its own line.
         let flagged = [index_hook, read_hook, skill]
             .iter()
-            .filter(|b| **b == claude_plugin)
+            .filter(|b| **b == plugin)
             .count();
-        issues += if claude_plugin {
-            flagged.min(1)
-        } else {
-            flagged
-        };
+        issues += if plugin { flagged.min(1) } else { flagged };
         let config_ver = if skill {
             let v = db::meta_get(&super::upgrade::config_ver_key(&root))
                 .ok()
                 .flatten();
             // With the plugin the skill is already flagged as a duplicate —
             // a stale version on top would double-count the same problem.
-            if !claude_plugin && v.as_deref() != Some(current_ver) {
+            if !plugin && v.as_deref() != Some(current_ver) {
                 issues += 1;
             }
             v
@@ -177,6 +177,7 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         };
         scopes.push(ScopeCheck {
             label,
+            plugin,
             index_hook,
             read_hook,
             skill_path,
@@ -184,6 +185,9 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
             config_ver,
         });
     }
+
+    // Project coverage is the wider one (home OR project settings).
+    let claude_plugin = scopes.iter().any(|s| s.plugin);
 
     // Hooks configured anywhere but never (or long ago) actually run = the
     // exact failure this command exists to surface: the harness snapshots
@@ -204,17 +208,20 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         issues += 1;
     }
 
-    let mcp = super::agents::mcp_registrations(project_root, &home)
-        .into_iter()
-        .filter(|(.., on)| *on)
-        .map(|(a, global, path, _)| {
-            (
-                a.slug().to_string(),
-                if global { "global" } else { "project" },
-                path,
-            )
-        })
-        .collect();
+    // A missing MCP entry is never an issue (see render_text), but a DUPLICATE
+    // is: the plugin's server plus a project .mcp.json one offers every tool
+    // twice, under two names.
+    let mcp: Vec<(String, &'static str, PathBuf, bool)> =
+        super::agents::mcp_registrations(project_root, &home)
+            .into_iter()
+            .filter(|(.., on)| *on)
+            .map(|(a, global, path, _)| {
+                let dup = claude_plugin && a == super::agents::AgentName::Claude && !global;
+                let scope = if global { "global" } else { "project" };
+                (a.slug().to_string(), scope, path, dup)
+            })
+            .collect();
+    issues += mcp.iter().filter(|m| m.3).count();
 
     // diagnostics must not CREATE a project DB as a side effect — a stray
     // empty DB would flip the hook from Nudge to Redirect here
@@ -275,6 +282,7 @@ fn render_json(r: &DoctorReport) -> serde_json::Value {
         "claude_plugin_enabled": r.claude_plugin,
         "claude": r.scopes.iter().map(|s| serde_json::json!({
             "scope": s.label,
+            "plugin": s.plugin,
             "index_hook": s.index_hook,
             "read_hook": s.read_hook,
             "skill": s.skill,
@@ -291,8 +299,9 @@ fn render_json(r: &DoctorReport) -> serde_json::Value {
             "versions": versions,
             "stale": r.codex_stale,
         })),
-        "mcp": r.mcp.iter().map(|(agent, scope, path)| serde_json::json!({
+        "mcp": r.mcp.iter().map(|(agent, scope, path, dup)| serde_json::json!({
             "agent": agent, "scope": scope, "path": path.display().to_string(),
+            "duplicate": dup,
         })).collect::<Vec<_>>(),
         "index": {
             "root": r.project_root.display().to_string(),
@@ -350,7 +359,7 @@ fn render_text(r: &DoctorReport) {
             _ => "project (./.claude)",
         };
         println!("\n{}", ui::heading(&format!("claude {label}")));
-        if r.claude_plugin {
+        if s.plugin {
             // Polarity flips with the plugin: it ships hooks + skill + MCP, so
             // anything still in settings.json / skills/ is a duplicate that
             // fires twice per event.
@@ -374,11 +383,15 @@ fn render_text(r: &DoctorReport) {
                 } else {
                     "duplicate"
                 };
+                // `cona agents` defaults to the project scope, so a global
+                // duplicate needs the flag or the fix touches the wrong tree.
+                // Install alone suffices: with the plugin it strips duplicates.
+                let scope = if s.label == "global" { " --global" } else { "" };
                 println!(
                     "  {}",
                     ui::warn(&format!(
-                        "{} {verb} the enabled cona plugin — `cona agents uninstall claude` \
-                         then `cona agents install claude` cleans this up",
+                        "{} {verb} the enabled cona plugin — run `cona agents install claude{scope}` \
+                         to remove them",
                         dupes.join(" + ")
                     ))
                 );
@@ -395,7 +408,10 @@ fn render_text(r: &DoctorReport) {
         );
         println!(
             "  {}",
-            tag(s.skill, &format!("skill: {}", s.skill_path.display()))
+            tag(
+                s.skill,
+                &format!("skill: {}", super::short_path(&s.skill_path))
+            )
         );
         if s.skill {
             match &s.config_ver {
@@ -455,11 +471,18 @@ fn render_text(r: &DoctorReport) {
             ui::dim("not registered anywhere — `cona agents install` adds it where a harness config exists")
         );
     }
-    for (agent, scope, path) in &r.mcp {
-        println!(
-            "  {}",
-            ui::ok(&format!("{agent} ({scope}): {}", super::short_path(path)))
-        );
+    for (agent, scope, path, dup) in &r.mcp {
+        let line = format!("{agent} ({scope}): {}", super::short_path(path));
+        if *dup {
+            println!(
+                "  {}",
+                ui::warn(&format!(
+                    "{line} duplicates the plugin's server — run `cona agents install claude` to remove it"
+                ))
+            );
+        } else {
+            println!("  {}", ui::ok(&line));
+        }
     }
 
     if let Some((dir, versions)) = &r.codex_cache {

@@ -24,7 +24,8 @@ pub fn cmd_uninstall(purge: bool, yes: bool) -> Result<()> {
 
     let interactive = !yes && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
-    println!("{}", ui::banner("cona uninstall"));
+    // print!, not println!: every section below opens with its own "\n▸"
+    print!("{}", ui::banner("cona uninstall"));
 
     let plan = if interactive {
         // Only offer what's actually present, so the checklist reflects reality.
@@ -171,10 +172,7 @@ pub(super) fn remove_all_agents(home: &Path) -> Result<Vec<String>> {
         cleaned += usize::from(any);
     }
     if cleaned > 0 {
-        removed.push(format!(
-            "{cleaned} project{}",
-            if cleaned == 1 { "" } else { "s" }
-        ));
+        removed.push(ui::plural(cleaned, "project"));
     }
     if touched == 0 {
         println!("\n{}", ui::dim("no per-project integration found"));

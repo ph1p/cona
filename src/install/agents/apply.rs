@@ -6,7 +6,9 @@ use super::select::AgentSel;
 use super::*;
 use crate::hook::PRETOOL_MATCHER;
 use crate::install::mcp_config;
-use crate::install::{mark, remove_block_file, upsert_block_file, write_if_changed, SKILL_MD};
+use crate::install::{
+    mark, mark_why, remove_block_file, upsert_block_file, write_if_changed, SKILL_MD,
+};
 use crate::ui;
 use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
@@ -122,11 +124,13 @@ pub(super) fn mcp_register(
         return;
     };
     // The plugin registers cona's MCP server itself; a project .mcp.json entry
-    // on top would offer every session the same server twice.
-    if agent == AgentName::Claude && ctx.claude_plugin {
-        mark(done, "mcp server", "skipped (plugin has it)", &path);
-        return;
-    }
+    // on top would offer every session the same server twice (every tool under
+    // two names). So run the uninstall path instead: never write it, and strip
+    // one a plugin-unaware install left — .mcp.json is Claude's alone among our
+    // agents, nothing else loses it.
+    let plugin = agent == AgentName::Claude && ctx.claude_plugin;
+    let why = plugin.then_some("plugin has it");
+    let install = install && !plugin;
     // Only create a harness's config directory when that harness is really
     // there; installing into a project scope shouldn't conjure a `.cursor/` or
     // `.gemini/` tree the user never had. `.mcp.json` sits at the project root,
@@ -137,7 +141,7 @@ pub(super) fn mcp_register(
     if install && !dir_ok {
         // Say so instead of vanishing: a user who expected the MCP server
         // registered otherwise has no clue why doctor lists nothing.
-        mark(done, "mcp server", "skipped (no config dir)", &path);
+        mark_why(done, "mcp server", "skipped", Some("no config dir"), &path);
         return;
     }
     let is_toml = path.extension().and_then(|e| e.to_str()) == Some("toml");
@@ -149,7 +153,11 @@ pub(super) fn mcp_register(
     let label = "mcp server";
     match res {
         Ok(ch) if install => mark(done, label, ch.verb(), &path),
-        Ok(crate::install::Change::Unchanged) => {}
+        Ok(crate::install::Change::Unchanged) => {
+            if plugin {
+                mark_why(done, label, "skipped", why, &path);
+            }
+        }
         Ok(_) => {
             // Uninstall deletes a config that held only our server, which can
             // leave the harness dir `dir_ok` respected on the way in (`.cursor/`)
@@ -160,7 +168,7 @@ pub(super) fn mcp_register(
                 ctx.project_root
             };
             prune_empty_dirs(&path, anchor);
-            mark(done, label, "removed", &path);
+            mark_why(done, label, "removed", why, &path);
         }
         Err(e) => println!("{}", ui::warn(&format!("mcp: {e}"))),
     }
@@ -220,11 +228,12 @@ pub fn cmd_agents_q(
     };
     // The Claude Code plugin ships hooks + skill + MCP itself; with it enabled,
     // writing them again just makes every session fire each hook twice and
-    // inject the SessionStart context twice. Install skips those pieces (marked
-    // "skipped"), uninstall still removes what a plugin-unaware install left
-    // behind. Guide files and subagent patches stay ours — the plugin carries
-    // neither.
-    let claude_plugin = install && claude_plugin_enabled(project_root, &home);
+    // inject the SessionStart context twice. Install therefore never writes
+    // those pieces, and REMOVES any a plugin-unaware install left behind — so
+    // one `agents install` is the whole fix, not uninstall-then-install.
+    // Uninstall removes them as always. Guide files and subagent patches stay
+    // ours — the plugin carries neither.
+    let claude_plugin = install && claude_plugin_enabled(project_root, &home, global);
     let ctx = Ctx {
         project_root,
         home: &home,
@@ -246,15 +255,18 @@ pub fn cmd_agents_q(
         };
         // skill
         let skill = claude_dir.join("skills/cona/SKILL.md");
-        if claude_plugin {
-            mark(&mut done, "claude skill", "skipped (plugin has it)", &skill);
-        } else if install {
+        // With the plugin, skill + hooks take the uninstall path (see above).
+        let why = claude_plugin.then_some("plugin has it");
+        let want = install && !claude_plugin;
+        if want {
             let ch = write_if_changed(&skill, SKILL_MD)?;
             mark(&mut done, "claude skill", ch.verb(), &skill);
         } else if skill.exists() {
             std::fs::remove_file(&skill)?;
             prune_empty_dirs(&skill, scope_root);
-            mark(&mut done, "claude skill", "removed", &skill);
+            mark_why(&mut done, "claude skill", "removed", why, &skill);
+        } else if claude_plugin {
+            mark_why(&mut done, "claude skill", "skipped", why, &skill);
         }
         // CLAUDE.md — global installs keep the guide in its own CONA.md
         // (RTK-style) and only reference it; project installs stay inline so the
@@ -288,37 +300,30 @@ pub fn cmd_agents_q(
         }
         // hooks in settings.json — keep the index fresh after agent edits
         let settings = claude_dir.join("settings.json");
-        if claude_plugin {
-            mark(
-                &mut done,
-                "claude hooks",
-                "skipped (plugin has them)",
-                &settings,
-            );
-        } else {
-            // "created" vs "updated" is about OUR hooks, not the file: a
-            // settings.json that held only foreign config still gets cona's
-            // hooks created, not updated.
-            let (had_index, had_read) = crate::install::doctor::settings_cona_hooks(&settings);
-            match claude_hooks(&settings, install) {
-                Ok(changed) => {
-                    if install {
-                        let verb = match (changed, had_index || had_read) {
-                            (false, _) => "unchanged",
-                            (true, false) => "created",
-                            (true, true) => "updated",
-                        };
-                        mark(&mut done, "claude hooks", verb, &settings);
-                    } else if changed {
-                        // A settings.json that held only our hooks is deleted by
-                        // `claude_hooks`, which can leave `.claude/` empty in a
-                        // project that had no Claude config before cona.
-                        prune_empty_dirs(&settings, scope_root);
-                        mark(&mut done, "claude hooks", "removed", &settings);
-                    }
+        // "created" vs "updated" is about OUR hooks, not the file: a
+        // settings.json that held only foreign config still gets cona's
+        // hooks created, not updated.
+        let (had_index, had_read) = crate::install::doctor::settings_cona_hooks(&settings);
+        match claude_hooks(&settings, want) {
+            Ok(changed) => {
+                if want {
+                    let verb = match (changed, had_index || had_read) {
+                        (false, _) => "unchanged",
+                        (true, false) => "created",
+                        (true, true) => "updated",
+                    };
+                    mark(&mut done, "claude hooks", verb, &settings);
+                } else if changed {
+                    // A settings.json that held only our hooks is deleted by
+                    // `claude_hooks`, which can leave `.claude/` empty in a
+                    // project that had no Claude config before cona.
+                    prune_empty_dirs(&settings, scope_root);
+                    mark_why(&mut done, "claude hooks", "removed", why, &settings);
+                } else if claude_plugin {
+                    mark_why(&mut done, "claude hooks", "skipped", why, &settings);
                 }
-                Err(e) => println!("warning: could not edit {}: {e}", settings.display()),
             }
+            Err(e) => println!("warning: could not edit {}: {e}", settings.display()),
         }
         // subagents — they run on their own system prompt and don't reliably see
         // CLAUDE.md, so each existing definition carries the guide itself (never
@@ -386,7 +391,17 @@ pub fn cmd_agents_q(
 
     if done.is_empty() {
         if !quiet {
-            println!("{}", ui::dim("nothing to do"));
+            // Name the scope that was searched: the default is the project, and
+            // a user cleaning up home configs otherwise sees a bare no-op with no
+            // clue that `--global` was the missing piece.
+            let msg = match (install, global) {
+                (false, false) => "nothing to remove in this project — home configs need --global",
+                (false, true) => {
+                    "nothing to remove in home configs — project configs: drop --global"
+                }
+                _ => "nothing to do",
+            };
+            println!("{}", ui::dim(msg));
         }
         return Ok(false);
     }
@@ -404,6 +419,8 @@ pub fn cmd_agents_q(
     // Two agents can share one config file (several harnesses read the
     // project `.mcp.json`): the first write creates it, the second finds it
     // current. That no-op says nothing the "created" line didn't — drop it.
+    // A mark with a reason is a decision the user should see (why nothing was
+    // written there), not an already-current no-op — it keeps its own line.
     let (moved, same): (Vec<_>, Vec<_>) = done
         .iter()
         .filter(|d| {
@@ -412,7 +429,7 @@ pub fn cmd_agents_q(
                     .iter()
                     .any(|o| o.changed() && o.label == d.label && o.path == d.path)
         })
-        .partition(|d| d.changed());
+        .partition(|d| d.changed() || d.why.is_some());
     for d in &moved {
         println!("{}", d.render());
     }
@@ -467,7 +484,7 @@ pub fn cmd_agents_q(
         println!(
             "{}",
             ui::dim(
-                "note: restart Claude Code (or run /hooks) so the new hooks + skill are \
+                "note: restart Claude Code (or run /hooks) so the hook + skill changes are \
                  picked up — they are snapshotted at session start"
             )
         );

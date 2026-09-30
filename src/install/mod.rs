@@ -369,6 +369,9 @@ pub(crate) fn write_if_changed(path: &Path, content: &str) -> Result<Change> {
 pub(crate) struct Mark {
     pub label: &'static str,
     pub verb: &'static str,
+    /// Why this row went the way it did ("plugin has it") — rendered after the
+    /// path, and a row that carries one always gets its own line.
+    pub why: Option<&'static str>,
     pub path: PathBuf,
 }
 
@@ -393,8 +396,14 @@ impl Mark {
             "removed" => ui::yellow(&padded),
             _ => ui::dim(&padded),
         };
+        // The reason trails the path, so a long one never shoves its row out
+        // of the columns.
+        let tail = self
+            .why
+            .map(|r| format!("  {}", ui::dim(&format!("· {r}"))))
+            .unwrap_or_default();
         format!(
-            "{:<LABEL_COL$} {verb_col} {}",
+            "{:<LABEL_COL$} {verb_col} {}{tail}",
             self.label,
             short_path(&self.path)
         )
@@ -463,9 +472,21 @@ pub(crate) fn short_path(path: &Path) -> String {
 /// Record what happened to one target. Pure — no formatting, no filesystem;
 /// display is `Mark::render`'s job, and a quiet caller never pays for it.
 pub(crate) fn mark(done: &mut Vec<Mark>, label: &'static str, verb: &'static str, path: &Path) {
+    mark_why(done, label, verb, None, path);
+}
+
+/// `mark` with a reason the row renders after its path.
+pub(crate) fn mark_why(
+    done: &mut Vec<Mark>,
+    label: &'static str,
+    verb: &'static str,
+    why: Option<&'static str>,
+    path: &Path,
+) {
     done.push(Mark {
         label,
         verb,
+        why,
         path: path.to_path_buf(),
     });
 }
