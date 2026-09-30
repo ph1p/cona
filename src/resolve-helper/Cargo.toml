@@ -5,7 +5,7 @@
 # `links` uniqueness across a whole workspace dependency graph, so the two
 # runtimes cannot coexist in one workspace at all — this crate must be its own
 # workspace root and build independently. cona spawns the resulting binary
-# as a subprocess (process isolation); see docs/spike-semantic-resolution.md.
+# as a subprocess (process isolation); see docs/architecture.md.
 [workspace]
 
 [package]

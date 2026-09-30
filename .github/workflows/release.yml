@@ -48,7 +48,7 @@ jobs:
       - run: cargo build --release --locked --target ${{ matrix.target }}
       # The semantic-resolve helper is a SEPARATE crate (own tree-sitter 0.24
       # runtime via stack-graphs — it cannot share cona's build; see
-      # docs/spike-semantic-resolution.md). Build it best-effort per target and
+      # docs/architecture.md). Build it best-effort per target and
       # bundle it beside cona so sibling-path discovery finds it. A target
       # where it fails to build simply ships without it — cona degrades to
       # its name-based + arity heuristics, and cargo-install users auto-fetch it.

@@ -271,7 +271,8 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
   separate two same-name calls on ONE line; rust.tsg covers inherent methods
   with `let x = T{..}`/`T::ctor()` typing — no traits/generics/macros/path
   resolution (fail-open → empty defs); `use` imports best-effort. Semantic
-  filtering of refs = follow-up. Findings: docs/spike-semantic-resolution.md
+  filtering of refs = follow-up. Upstream stack-graphs archived 2025-09 —
+  weigh an LSP tier before investing further.
 
 ## Statistics schema (global.db)
 

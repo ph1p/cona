@@ -120,6 +120,10 @@ src/indexer.rs   3-phase: walk → parallel parse → one write transaction.
                  input, and must not aim the walker outside the root.
 src/editing.rs   splice_lines/splice_insert/apply_renames — pure, tested splice
                  logic for edit/rename (CRLF-preserving, right-to-left per line).
+                 splice_insert_spaced = insert's variant: pads the new code
+                 with one blank line on each side that lacks one (none after
+                 an opener `{([:` or before a closer `})]`), built in one pass over join_lines (splice_insert trims
+                 trailing newlines, so padding can't ride on it).
                  join_lines = shared tail assembly; a source with no final
                  newline keeps that state (no spurious EOF-newline diff flip)
 src/graph.rs     In-memory call graph (one pass over all files): callers_of/
@@ -184,8 +188,12 @@ src/resolve.rs   Optional semantic resolution tier (fail-open): spawns
                  install/upgrade place it next to cona; cargo-install users
                  lazily fetch from GitHub release (~/.cona/bin, 24h backoff,
                  opt-out CONA_NO_FETCH_HELPER); doctor reports status. NEVER
-                 a cargo dependency of cona (links collision). Findings:
-                 docs/spike-semantic-resolution.md
+                 a cargo dependency of cona: stack-graphs pins tree-sitter
+                 0.24, our grammars 0.26, and both declare `links =
+                 "tree-sitter"` — cargo refuses the graph, so process
+                 isolation is the only shape short of downgrading every
+                 grammar. Upstream stack-graphs is archived (2025-09-09):
+                 further semantic work should weigh an LSP tier first.
 src/hook/        PreToolUse + PostToolUse + PreCompact hooks
                  (`cona hook <event>`):
                  PreToolUse = pure decide_read/decide_grep + fail-open runner;
@@ -335,7 +343,8 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           source); marker-block + write_if_changed primitives;
                           idempotent writes (Change: Created/Updated/Unchanged),
                           upsert_block/remove_block (tested); Mark is DATA
-                          ({label, verb, path}), never pre-rendered text —
+                          ({label, verb, why, path}; why = optional
+                          "· reason" tail, via mark_why), never pre-rendered text —
                           changed()/render() are methods, so grouping + "did a
                           claude target move?" read fields and a quiet run that
                           records 100+ marks and prints none pays nothing for
@@ -406,16 +415,21 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           silent, reports changes via per-mark Mark::changed() —
                           no output-string scanning); claude_hooks (settings.json
                           via serde_json); claude_plugin_enabled = THE plugin
-                          probe (enabledPlugins `cona`/`cona@…` true, global OR
-                          project settings.json; invalid/missing file = no
-                          plugin, so a broken file degrades to a normal install,
-                          never a silently skipped one) — an enabled plugin
-                          ships hooks + skill + MCP itself, so install SKIPS
-                          those three (marks "skipped (plugin has …)"; Ctx
-                          carries the flag to mcp_register) or every session
-                          would fire each hook and inject the SessionStart
-                          context twice; the flag is install-only, so uninstall
-                          still strips plugin-unaware leftovers, and doctor
+                          probe (enabledPlugins `cona`/`cona@…` true; scope-
+                          aware: global scope reads only HOME settings — a
+                          project-only plugin must not strip the home hooks
+                          other repos use — project scope reads home OR project;
+                          invalid/missing file = no plugin, so a broken file
+                          degrades to a normal install, never a silently
+                          skipped one) — an enabled plugin ships hooks + skill +
+                          MCP itself, so install takes the UNINSTALL path for
+                          those three (marks "removed · plugin has it" when a
+                          plugin-unaware copy existed, else "skipped · plugin
+                          has it"; Ctx carries the flag to mcp_register) — one
+                          `agents install` is the whole de-dupe, else every
+                          session would fire each hook and inject the
+                          SessionStart context twice; plain uninstall still
+                          strips plugin-unaware leftovers, and doctor
                           flips polarity (present settings hooks/skill =
                           duplicate issue, absent = healthy, plugin counts as
                           hooks_configured); AgentName ValueEnum + AgentSel::want =
@@ -515,8 +529,10 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           change
                  doctor.rs cmd_doctor: binary/PATH, hooks+skill (global+project),
                           index, per-scope config freshness, helper status,
-                          mcp-server registration (informational, never an issue
-                          — MCP is the optional second surface), hook liveness
+                          mcp-server registration (informational — MCP is the
+                          optional second surface — EXCEPT a project .mcp.json
+                          Claude entry while the plugin is on: a duplicate
+                          server, counted as an issue), hook liveness
                           (mtime of data_dir()/hook-last-seen, stamped throttled
                           at the top of hook::run — configured-but-silent >7d =
                           issue, the "harness snapshots hooks at startup"

@@ -6,7 +6,7 @@
 //! to its definition(s).
 //!
 //! Everything here is FAIL-OPEN. The helper is a separate binary (it carries an
-//! incompatible tree-sitter runtime — see docs/spike-semantic-resolution.md) so
+//! incompatible tree-sitter runtime — see docs/architecture.md) so
 //! it may simply be absent. A missing binary, a spawn error, a non-zero exit,
 //! or unparseable output all return `None` — the caller then keeps its
 //! name-based + arity result, exactly as if this tier didn't exist. Semantic
