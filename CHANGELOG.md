@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.27](https://github.com/ph1p/cona/compare/v0.0.26...v0.0.27) - 2026-09-30
+
+### Added
+
+- *(install)* add claude_permissions for read-only allow rules
+
+### Other
+
+- *(deps)* bump dirs 7, sha2 0.11 and six grammars
+
 ## [0.0.26](https://github.com/ph1p/cona/compare/v0.0.25...v0.0.26) - 2026-08-22
 
 ### Added
