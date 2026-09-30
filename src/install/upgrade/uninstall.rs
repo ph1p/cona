@@ -1,7 +1,7 @@
 //! `cona uninstall` — interactive/flagged teardown.
 
 use super::*;
-use crate::install::{cmd_agents, HELPER_EXE};
+use crate::install::{cmd_agents, short_path, HELPER_EXE};
 use crate::{db, ui};
 use anyhow::{anyhow, Result};
 use std::path::Path;
@@ -79,13 +79,16 @@ pub fn cmd_uninstall(purge: bool, yes: bool) -> Result<()> {
         }
     };
 
-    let mut removed = 0usize;
+    // What was cleaned, named — a bare count mixes projects, scopes and files.
+    let mut removed: Vec<String> = Vec::new();
     if plan.agents {
-        removed += remove_all_agents(&home)?;
+        removed.extend(remove_all_agents(&home)?);
     }
     if plan.binary {
         println!("\n{}", ui::heading("binary"));
-        removed += remove_binary()?;
+        if remove_binary()? > 0 {
+            removed.push("binary".into());
+        }
     }
     // Drop the recorded paths whenever we tore down the install proper.
     if plan.agents || plan.binary {
@@ -97,8 +100,8 @@ pub fn cmd_uninstall(purge: bool, yes: bool) -> Result<()> {
         let d = home.join(".cona");
         if d.exists() {
             std::fs::remove_dir_all(&d)?;
-            println!("{}", ui::ok(&format!("purged  {}", d.display())));
-            removed += 1;
+            println!("{}", ui::ok(&format!("purged  {}", short_path(&d))));
+            removed.push("~/.cona".into());
         } else {
             println!("{}", ui::item("~/.cona already gone"));
         }
@@ -109,20 +112,19 @@ pub fn cmd_uninstall(purge: bool, yes: bool) -> Result<()> {
         );
     }
 
-    println!(
-        "\n{}",
-        ui::ok(&format!(
-            "uninstall complete — {removed} item{} removed",
-            if removed == 1 { "" } else { "s" }
-        ))
-    );
+    let tail = if removed.is_empty() {
+        "nothing was installed".to_string()
+    } else {
+        format!("removed {}", removed.join(", "))
+    };
+    println!("\n{}", ui::ok(&format!("uninstall complete — {tail}")));
     Ok(())
 }
 
 /// Strip cona from every registered project (agent files + git hooks) and the
-/// global home configs. Returns how many targets were actually touched.
-pub(super) fn remove_all_agents(home: &Path) -> Result<usize> {
-    let mut removed = 0usize;
+/// global home configs. Returns what was actually cleaned, for the summary.
+pub(super) fn remove_all_agents(home: &Path) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
 
     // upgrade hooks in the source repo (incl. legacy `self-update` lines)
     if let Ok(Some(src)) = db::meta_get("source_dir") {
@@ -130,13 +132,14 @@ pub(super) fn remove_all_agents(home: &Path) -> Result<usize> {
             &Path::new(&src).join(".git/hooks"),
             &["self-update", "upgrade --quiet", "installed by cona"],
         ) {
+            let src = short_path(Path::new(&src));
             println!("{}", ui::item(&format!("upgrade git hooks   {src}")));
-            removed += 1;
+            removed.push("upgrade git hooks".into());
         }
     }
 
     // every registered project: agent files + git hooks
-    let mut touched = 0usize;
+    let (mut touched, mut cleaned) = (0usize, 0usize);
     for p in db::registered_project_paths() {
         let root = Path::new(&p);
         if !root.is_dir() {
@@ -149,17 +152,29 @@ pub(super) fn remove_all_agents(home: &Path) -> Result<usize> {
         {
             continue;
         }
-        println!("\n{}", ui::heading(&format!("project {p}")));
-        match cmd_agents(root, "uninstall", &[], false, false) {
-            Ok(true) => removed += 1,
-            Ok(false) => {}
-            Err(e) => println!("{}", ui::warn(&e.to_string())),
-        }
+        println!(
+            "\n{}",
+            ui::heading(&format!("project {}", short_path(root)))
+        );
+        let mut any = match cmd_agents(root, "uninstall", &[], false, false) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("{}", ui::warn(&e.to_string()));
+                false
+            }
+        };
         if strip_git_hook_lines(&root.join(".git/hooks"), CONA_HOOK_NEEDLES) {
             println!("{}", ui::item("git hooks removed"));
-            removed += 1;
+            any = true;
         }
         touched += 1;
+        cleaned += usize::from(any);
+    }
+    if cleaned > 0 {
+        removed.push(format!(
+            "{cleaned} project{}",
+            if cleaned == 1 { "" } else { "s" }
+        ));
     }
     if touched == 0 {
         println!("\n{}", ui::dim("no per-project integration found"));
@@ -168,7 +183,7 @@ pub(super) fn remove_all_agents(home: &Path) -> Result<usize> {
     // global agent integration
     println!("\n{}", ui::heading("global"));
     if cmd_agents(home, "uninstall", &[], false, true)? {
-        removed += 1;
+        removed.push("home configs".into());
     }
     Ok(removed)
 }
@@ -179,13 +194,16 @@ pub(super) fn remove_binary() -> Result<usize> {
         // unlinking a running binary is fine on unix
         Some(dst) if Path::new(&dst).exists() => {
             if std::fs::remove_file(&dst).is_ok() {
-                println!("{}", ui::ok(&format!("removed  {dst}")));
+                println!(
+                    "{}",
+                    ui::ok(&format!("removed  {}", short_path(Path::new(&dst))))
+                );
                 // the resolve helper is installed beside the binary — take it
                 // along, or uninstall leaks it (uninstall.sh already does this)
                 if let Some(dir) = Path::new(&dst).parent() {
                     let helper = dir.join(HELPER_EXE);
                     if helper.exists() && std::fs::remove_file(&helper).is_ok() {
-                        println!("{}", ui::ok(&format!("removed  {}", helper.display())));
+                        println!("{}", ui::ok(&format!("removed  {}", short_path(&helper))));
                     }
                 }
                 Ok(1)

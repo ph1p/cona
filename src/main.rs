@@ -413,7 +413,10 @@ fn run() -> Result<()> {
             dashboard::run(&root)?;
         }
         Cmd::Maint(Maint::Doctor) | Cmd::DoctorFlat => {
-            install::cmd_doctor(&root, cli.json)?;
+            // Non-zero on issues so `cona doctor` works as a CI/script check.
+            if install::cmd_doctor(&root, cli.json)? > 0 {
+                std::process::exit(1);
+            }
         }
         Cmd::Project(Project::Tidy(a)) | Cmd::TidyFlat(a) => {
             let TidyArgs { orphans } = a;
@@ -778,7 +781,9 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
         (detected(do_project, false), detected(do_global, true))
     };
 
-    let (mut configured, mut removed) = (0usize, 0usize);
+    // Distinct agents, not agent×scope: Claude in project AND home is one
+    // agent configured, not two.
+    let (mut configured, mut removed) = (Vec::new(), Vec::new());
     for (global, plan, label) in [
         (false, &proj_plan, "project"),
         (true, &glob_plan, "home configs"),
@@ -791,15 +796,20 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
         // removing before installing keeps the printed order readable.
         if !plan.remove.is_empty() {
             install::cmd_agents(root, "uninstall", &plan.remove, false, global)?;
-            removed += plan.remove.len();
+            removed.extend(plan.remove.iter().copied());
         }
         if !plan.add.is_empty() {
             install::cmd_agents(root, "install", &plan.add, false, global)?;
-            configured += plan.add.len();
+            configured.extend(plan.add.iter().copied());
         }
     }
 
     // --- 4. summary --------------------------------------------------------
+    for v in [&mut configured, &mut removed] {
+        v.sort_by_key(|a| a.slug());
+        v.dedup();
+    }
+    let (configured, removed) = (configured.len(), removed.len());
     let mut summary = format!(
         "setup complete — {configured} agent{} configured",
         if configured == 1 { "" } else { "s" }

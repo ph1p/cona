@@ -178,6 +178,9 @@ pub(super) struct Ctx<'a> {
     claude_plugin: bool,
 }
 
+/// Set once the restart note has been printed this process.
+static RESTART_NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// `cona agents install|uninstall [names…] [--all] [--global]`
 /// Injects/removes cona into the selected agent configs. With no names and
 /// no `--all`, installs into every detected agent (Claude Code + AGENTS.md are
@@ -293,15 +296,19 @@ pub fn cmd_agents_q(
                 &settings,
             );
         } else {
+            // "created" vs "updated" is about OUR hooks, not the file: a
+            // settings.json that held only foreign config still gets cona's
+            // hooks created, not updated.
+            let (had_index, had_read) = crate::install::doctor::settings_cona_hooks(&settings);
             match claude_hooks(&settings, install) {
                 Ok(changed) => {
                     if install {
-                        mark(
-                            &mut done,
-                            "claude hooks",
-                            if changed { "updated" } else { "unchanged" },
-                            &settings,
-                        );
+                        let verb = match (changed, had_index || had_read) {
+                            (false, _) => "unchanged",
+                            (true, false) => "created",
+                            (true, true) => "updated",
+                        };
+                        mark(&mut done, "claude hooks", verb, &settings);
                     } else if changed {
                         // A settings.json that held only our hooks is deleted by
                         // `claude_hooks`, which can leave `.claude/` empty in a
@@ -394,7 +401,18 @@ pub fn cmd_agents_q(
     // per-label tally. A big ~/.claude/agents tree yields 100+ "unchanged"
     // subagent lines, which scroll the real result off the screen — the user
     // needs to see what this run did, not an inventory of what it touched.
-    let (moved, same): (Vec<_>, Vec<_>) = done.iter().partition(|d| d.changed());
+    // Two agents can share one config file (several harnesses read the
+    // project `.mcp.json`): the first write creates it, the second finds it
+    // current. That no-op says nothing the "created" line didn't — drop it.
+    let (moved, same): (Vec<_>, Vec<_>) = done
+        .iter()
+        .filter(|d| {
+            d.changed()
+                || !done
+                    .iter()
+                    .any(|o| o.changed() && o.label == d.label && o.path == d.path)
+        })
+        .partition(|d| d.changed());
     for d in &moved {
         println!("{}", d.render());
     }
@@ -441,7 +459,9 @@ pub fn cmd_agents_q(
     let claude_moved = done
         .iter()
         .any(|d| d.changed() && d.label.starts_with("claude"));
-    if install && claude_moved {
+    // Once per process: `setup` installs project AND home scope back to back,
+    // and one restart picks up both.
+    if install && claude_moved && !RESTART_NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         // Claude Code snapshots hooks + skills at startup for security, so a
         // running session won't see fresh changes until it reloads them.
         println!(

@@ -111,7 +111,7 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
 
     println!(
         "\n{}",
-        ui::summary(warnings, "thing", "need attention", "install complete")
+        ui::summary(warnings, "warning", "— see above", "install complete")
     );
     print_next_steps();
     Ok(())

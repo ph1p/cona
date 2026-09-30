@@ -435,12 +435,24 @@ pub(crate) fn short_path(path: &Path) -> String {
         let base_real = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
         strip(&real, &base_real).or_else(|| strip(path, &base_real))
     };
+    // The base itself (a project heading for the cwd, `~` for home) shortens
+    // too — `rel_to` alone refuses an empty remainder.
+    let is = |base: &Path| {
+        path == base
+            || matches!((path.canonicalize(), base.canonicalize()), (Ok(a), Ok(b)) if a == b)
+    };
     if let Ok(cwd) = std::env::current_dir() {
+        if is(&cwd) {
+            return ".".into();
+        }
         if let Some(rel) = rel_to(&cwd) {
             return format!("./{rel}");
         }
     }
     if let Some(home) = dirs::home_dir() {
+        if is(&home) {
+            return "~".into();
+        }
         if let Some(rel) = rel_to(&home) {
             return format!("~/{rel}");
         }
@@ -470,9 +482,9 @@ mod tests {
             "~/some/where.md",
             "a path under $HOME should render as ~/…"
         );
-        // The home dir itself has an empty tail — nothing to shorten to, so it
-        // must stay absolute rather than become a bare "~/".
-        assert_eq!(short_path(&home), home.display().to_string());
+        // The anchors themselves render bare (`~`, `.`), never as "~/" / "./".
+        assert_eq!(short_path(&home), "~");
+        assert_eq!(short_path(&std::env::current_dir().unwrap()), ".");
         // A path under neither anchor stays fully qualified: better a long line
         // than a relative path pointing somewhere else.
         let foreign = Path::new("/definitely/not/here/x.md");

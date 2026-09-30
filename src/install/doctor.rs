@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 
 /// Which cona hooks are present in a settings.json: (index hook, read-guard hook).
-fn settings_cona_hooks(path: &Path) -> (bool, bool) {
+pub(super) fn settings_cona_hooks(path: &Path) -> (bool, bool) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return (false, false);
     };
@@ -150,10 +150,18 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         let skill_path = dir.join("skills/cona/SKILL.md");
         let (index_hook, read_hook) = settings_cona_hooks(&dir.join("settings.json"));
         let skill = skill_path.exists();
-        issues += [index_hook, read_hook, skill]
+        // One issue per RENDERED warning line: with the plugin every duplicate
+        // collapses into one line per scope, without it each missing piece
+        // gets its own line.
+        let flagged = [index_hook, read_hook, skill]
             .iter()
             .filter(|b| **b == claude_plugin)
             .count();
+        issues += if claude_plugin {
+            flagged.min(1)
+        } else {
+            flagged
+        };
         let config_ver = if skill {
             let v = db::meta_get(&super::upgrade::config_ver_key(&root))
                 .ok()
@@ -227,6 +235,9 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
 
     let g = db::open_global_db()?;
     let storage = db::storage_summary(&g, project_root)?;
+    if storage.over_limit {
+        issues += 1;
+    }
     let helper = resolve::helper_status();
 
     Ok(DoctorReport {
@@ -326,9 +337,9 @@ fn render_text(r: &DoctorReport) {
         Some(p) => println!("  {}", ui::ok(&format!("on PATH: {}", p.display()))),
         None => println!(
             "  {}",
-            ui::warn(
+            ui::item(&ui::dim(
                 "`cona` is not on PATH (agents use an absolute path, so this is only cosmetic)"
-            )
+            ))
         ),
     }
 
@@ -538,7 +549,9 @@ fn render_text(r: &DoctorReport) {
         None => {
             println!(
                 "  {}",
-                ui::warn("not installed — cona uses its name-based + arity heuristics only")
+                ui::item(&ui::dim(
+                    "not installed — cona uses its name-based + arity heuristics only"
+                ))
             );
             println!(
                 "  ships in the release tarball beside cona; `cargo install` users get it\n  \
@@ -549,31 +562,30 @@ fn render_text(r: &DoctorReport) {
 
     println!(
         "\n{}",
-        ui::summary(
-            r.issues,
-            "thing",
-            "need attention — see above",
-            "all checks passed"
-        )
+        ui::summary(r.issues, "issue", "found — see above", "all checks passed")
     );
-    println!(
-        "{}",
-        ui::dim(
-            "if Claude Code isn't using cona: it snapshots hooks + skills at startup, so \
-             RESTART Claude Code (or run /hooks) after installing — verify with /hooks \
-             (should list cona index + hook PreToolUse) and by asking it to use the cona skill"
-        )
-    );
+    // Troubleshooting hint only when there is something to troubleshoot.
+    if r.issues > 0 {
+        println!(
+            "{}",
+            ui::dim(
+                "if Claude Code isn't using cona: it snapshots hooks + skills at startup, so \
+                 RESTART Claude Code (or run /hooks) after installing — verify with /hooks \
+                 (should list cona index + hook PreToolUse) and by asking it to use the cona skill"
+            )
+        );
+    }
 }
 
 /// `cona doctor` — report install + agent-integration health so the user can
-/// see exactly why Claude Code may or may not be picking cona up.
-pub fn cmd_doctor(project_root: &Path, json: bool) -> Result<()> {
+/// see exactly why Claude Code may or may not be picking cona up. Returns the
+/// issue count so the caller can exit non-zero (scriptable: `cona doctor || …`).
+pub fn cmd_doctor(project_root: &Path, json: bool) -> Result<usize> {
     let report = gather(project_root)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&render_json(&report))?);
     } else {
         render_text(&report);
     }
-    Ok(())
+    Ok(report.issues)
 }
