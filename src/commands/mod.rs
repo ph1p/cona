@@ -418,7 +418,15 @@ pub(crate) fn locate_fresh(
     symbol: &str,
     kind: Option<&str>,
 ) -> Result<Located> {
-    let located = locate_symbol_kind(conn, symbol, kind)?;
+    let located = match locate_symbol_kind(conn, symbol, kind) {
+        Ok(l) => l,
+        // a deleted file can still hold a candidate until the next full
+        // index — drop those and resolve again before calling it ambiguous
+        Err(_) if prune_vanished(root, conn, symbol, kind) => {
+            locate_symbol_kind(conn, symbol, kind)?
+        }
+        Err(e) => return Err(e),
+    };
     if indexer::is_stale(root, conn, &located.0) {
         indexer::reindex_file(root, conn, &located.0)?;
         return locate_symbol_kind(conn, symbol, kind);
@@ -441,6 +449,34 @@ pub(crate) fn locate_for_write(root: &Path, conn: &Connection, symbol: &str) -> 
 /// --all`) render them all, so invariant 4 ("never silently picks") holds:
 /// nothing is chosen on the user's behalf, the ambiguity is simply answered
 /// in full instead of costing a round-trip.
+/// Forget indexed files that no longer exist on disk among `symbol`'s
+/// candidates. True when anything was dropped (the caller re-resolves).
+/// One stat per candidate — usually one.
+pub(crate) fn prune_vanished(
+    root: &Path,
+    conn: &Connection,
+    symbol: &str,
+    kind: Option<&str>,
+) -> bool {
+    let Ok(cands) = locate_candidates(conn, symbol, kind) else {
+        return false;
+    };
+    let mut gone: Vec<&str> = cands
+        .iter()
+        .map(|(p, ..)| p.as_str())
+        .filter(|p| !root.join(p).exists())
+        .collect();
+    gone.dedup();
+    for p in &gone {
+        let _ = conn.execute(
+            "DELETE FROM symbols WHERE file_id IN (SELECT id FROM files WHERE path = ?1)",
+            [p],
+        );
+        let _ = conn.execute("DELETE FROM files WHERE path = ?1", [p]);
+    }
+    !gone.is_empty()
+}
+
 pub(crate) fn locate_all(
     conn: &Connection,
     symbol: &str,

@@ -34,6 +34,8 @@ pub fn cmd_show(
     // pools (or big bodies) still raise `locate_symbol`'s guided error via
     // `show_one` — printing them all would be the token sink this tool exists
     // to avoid. `locate_all` only reports >1 when locate erred on ambiguity.
+    // candidates from deleted files must not fake an ambiguity (one stat each)
+    crate::commands::prune_vanished(root, conn, symbol, kind);
     let cands = if all {
         Some(crate::commands::locate_all(conn, symbol, kind)?)
     } else {
