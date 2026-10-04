@@ -22,7 +22,10 @@ pub(crate) fn try_pretooluse() -> Result<()> {
             let Some(file_path) = input["file_path"].as_str() else {
                 return Ok(());
             };
-            let partial = !input["offset"].is_null() || !input["limit"].is_null();
+            // A limit past the full-read threshold is no narrowing at all.
+            let limit = input["limit"].as_i64();
+            let partial = (!input["offset"].is_null() || limit.is_some())
+                && limit.is_none_or(|n| n <= max_lines());
             try_read(&v, file_path, partial, None)
         }
         Some("Grep") => {
@@ -72,6 +75,8 @@ fn try_shell(v: &serde_json::Value, cmd: &str) -> Result<()> {
         // A slice of a named file feeds the cross-call accounting; a pathless
         // metadata probe (`wc -l`, `ls`) read no content and is ignored.
         ShellIntent::PartialRead { path: Some(p) } => try_partial_read(v, &p),
+        ShellIntent::Slice { path, span } if span > max_lines() => try_read(v, &path, false, None),
+        ShellIntent::Slice { path, .. } => try_partial_read(v, &path),
         ShellIntent::PartialRead { path: None } | ShellIntent::Other => Ok(()),
     }
 }
@@ -469,22 +474,10 @@ fn try_read(
                 );
                 return allow_with_reason(&root, "hook:read-advise", &rel, &advisory(&lead, &rel));
             }
-            // Only promise a chunked escape we can honour: a range is partial
-            // when it ends BEFORE the last line, so name that bound concretely
-            // when we measured it (an unmeasured `lines` is a floor, not a
-            // count). State the rule but never pre-compute the split — a
-            // copy-paste recipe turns the redirect into a two-call full read
-            // for agents that never needed every line.
-            let chunk_hint = if measured {
-                format!(
-                    "read it in bounded ranges (Read offset/limit, or `sed -n` \
-                     ranges) that stop short of line {lines}"
-                )
-            } else {
-                "read it in bounded ranges (Read offset/limit, or `sed -n` \
-                 ranges that stop short of the end)"
-                    .to_string()
-            };
+            // Retrying is the one escape: slicing the file into wide ranges
+            // costs the same tokens in more calls, and is judged as a full
+            // read anyway (`ShellIntent::Slice`).
+            let chunk_hint = "repeat this exact read and it goes through";
             // Name real symbols from this very file when we can, so the redirect
             // hands over a runnable command instead of a template to fill in
             // (the grep intercept has always interpolated its real pattern).

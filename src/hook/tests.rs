@@ -590,12 +590,14 @@ fn classifies_bounded_sed_as_a_read_with_a_bound() {
 
 #[test]
 fn narrowed_shell_reads_are_partial() {
-    for cmd in [
-        "sed -n '40,80p' a.rs",
-        "sed -n '5p' a.rs",
-        "head -n 50 a.rs",
-        "tail -n 50 a.rs",
-    ] {
+    assert_eq!(
+        classify_shell("sed -n '40,80p' a.rs"),
+        ShellIntent::Slice {
+            path: "a.rs".into(),
+            span: 41
+        }
+    );
+    for cmd in ["sed -n '5p' a.rs", "head -n 50 a.rs", "tail -n 50 a.rs"] {
         assert_eq!(
             classify_shell(cmd),
             ShellIntent::PartialRead {
@@ -633,6 +635,29 @@ fn partial_reads_carry_their_file_only_when_unambiguous() {
         "wc -l a.rs && sed -n '40,80p' a.rs",
         "sed -n '40,80p' a.rs && wc -l a.rs",
     ] {
+        assert_eq!(
+            classify_shell(cmd),
+            ShellIntent::Slice {
+                path: "a.rs".into(),
+                span: 41
+            },
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn wide_sed_slices_carry_their_span() {
+    // a full read split to dodge the threshold keeps its width for intercept
+    assert_eq!(
+        classify_shell("sed -n '20,420p' a.rs"),
+        ShellIntent::Slice {
+            path: "a.rs".into(),
+            span: 401
+        }
+    );
+    // an open-ended or reversed range stays a plain partial read
+    for cmd in ["sed -n '20,$p' a.rs", "sed -n '80,40p' a.rs"] {
         assert_eq!(
             classify_shell(cmd),
             ShellIntent::PartialRead {

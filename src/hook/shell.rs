@@ -31,6 +31,11 @@ pub enum ShellIntent {
     /// path: they read no content, and counting them would nag an agent for
     /// commands that cost it nothing.
     PartialRead { path: Option<String> },
+    /// `sed -n 'A,Bp' f` with A > 1: a slice of `span` lines. Narrow slices are
+    /// partial reads; one wider than the full-read threshold is a full read
+    /// split to dodge it, and is judged as one (the threshold lives in config,
+    /// so intercept decides).
+    Slice { path: String, span: i64 },
     /// A broad content search for `pattern` under an optional path. `soft`
     /// marks a search whose output is already bounded (`-l`, `-c`, context
     /// flags) — still broad, but the redirect softens to an advisory.
@@ -270,6 +275,10 @@ fn rebase(intent: ShellIntent, dir: Option<&str>) -> ShellIntent {
         ShellIntent::PartialRead { path: Some(p) } => ShellIntent::PartialRead {
             path: Some(join(&p)),
         },
+        ShellIntent::Slice { path, span } => ShellIntent::Slice {
+            path: join(&path),
+            span,
+        },
         ShellIntent::Grep {
             pattern,
             path,
@@ -349,7 +358,7 @@ fn rank(i: &ShellIntent) -> u8 {
         // read that names a file outranks it, so `wc -l f && sed -n '40,80p' f`
         // is judged on the slice rather than on whichever segment came first.
         ShellIntent::PartialRead { path: None } => 1,
-        ShellIntent::PartialRead { path: Some(_) } => 2,
+        ShellIntent::PartialRead { path: Some(_) } | ShellIntent::Slice { .. } => 2,
         ShellIntent::Grep { .. } => 3,
         ShellIntent::Read { .. } => 4,
     }
@@ -445,9 +454,16 @@ fn classify_sed(args: &[String]) -> ShellIntent {
         None => return narrowed,
     };
     // Only a read that starts at line 1 can be a full read; `sed -n '40,80p'`
-    // is the agent already narrowing.
+    // is the agent already narrowing — unless the slice is wide enough to be
+    // a full read in pieces (`sed -n '20,420p'`), which intercept judges.
     if start.trim() != "1" {
-        return narrowed;
+        return match (start.trim().parse::<i64>(), end.trim().parse::<i64>()) {
+            (Ok(a), Ok(b)) if b >= a => ShellIntent::Slice {
+                path: (*file).clone(),
+                span: b - a + 1,
+            },
+            _ => narrowed,
+        };
     }
     match end.trim() {
         "$" => ShellIntent::Read {
