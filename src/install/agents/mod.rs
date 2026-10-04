@@ -36,9 +36,12 @@ is not writable, cona falls back to temporary storage; set `CONA_DATA_DIR` when
 you need a persistent index. Use `--read-only` to inspect an existing index
 without writing code, indexes, or usage stats.
 
-Too many hits? `--path <dir>` scopes `find`/`refs`/`grep`/`tree` to a subtree.
+Too many hits? `--path <dir|file>` scopes `find`/`refs`/`grep`/`tree`/`show`.
 Ambiguous name? `cona show <Sym> --all` prints every definition instead of
-erroring. `cona grep` matches literally; add `--regex` for a real regex.
+erroring. `cona grep` matches literally (`a\|b` = either); `--regex` for a
+real regex; `-C 3` prints context lines, so `cona grep X --path f -C 3`
+replaces `grep -n X f` + `sed -n` range reads. Batch: `show A B`,
+`outline f1 f2`, `find A B`. Go methods are `Type.Method`.
 
 Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
 `insert` `rename` `note` `check` — is listed in `cona --help`, with details per
