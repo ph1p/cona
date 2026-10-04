@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.32](https://github.com/ph1p/cona/compare/v0.0.31...v0.0.32) - 2026-10-04
+
+### Added
+
+- *(guidance)* grep -C, `\|`, show --path and batching
+- *(lang)* Go receiver methods and file-scope constants
+- *(nav)* show --path and multi-target outline/find
+- *(grep)* BRE alternation and context lines
+
+### Fixed
+
+- *(hook)* judge wide sed slices and Read limits as full reads
+- *(show)* drop candidates from deleted files before resolving
+
 ## [0.0.31](https://github.com/ph1p/cona/compare/v0.0.30...v0.0.31) - 2026-09-30
 
 ### Other
