@@ -43,6 +43,8 @@ pub(crate) fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, boo
             "method_declaration" => Some(("method", false, "name")),
             "type_spec" => Some(("type", false, "name")),
             "const_spec" => Some(("const", false, "name")),
+            // package-level only — walk() drops the ones inside function bodies
+            "var_spec" => Some(("var", false, "name")),
             _ => None,
         },
         "java" => match node_kind {

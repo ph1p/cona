@@ -119,8 +119,11 @@ pub fn cmd_outline(
     }
     let mut out = String::new();
     let mut current = String::new();
+    // Symbols whose span is still open — the lexical ancestors of the next row.
+    let mut open: Vec<(String, i64)> = Vec::new();
     for (path, kind, name, s, e, sig, _) in rows {
         if path != current {
+            open.clear();
             if stale.contains(&path) {
                 out.push_str(&format!("{path}  (stale — file changed since indexing)\n"));
             } else {
@@ -128,14 +131,33 @@ pub fn cmd_outline(
             }
             current = path;
         }
-        let depth = name.matches('.').count();
+        while open.last().is_some_and(|(_, end)| *end < s) {
+            open.pop();
+        }
+        // A qualified parent that is not the enclosing span (a Go method
+        // declared beside, not inside, its receiver type) prints its full name
+        // at its lexical depth — the indent would otherwise claim the
+        // preceding symbol owns it.
+        let nested = name
+            .rsplit_once('.')
+            .is_none_or(|(p, _)| open.last().is_some_and(|(q, _)| q == p));
+        let depth = if nested {
+            name.matches('.').count()
+        } else {
+            open.len()
+        };
         let indent = "  ".repeat(depth + 1);
+        open.push((name.clone(), e));
         // The indent already encodes the ancestor chain, so repeating it in every
         // name is redundant — and on deeply nested trees (XML/POM: 10+ levels)
         // that redundancy is quadratic, which made `outline pom.xml` cost more
         // than reading the file. Print the leaf; `--json` keeps the full
         // qualified name, since that is what callers address symbols by.
-        let leaf = name.rsplit('.').next().unwrap_or(&name);
+        let leaf = if nested {
+            name.rsplit('.').next().unwrap_or(&name)
+        } else {
+            &name
+        };
         if show_sig {
             out.push_str(&format!("{indent}{kind} {leaf} :{s}-{e}  {sig}\n"));
         } else {

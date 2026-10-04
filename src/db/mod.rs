@@ -210,8 +210,22 @@ pub fn open_project_db(root: &Path) -> Result<Connection> {
          );
          CREATE INDEX IF NOT EXISTS idx_notes_symbol ON notes(symbol);",
     )?;
+    // Index rows are only re-extracted when a file's mtime/size moves, so an
+    // extractor change would never reach an existing index. An older stamp
+    // marks every file stale; the next refresh reparses them all once.
+    let ver: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if ver < EXTRACT_VERSION {
+        conn.execute_batch(&format!(
+            "UPDATE files SET mtime = -1; PRAGMA user_version = {EXTRACT_VERSION};"
+        ))?;
+    }
     Ok(conn)
 }
+
+/// Bump whenever symbol extraction changes what an unchanged file yields
+/// (new kinds, new parents) — see `open_project_db`.
+/// 1: Go methods qualified by receiver type; JS/TS/Go top-level constants.
+const EXTRACT_VERSION: i64 = 1;
 
 /// Open an already-built project index without creating files or running
 /// migrations. Prefer durable storage, but also look in the automatic

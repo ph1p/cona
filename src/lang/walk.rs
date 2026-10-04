@@ -29,6 +29,70 @@ fn fn_valued_declarator<'a>(decl: Node<'a>, src: &str) -> Option<(String, Node<'
     (!name.is_empty()).then_some((name, value))
 }
 
+/// Go: the type a method's receiver names — `func (f *Food) Per()` → `Food`,
+/// generics and pointers peeled — so the method is addressable as `Food.Per`,
+/// the way Go code and agents spell it.
+fn go_receiver_type(method: Node, src: &str) -> Option<String> {
+    let param = method
+        .child_by_field_name("receiver")?
+        .named_children(&mut method.walk())
+        .find(|c| c.kind() == "parameter_declaration")?;
+    let mut stack = vec![param.child_by_field_name("type")?];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "type_identifier" {
+            return n.utf8_text(src.as_bytes()).ok().map(str::to_string);
+        }
+        // generic_type's own name comes first; its type arguments after
+        let mut c = n.walk();
+        let kids: Vec<Node> = n.named_children(&mut c).collect();
+        stack.extend(kids.into_iter().rev());
+    }
+    None
+}
+
+/// A declaration that sits at file scope: only declaration wrappers (and an
+/// `export`) between it and the root — never a function body or block.
+fn at_file_scope(node: Node) -> bool {
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        match n.kind() {
+            "source_file" | "program" => return true,
+            "var_declaration"
+            | "var_spec_list"
+            | "const_declaration"
+            | "export_statement"
+            | "lexical_declaration" => cur = n.parent(),
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// JS/TS: the names of a file-scope `const X = <non-function>` — config
+/// tables, zod schemas, object-literal clients. Agents ask for them by name
+/// (`show MEASURE_CHIPS`) as often as for functions.
+fn top_level_consts<'a>(decl: Node<'a>, src: &str) -> Vec<(String, Node<'a>)> {
+    if decl.kind() != "lexical_declaration"
+        || !decl
+            .utf8_text(src.as_bytes())
+            .is_ok_and(|t| t.starts_with("const"))
+        || !at_file_scope(decl)
+    {
+        return Vec::new();
+    }
+    let mut c = decl.walk();
+    decl.named_children(&mut c)
+        .filter(|d| d.kind() == "variable_declarator" && d.child_by_field_name("value").is_some())
+        .filter_map(|d| {
+            let n = d.child_by_field_name("name")?;
+            (n.kind() == "identifier")
+                .then(|| n.utf8_text(src.as_bytes()).ok())
+                .flatten()
+                .map(|t| (t.to_string(), d))
+        })
+        .collect()
+}
+
 pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<Sym>) {
     use std::rc::Rc;
     // Explicit worklist, NOT recursion: recursion depth would equal AST depth,
@@ -125,7 +189,28 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
                     stack[base..].reverse();
                     continue;
                 }
+                let consts = top_level_consts(child, src);
+                if !consts.is_empty() {
+                    for (name, decl) in consts {
+                        out.push(Sym {
+                            name: name.clone(),
+                            qualified: name.clone(),
+                            kind: "const",
+                            parent: None,
+                            start_line: decl.start_position().row + 1,
+                            end_line: decl.end_position().row + 1,
+                            signature: first_line_sig(child, src),
+                        });
+                        // object-literal methods become `client.send`
+                        push_children(&mut stack, decl, Some(Rc::from(name)));
+                    }
+                    continue;
+                }
             }
+        }
+        if lang == "go" && child.kind() == "var_spec" && !at_file_scope(child) {
+            push_children(&mut stack, child, parent);
+            continue;
         }
         if let Some((label, _is_container, name_field)) = classify(lang, child.kind()) {
             let label = if lang == "swift" && child.kind() == "class_declaration" {
@@ -137,8 +222,14 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
                 push_children(&mut stack, child, parent);
                 continue;
             }
+            let owner = match &parent {
+                None if lang == "go" && child.kind() == "method_declaration" => {
+                    go_receiver_type(child, src).map(Rc::from)
+                }
+                p => p.clone(),
+            };
             if let Some(name) = node_name(child, src, name_field, lang) {
-                let qualified = match parent.as_deref() {
+                let qualified = match owner.as_deref() {
                     Some(p) => format!("{}.{}", p, name),
                     None => name.clone(),
                 };
@@ -146,7 +237,7 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
                     name: name.clone(),
                     qualified: qualified.clone(),
                     kind: label,
-                    parent: parent.as_deref().map(|s| s.to_string()),
+                    parent: owner.as_deref().map(|s| s.to_string()),
                     start_line: child.start_position().row + 1,
                     end_line: child.end_position().row + 1,
                     signature: first_line_sig(child, src),

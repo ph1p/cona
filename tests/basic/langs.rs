@@ -47,7 +47,8 @@ fn go_functions_methods_types() {
     let src = "package main\n\ntype Point struct{ X int }\n\nfunc (p Point) Dist() int { return p.X }\n\nfunc main() { p := Point{1}; p.Dist() }\n";
     let quals = quals("go", src);
     assert!(quals.iter().any(|q| q == "Point"), "{quals:?}");
-    assert!(quals.iter().any(|q| q == "Dist"), "{quals:?}");
+    // methods are qualified by their receiver type, as Go code spells them
+    assert!(quals.iter().any(|q| q == "Point.Dist"), "{quals:?}");
     assert!(quals.iter().any(|q| q == "main"), "{quals:?}");
     assert_eq!(lang::detect_lang("x/y.go"), Some("go"));
 }
@@ -217,8 +218,8 @@ fn ts_function_valued_consts_are_indexed() {
     assert_eq!(kind_of("C.onClick"), Some("method"), "{syms:?}");
     // nested arrow inside an arrow body is qualified under its parent
     assert_eq!(kind_of("nested.inner"), Some("fn"), "{syms:?}");
-    // non-function bindings and destructuring stay unindexed
-    assert!(syms.iter().all(|s| s.name != "notAFn"), "{syms:?}");
+    // a file-scope non-function const is a `const`; destructuring stays out
+    assert_eq!(kind_of("notAFn"), Some("const"), "{syms:?}");
     assert!(syms.iter().all(|s| s.name != "destructured"), "{syms:?}");
 }
 
@@ -599,4 +600,27 @@ fn html_elements_named_by_attribute_or_directive() {
     // an unidentified, non-structural div is noise and stays out
     assert!(!quals.iter().any(|q| q.ends_with("div")), "{quals:?}");
     assert_eq!(lang::detect_lang("templates/home.html"), Some("html"));
+}
+
+#[test]
+fn file_scope_consts_and_go_vars_only() {
+    let ts = "export const SCHEMA = z.object({ a: 1 })\n\
+              export const client = {\n  send() { return 1 }\n}\n\
+              function f() {\n  const local = 1\n}\n";
+    let syms = lang::extract_symbols("typescript", ts).unwrap();
+    let kind_of = |q: &str| syms.iter().find(|s| s.qualified == q).map(|s| s.kind);
+    assert_eq!(kind_of("SCHEMA"), Some("const"), "{syms:?}");
+    // object-literal methods hang off their const
+    assert!(
+        syms.iter().any(|s| s.qualified == "client.send"),
+        "{syms:?}"
+    );
+    // locals stay out
+    assert!(syms.iter().all(|s| s.name != "local"), "{syms:?}");
+
+    let go = "package a\n\nvar Chips = []int{1}\n\nfunc (s *Store[T]) Get() {\n  var x = 1\n  _ = x\n}\n";
+    let quals = quals("go", go);
+    assert!(quals.iter().any(|q| q == "Chips"), "{quals:?}");
+    assert!(quals.iter().any(|q| q == "Store.Get"), "{quals:?}");
+    assert!(quals.iter().all(|q| !q.ends_with('x')), "{quals:?}");
 }
