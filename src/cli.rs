@@ -110,7 +110,9 @@ pub struct TreeArgs {
 
 #[derive(clap::Args)]
 pub struct OutlineArgs {
-    pub file: String,
+    /// One or more files — each outlined in turn
+    #[arg(required = true)]
+    pub files: Vec<String>,
     /// Show full signatures (default: kind + name + line range only)
     #[arg(long)]
     pub sig: bool,
@@ -118,7 +120,9 @@ pub struct OutlineArgs {
 
 #[derive(clap::Args)]
 pub struct FindArgs {
-    pub name: String,
+    /// One or more names — each searched in turn
+    #[arg(required = true)]
+    pub names: Vec<String>,
     /// Filter by kind (fn, struct, class, method, ...)
     #[arg(long)]
     pub kind: Option<String>,
@@ -147,6 +151,9 @@ pub struct ShowArgs {
     /// Print only the signature line(s), not the body — the leanest peek at a symbol
     #[arg(long)]
     pub sig: bool,
+    /// Only definitions in files under this path (file or directory) — same as `path:Name`
+    #[arg(long)]
+    pub path: Option<String>,
 }
 
 #[derive(clap::Args)]

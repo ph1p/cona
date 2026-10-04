@@ -478,8 +478,25 @@ fn locate_candidates(conn: &Connection, symbol: &str, kind: Option<&str>) -> Res
 /// about what a locator looks like.
 pub(crate) fn split_locator(arg: &str) -> Option<(&str, &str)> {
     match arg.rsplit_once(':') {
-        Some((f, n)) if f.contains('.') && !n.is_empty() && !n.contains('/') => Some((f, n)),
+        Some((f, n))
+            if (f.contains('.') || f.contains('/')) && !n.is_empty() && !n.contains('/') =>
+        {
+            Some((f, n))
+        }
         _ => None,
+    }
+}
+
+/// `show --path P Name` → the `P:Name` locator, so a scope reaches the one
+/// resolver instead of a parallel filter. A symbol that already carries its
+/// own locator keeps it — the narrower address wins.
+pub fn scoped_locator(path: Option<&str>, symbol: &str) -> String {
+    match path
+        .map(|p| p.trim_end_matches('/'))
+        .filter(|p| !p.is_empty())
+    {
+        Some(p) if split_locator(symbol).is_none() => format!("{p}:{symbol}"),
+        _ => symbol.to_string(),
     }
 }
 
@@ -516,7 +533,8 @@ fn locate_rows(
         if rows.iter().any(|(p, ..)| p == f) {
             rows.retain(|(p, ..)| p == f);
         } else {
-            rows.retain(|(p, ..)| p.ends_with(&format!("/{f}")));
+            // suffix (`views/Plan.tsx:Name`) or directory scope (`web/src:Name`)
+            rows.retain(|(p, ..)| p.ends_with(&format!("/{f}")) || path_matches_dir(p, f, true));
         }
     }
     if rows.is_empty() {
@@ -566,6 +584,16 @@ fn locate_symbol_kind(conn: &Connection, symbol: &str, kind: Option<&str>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_locator_prefixes_unless_already_located() {
+        assert_eq!(scoped_locator(Some("web/src/"), "day"), "web/src:day");
+        assert_eq!(scoped_locator(Some("a.ts"), "x.ts:day"), "x.ts:day");
+        assert_eq!(scoped_locator(None, "day"), "day");
+        // a directory locator is a locator too
+        assert_eq!(split_locator("web/src:day"), Some(("web/src", "day")));
+        assert_eq!(split_locator("Parent.Name"), None);
+    }
 
     #[test]
     fn path_filter_matches_file_dir_and_prefix() {

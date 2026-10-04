@@ -127,28 +127,32 @@ fn run() -> Result<()> {
             })?;
         }
         Cmd::Nav(Nav::Outline(a)) | Cmd::Outline(a) => {
-            let OutlineArgs { file, sig } = a;
-            queried(&root, t0, "outline", file, |conn| {
-                cmd_outline(&root, conn, file, *sig, cli.json)
+            let OutlineArgs { files, sig } = a;
+            queried(&root, t0, "outline", &files.join(" "), |conn| {
+                each(files, cli.json, |f| {
+                    cmd_outline(&root, conn, f, *sig, cli.json)
+                })
             })?;
         }
         Cmd::Nav(Nav::Find(a)) | Cmd::Find(a) => {
             let FindArgs {
-                name,
+                names,
                 kind,
                 limit,
                 path,
             } = a;
-            queried(&root, t0, "find", name, |conn| {
-                cmd_find(
-                    &root,
-                    conn,
-                    name,
-                    kind.as_deref(),
-                    *limit,
-                    path.as_deref(),
-                    cli.json,
-                )
+            queried(&root, t0, "find", &names.join(" "), |conn| {
+                each(names, cli.json, |name| {
+                    cmd_find(
+                        &root,
+                        conn,
+                        name,
+                        kind.as_deref(),
+                        *limit,
+                        path.as_deref(),
+                        cli.json,
+                    )
+                })
             })?;
         }
         Cmd::Nav(Nav::Show(a)) | Cmd::Show(a) => {
@@ -158,16 +162,18 @@ fn run() -> Result<()> {
                 context,
                 kind,
                 sig,
+                path,
             } = a;
             let conn = open_indexed(&root)?;
             let mut out = String::new();
             let mut baseline = 0i64;
             let mut resolved: Vec<&str> = Vec::new();
             for (i, symbol) in symbols.iter().enumerate() {
+                let scoped = scoped_locator(path.as_deref(), symbol);
                 match cmd_show(
                     &root,
                     &conn,
-                    symbol,
+                    &scoped,
                     ShowOpts {
                         context: *context,
                         kind: kind.as_deref(),
@@ -566,6 +572,39 @@ fn run() -> Result<()> {
 /// stats detail (symbol/file) — the caller computes it up front, and a failed
 /// body logs nothing. Mutations reuse it with a baseline of 0 (nothing was
 /// "read instead").
+/// Run a one-target query over several targets — agents batch them
+/// (`outline a.ts b.ts`) and a hard arg error costs a whole retry. One target
+/// keeps its exact output; several are concatenated (text) or wrapped in a
+/// JSON array, and one bad target is flagged without aborting the rest.
+fn each(
+    targets: &[String],
+    json: bool,
+    mut one: impl FnMut(&str) -> Result<(String, i64)>,
+) -> Result<(String, i64)> {
+    if let [t] = targets {
+        return one(t);
+    }
+    let (mut parts, mut baseline) = (Vec::new(), 0i64);
+    for t in targets {
+        match one(t) {
+            Ok((o, b)) => {
+                parts.push(o.trim_end().to_string());
+                baseline += b;
+            }
+            Err(e) if json => {
+                parts.push(serde_json::json!({"target": t, "error": e.to_string()}).to_string())
+            }
+            Err(e) => parts.push(format!("error: {t}: {e}")),
+        }
+    }
+    let out = if json {
+        format!("[{}]\n", parts.join(","))
+    } else {
+        format!("{}\n", parts.join("\n\n"))
+    };
+    Ok((out, baseline))
+}
+
 fn queried(
     root: &Path,
     t0: Instant,

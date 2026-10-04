@@ -43,7 +43,7 @@ fn all_tools() -> Vec<serde_json::Value> {
             mcp_tool(
                 "find",
                 "Locate a symbol by name: file, line range, signature. Use instead of grepping for a definition",
-                json!({"name": s("symbol name (exact, then substring; case-insensitive)"), "kind": s("filter: fn, struct, class, method, …"), "path": s("only symbols in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 25)"}}),
+                json!({"name": s("symbol name (exact, then substring; case-insensitive) — comma-separate several"), "kind": s("filter: fn, struct, class, method, …"), "path": s("only symbols in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 25)"}}),
                 &["name"],
                 read_only("Find symbol"),
             ),
@@ -56,7 +56,7 @@ fn all_tools() -> Vec<serde_json::Value> {
         mcp_tool(
             "show",
             "Print the source of one or more symbols (Name, Parent.Name or file.rs:Name). Use instead of reading a whole file to see one function/type. A file path prints that file's outline",
-            json!({"symbol": s("symbol name — comma-separate several to batch; a file path yields its outline"), "kind": s("narrow to a kind (fn, struct, …)"), "context": json!({"type": "integer", "description": "extra context lines around the body (default 0)"}), "sig": json!({"type": "boolean", "description": "signature line only, no body — leanest peek"}), "all": json!({"type": "boolean", "description": "on an ambiguous name, print every candidate instead of erroring"})}),
+            json!({"symbol": s("symbol name — comma-separate several to batch; a file path yields its outline"), "kind": s("narrow to a kind (fn, struct, …)"), "context": json!({"type": "integer", "description": "extra context lines around the body (default 0)"}), "sig": json!({"type": "boolean", "description": "signature line only, no body — leanest peek"}), "all": json!({"type": "boolean", "description": "on an ambiguous name, print every candidate instead of erroring"}), "path": s("only definitions in files under this path (file or directory)")}),
             &["symbol"],
             read_only("Show symbol source"),
         ),
@@ -78,7 +78,7 @@ fn all_tools() -> Vec<serde_json::Value> {
             mcp_tool(
                 "outline",
                 "All symbols of one file with line ranges. Use instead of reading a file to see what's in it, then show the one you need",
-                json!({"file": s("path relative to the project root"), "sig": {"type": "boolean", "description": "include full signatures (default: names + ranges only)"}}),
+                json!({"file": s("path relative to the project root — comma-separate several"), "sig": {"type": "boolean", "description": "include full signatures (default: names + ranges only)"}}),
                 &["file"],
                 read_only("Outline file"),
             ),
@@ -321,16 +321,19 @@ fn mcp_call(
 
     let (out, baseline, detail) = match name {
         "find" => {
+            // CLI parity: comma-separate several names
             let n = sarg("name")?;
-            let (o, b) = cmd_find(
-                root,
-                conn,
-                n,
-                opt("kind"),
-                uint("limit", defaults::FIND_LIMIT),
-                opt("path"),
-                false,
-            )?;
+            let (o, b) = each_csv(n, |one| {
+                cmd_find(
+                    root,
+                    conn,
+                    one,
+                    opt("kind"),
+                    uint("limit", defaults::FIND_LIMIT),
+                    opt("path"),
+                    false,
+                )
+            })?;
             (o, b, n.to_string())
         }
         "show" => {
@@ -345,10 +348,11 @@ fn mcp_call(
                 .filter(|s| !s.is_empty())
                 .enumerate()
             {
+                let scoped = crate::commands::scoped_locator(opt("path"), one);
                 let (oo, bb) = cmd_show(
                     root,
                     conn,
-                    one,
+                    &scoped,
                     ShowOpts {
                         context: ctx,
                         kind: opt("kind"),
@@ -380,7 +384,7 @@ fn mcp_call(
         "outline" => {
             let f = sarg("file")?;
             let sig = args.get("sig").and_then(|v| v.as_bool()).unwrap_or(false);
-            let (o, b) = cmd_outline(root, conn, f, sig, false)?;
+            let (o, b) = each_csv(f, |one| cmd_outline(root, conn, one, sig, false))?;
             (o, b, f.to_string())
         }
         "tree" => {
@@ -589,6 +593,15 @@ fn mcp_call(
         Ok((j, _)) => structured(out.clone(), &j, field),
         Err(_) => ToolOut::text(out.clone()),
     };
+    // A comma batch has no single structured render — its text is the answer.
+    let batched = |k: &str| {
+        args.get(k)
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v.contains(','))
+    };
+    if (name == "find" && batched("name")) || (name == "outline" && batched("file")) {
+        return Ok(ToolOut::text(out));
+    }
     Ok(match name {
         // The second pass MUST read the same caller-supplied limit as the
         // first — otherwise structuredContent and the text render disagree.
@@ -621,6 +634,33 @@ fn mcp_call(
         ),
         _ => ToolOut::text(out),
     })
+}
+
+/// MCP twin of the CLI's multi-target `outline`/`find`: run `one` per
+/// comma-separated target; a bad target is flagged, not fatal to the batch.
+fn each_csv(
+    list: &str,
+    mut one: impl FnMut(&str) -> Result<(String, i64)>,
+) -> Result<(String, i64)> {
+    let targets: Vec<&str> = list
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect();
+    if let [t] = targets[..] {
+        return one(t);
+    }
+    let (mut parts, mut baseline) = (Vec::new(), 0i64);
+    for t in targets {
+        match one(t) {
+            Ok((o, b)) => {
+                parts.push(o.trim_end().to_string());
+                baseline += b;
+            }
+            Err(e) => parts.push(format!("error: {t}: {e}")),
+        }
+    }
+    Ok((format!("{}\n", parts.join("\n\n")), baseline))
 }
 
 /// Server preamble echoed in the initialize result. Clients that lack
