@@ -228,6 +228,9 @@ fn run() -> Result<()> {
                 limit,
                 path,
                 include_deps,
+                context,
+                after,
+                before,
             } = a;
             queried(&root, t0, "grep", pattern, |conn| {
                 cmd_grep(
@@ -240,6 +243,8 @@ fn run() -> Result<()> {
                         limit: *limit,
                         path: path.as_deref(),
                         include_deps: *include_deps,
+                        before: before.or(*context).unwrap_or(0),
+                        after: after.or(*context).unwrap_or(0),
                     },
                     cli.json,
                 )

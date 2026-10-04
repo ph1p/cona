@@ -25,6 +25,8 @@ pub fn cmd_grep(
         limit,
         path: path_filter,
         include_deps,
+        before,
+        after,
     } = opts;
     let matcher = Matcher::new(pattern, ignore_case, regex)?;
     let pf = PathFilter::new(root, path_filter);
@@ -36,7 +38,7 @@ pub fn cmd_grep(
     // walks that subtree instead of the whole repo.
     match grep_prefilter(
         root,
-        pattern,
+        matcher.source(pattern),
         &matcher,
         ignore_case,
         pf.search_root(),
@@ -64,6 +66,8 @@ pub fn cmd_grep(
     files.retain(|f| pf.ok(f));
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     let mut hits: Vec<(String, usize, String, String)> = Vec::new();
+    // Per hit, the surrounding lines asked for with -A/-B/-C (empty otherwise).
+    let mut ctx: Vec<Vec<(usize, String)>> = Vec::new();
     // Honest baseline: per hit file, a grep pass + a Read window around each
     // match line — what the same search costs an agent without cona, NOT
     // the whole file.
@@ -78,6 +82,11 @@ pub fn cmd_grep(
         // isn't clamped short when a match sits near the file's end or when the
         // limit truncates this file mid-scan.
         let line_lens: Vec<usize> = src.lines().map(str::len).collect();
+        let lines: Vec<&str> = if before + after > 0 {
+            src.lines().collect()
+        } else {
+            Vec::new()
+        };
         for (ln, line) in src.lines().enumerate() {
             if !matcher.is_match(line) {
                 continue;
@@ -96,6 +105,15 @@ pub fn cmd_grep(
                 .query_row(rusqlite::params![rel, (ln + 1) as i64], |r| r.get(0))
                 .unwrap_or_default();
             hits.push((rel.clone(), ln + 1, sym, line.trim().to_string()));
+            if !lines.is_empty() {
+                let lo = ln.saturating_sub(before);
+                let hi = (ln + after).min(lines.len() - 1);
+                ctx.push(
+                    (lo..=hi)
+                        .map(|i| (i + 1, lines[i].trim_end().to_string()))
+                        .collect(),
+                );
+            }
             if hits.len() >= limit {
                 truncated = true;
                 baseline += db::baseline_tokens(&line_lens, &match_lines);
@@ -116,7 +134,10 @@ pub fn cmd_grep(
         return jout(&items, baseline);
     }
     let mut out = String::new();
-    for (f, l, sym, t) in &hits {
+    if !ctx.is_empty() {
+        render_with_context(&mut out, &hits, &ctx, &matcher);
+    }
+    for (f, l, sym, t) in hits.iter().filter(|_| ctx.is_empty()) {
         if sym.is_empty() {
             out.push_str(&format!("{f}:{l}: {t}\n"));
         } else {
@@ -131,7 +152,9 @@ pub fn cmd_grep(
         // Literal is the default. A regex-looking pattern returning zero hits is
         // the worst failure mode — the agent concludes the code doesn't exist.
         // Name the flag that would have matched instead of staying silent.
-        if let Some(literal) = regexish_literal(pattern).filter(|_| !regex) {
+        if let Some(literal) =
+            regexish_literal(pattern).filter(|_| matches!(matcher, Matcher::Literal { .. }))
+        {
             out.push_str(&format!(
                 "\n  note: matching is literal by default — '{pattern}' was searched verbatim.\
                  \n  try `cona grep {pattern} --regex`"
@@ -151,6 +174,39 @@ pub fn cmd_grep(
         out.push('\n');
     }
     Ok((out, baseline))
+}
+
+/// `-A`/`-B`/`-C` output: one header per block (`file:line (in sym)`), then
+/// numbered lines with `>` on the hits. Overlapping or adjacent windows in one
+/// file merge into a single block, so no line is printed twice.
+fn render_with_context(
+    out: &mut String,
+    hits: &[(String, usize, String, String)],
+    ctx: &[Vec<(usize, String)>],
+    matcher: &Matcher,
+) {
+    let mut last: Option<(&str, usize)> = None;
+    for ((f, l, sym, _), window) in hits.iter().zip(ctx) {
+        let first = window.first().map_or(*l, |w| w.0);
+        let joined = matches!(last, Some((lf, ll)) if lf == f && first <= ll + 1);
+        if !joined {
+            if last.is_some() {
+                out.push_str("--\n");
+            }
+            if sym.is_empty() {
+                out.push_str(&format!("{f}:{l}\n"));
+            } else {
+                out.push_str(&format!("{f}:{l} (in {sym})\n"));
+            }
+        }
+        let done = if joined { last.map_or(0, |x| x.1) } else { 0 };
+        for (n, text) in window.iter().filter(|(n, _)| *n > done) {
+            let mark = if matcher.is_match(text) { '>' } else { ' ' };
+            out.push_str(&format!("{n:>5}{mark} {text}\n"));
+        }
+        let end = window.last().map_or(*l, |w| w.0);
+        last = Some((f, end.max(done)));
+    }
 }
 
 /// Regex metacharacters that make a pattern *look* like a regex. Used only to
@@ -184,6 +240,22 @@ impl Matcher {
     /// `Err` only for an invalid regex — the caller surfaces it verbatim, since
     /// a silent fallback to literal would answer a different question.
     pub(super) fn new(pattern: &str, ignore_case: bool, regex: bool) -> Result<Self> {
+        // `a\|b` is how grep (BRE) spells alternation, and agents type it out of
+        // habit in both modes. Verbatim it matches nothing and reads as "the code
+        // doesn't exist", so it means either branch: literals stay literal, and
+        // under --regex it becomes `|` (a literal pipe there is `[|]`).
+        if pattern.contains("\\|") {
+            let alt = if regex {
+                pattern.replace("\\|", "|")
+            } else {
+                pattern
+                    .split("\\|")
+                    .map(regex::escape)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            };
+            return Self::new(&alt, ignore_case, true);
+        }
         if !regex {
             let needle = if ignore_case {
                 pattern.to_lowercase()
@@ -200,6 +272,15 @@ impl Matcher {
             .build()
             .map(Matcher::Regex)
             .map_err(|e| anyhow!("invalid regex '{pattern}': {e}"))
+    }
+
+    /// The pattern as this matcher reads it, for the prefilter — differs from
+    /// the user's text only when `\|` alternation was rewritten into a regex.
+    fn source<'a>(&'a self, pattern: &'a str) -> &'a str {
+        match self {
+            Matcher::Regex(re) => re.as_str(),
+            Matcher::Literal { .. } => pattern,
+        }
     }
 
     fn is_match(&self, line: &str) -> bool {
@@ -367,6 +448,52 @@ mod tests {
         // rg is already Rust-regex by default — our exact dialect.
         assert_eq!(re.prefilter_flag("rg"), None);
         assert_eq!(re.prefilter_flag("grep"), Some("-E"));
+    }
+
+    #[test]
+    fn bre_alternation_matches_either_branch() {
+        // literal mode: each branch stays literal — `.` is not a wildcard
+        let m = Matcher::new(r"foo.bar\|baz", false, false).unwrap();
+        assert!(m.is_match("x = foo.bar"));
+        assert!(m.is_match("baz()"));
+        assert!(!m.is_match("fooXbar"));
+        assert_eq!(m.source("ignored"), r"foo\.bar|baz");
+        // regex mode: `\|` is grep's alternation, not a literal pipe
+        let r = Matcher::new(r"tok_(out\|saved)", false, true).unwrap();
+        assert!(r.is_match("tok_saved"));
+        assert!(Matcher::new(r"A\|b", true, false).unwrap().is_match("a"));
+    }
+
+    #[test]
+    fn context_blocks_merge_and_mark_hits() {
+        let m = Matcher::new("hit", false, false).unwrap();
+        let h = |l: usize| ("f.rs".to_string(), l, "S".to_string(), "hit".to_string());
+        let w = |a: usize, b: usize| -> Vec<(usize, String)> {
+            (a..=b)
+                .map(|n| {
+                    (
+                        n,
+                        if n == 3 || n == 5 || n == 20 {
+                            "hit"
+                        } else {
+                            "x"
+                        }
+                        .to_string(),
+                    )
+                })
+                .collect()
+        };
+        let mut out = String::new();
+        render_with_context(
+            &mut out,
+            &[h(3), h(5), h(20)],
+            &[w(2, 4), w(4, 6), w(19, 21)],
+            &m,
+        );
+        assert_eq!(
+            out,
+            "f.rs:3 (in S)\n    2  x\n    3> hit\n    4  x\n    5> hit\n    6  x\n--\nf.rs:20 (in S)\n   19  x\n   20> hit\n   21  x\n"
+        );
     }
 
     #[test]

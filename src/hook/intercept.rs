@@ -642,7 +642,11 @@ fn try_grep(
 /// when the pattern actually uses regex syntax, since a literal like
 /// `foo.bar` is almost always meant literally.
 pub(super) fn literal_advice(pattern: &str) -> String {
-    let regex = pattern.contains(['[', '*', '+', '?', '(', '|', '^', '$', '{', '\\']);
+    // grep's BRE alternation `a\|b` between literals needs no --regex: cona
+    // grep reads it as "either literal" in both modes.
+    let regex = pattern
+        .replace("\\|", "")
+        .contains(['[', '*', '+', '?', '(', '|', '^', '$', '{', '\\']);
     let quoted = shell_quote(pattern);
     let cmd = if regex {
         format!("cona grep {quoted} --regex")
@@ -650,7 +654,7 @@ pub(super) fn literal_advice(pattern: &str) -> String {
         format!("cona grep {quoted}")
     };
     let dialect = if regex {
-        " (`--regex` is Rust regex syntax: `a|b`, not `a\\|b`)"
+        " (`--regex` is Rust regex syntax; `a\\|b` alternation also works)"
     } else {
         ""
     };

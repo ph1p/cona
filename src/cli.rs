@@ -180,7 +180,8 @@ pub struct DiffArgs {
 
 #[derive(clap::Args)]
 pub struct GrepArgs {
-    /// Substring to search for — literal unless --regex
+    /// Substring to search for — literal unless --regex. `a\|b` (grep's
+    /// alternation) matches either literal in both modes
     pub pattern: String,
     /// Case-insensitive match
     #[arg(short = 'i', long)]
@@ -197,6 +198,15 @@ pub struct GrepArgs {
     /// which are excluded from the index and hidden by default
     #[arg(long)]
     pub include_deps: bool,
+    /// Lines of context around each hit (like grep -C)
+    #[arg(short = 'C', long)]
+    pub context: Option<usize>,
+    /// Lines of context after each hit (like grep -A)
+    #[arg(short = 'A', long)]
+    pub after: Option<usize>,
+    /// Lines of context before each hit (like grep -B)
+    #[arg(short = 'B', long)]
+    pub before: Option<usize>,
 }
 
 #[derive(clap::Args)]

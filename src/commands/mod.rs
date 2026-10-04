@@ -260,6 +260,10 @@ pub struct GrepOpts<'a> {
     /// too. Off by default: they are excluded from the index precisely because
     /// they are not the agent's code, and including them buries repo hits.
     pub include_deps: bool,
+    /// Lines of context printed before / after each hit (`-B`/`-A`; `-C` sets
+    /// both). 0 = the one-line-per-hit listing.
+    pub before: usize,
+    pub after: usize,
 }
 
 /// THE `--path` policy for every query command (tree/find/refs/grep/…).
