@@ -1,8 +1,7 @@
 //! `cona doctor` — diagnose install + agent integration.
 //!
-//! Split gather/render: `gather()` collects every fact into a `DoctorReport`,
-//! then one renderer prints prose and the other JSON (`cona doctor --json`).
-//! New checks belong in `gather()` so both surfaces see them.
+//! `gather()` collects every fact into a `DoctorReport`; one renderer prints
+//! prose, the other JSON (`--json`). New checks belong in `gather()`.
 
 use crate::{db, resolve, ui};
 use anyhow::{anyhow, Result};
@@ -69,20 +68,17 @@ struct DoctorReport {
     hook_seen_secs: Option<i64>,
     /// Any hook registered in any scope — the premise of `hook_silent`.
     hooks_configured: bool,
-    /// Hooks are configured in some scope but the stamp is missing or >7 days
-    /// old — configured-but-silent, the failure doctor exists to catch.
+    /// Hooks configured but the stamp is missing or >7 days old — the failure
+    /// doctor exists to catch.
     hook_silent: bool,
-    /// The Claude Code cona plugin is enabled (it provides hooks + skill +
-    /// MCP itself) — flips what counts as an issue: missing settings-level
-    /// integration is then correct, PRESENT integration is a duplicate.
+    /// The Claude Code cona plugin is enabled. Flips polarity: missing
+    /// settings-level integration is then correct, PRESENT is a duplicate.
     claude_plugin: bool,
     /// Codex plugin cache (cache dir, cached version dirs) when present.
     codex_cache: Option<(PathBuf, Vec<String>)>,
-    /// No cached version matches the running binary — the checkout was edited
-    /// or upgraded but `codex plugin add` never re-ran.
+    /// No cached version matches the binary — `codex plugin add` never re-ran.
     codex_stale: bool,
-    /// (agent slug, scope, config path, duplicates the plugin's server) for
-    /// every registration found.
+    /// (agent slug, scope, config path, duplicates the plugin's server).
     mcp: Vec<(String, &'static str, PathBuf, bool)>,
     index_files: i64,
     index_symbols: i64,
@@ -101,10 +97,9 @@ fn hook_last_seen() -> Option<i64> {
 }
 
 /// Codex copies a `local`-source plugin into
-/// `~/.codex/plugins/cache/<marketplace>/cona/<version>/` — editing the
-/// checkout changes NOTHING until `codex plugin add` runs again, and the old
-/// hooks keep firing silently. Report what versions the cache holds so doctor
-/// can flag a cache that lags the binary.
+/// `~/.codex/plugins/cache/<marketplace>/cona/<version>/`, so editing the
+/// checkout changes NOTHING until `codex plugin add` reruns. Report the cached
+/// versions so doctor can flag a cache that lags the binary.
 fn codex_plugin_cache(home: &Path) -> Option<(PathBuf, Vec<String>)> {
     let cache = home.join(".codex/plugins/cache");
     for market in std::fs::read_dir(&cache).ok()?.flatten() {
@@ -140,10 +135,9 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
     }
     let on_path = cona_on_path();
 
-    // Where the plugin covers a scope the polarity flips: settings-level
-    // hooks/skill there are DUPLICATES (each hook fires twice per event), their
-    // absence is the healthy state. Per scope — a project-only plugin leaves
-    // the home hooks every other repo relies on legitimately in place.
+    // Where the plugin covers a scope, settings-level hooks/skill are
+    // DUPLICATES (each hook fires twice). Per scope — a project-only plugin
+    // leaves the home hooks other repos rely on legitimately in place.
     let mut scopes = Vec::new();
     for (label, root) in [
         ("global", home.clone()),
@@ -154,9 +148,8 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         let skill_path = dir.join("skills/cona/SKILL.md");
         let (index_hook, read_hook) = settings_cona_hooks(&dir.join("settings.json"));
         let skill = skill_path.exists();
-        // One issue per RENDERED warning line: with the plugin every duplicate
-        // collapses into one line per scope, without it each missing piece
-        // gets its own line.
+        // One issue per RENDERED warning line: plugin duplicates collapse to
+        // one line per scope; otherwise each missing piece gets its own.
         let flagged = [index_hook, read_hook, skill]
             .iter()
             .filter(|b| **b == plugin)
@@ -166,8 +159,7 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
             let v = db::meta_get(&super::upgrade::config_ver_key(&root))
                 .ok()
                 .flatten();
-            // With the plugin the skill is already flagged as a duplicate —
-            // a stale version on top would double-count the same problem.
+            // With the plugin the skill is already flagged as a duplicate.
             if !plugin && v.as_deref() != Some(current_ver) {
                 issues += 1;
             }
@@ -189,9 +181,8 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
     // Project coverage is the wider one (home OR project settings).
     let claude_plugin = scopes.iter().any(|s| s.plugin);
 
-    // Hooks configured anywhere but never (or long ago) actually run = the
-    // exact failure this command exists to surface: the harness snapshots
-    // hooks at startup, so a stale session keeps ignoring a fresh install.
+    // Configured but never (or long ago) run: the harness snapshots hooks at
+    // startup, so a stale session keeps ignoring a fresh install.
     let hooks_configured = claude_plugin || scopes.iter().any(|s| s.index_hook || s.read_hook);
     let hook_seen_secs = hook_last_seen();
     let hook_silent = hooks_configured
@@ -208,9 +199,8 @@ fn gather(project_root: &Path) -> Result<DoctorReport> {
         issues += 1;
     }
 
-    // A missing MCP entry is never an issue (see render_text), but a DUPLICATE
-    // is: the plugin's server plus a project .mcp.json one offers every tool
-    // twice, under two names.
+    // A missing MCP entry is never an issue, but a DUPLICATE is (plugin +
+    // project .mcp.json offer every tool twice).
     let mcp: Vec<(String, &'static str, PathBuf, bool)> =
         super::agents::mcp_registrations(project_root, &home)
             .into_iter()
@@ -360,9 +350,8 @@ fn render_text(r: &DoctorReport) {
         };
         println!("\n{}", ui::heading(&format!("claude {label}")));
         if s.plugin {
-            // Polarity flips with the plugin: it ships hooks + skill + MCP, so
-            // anything still in settings.json / skills/ is a duplicate that
-            // fires twice per event.
+            // With the plugin, anything in settings.json / skills/ is a
+            // duplicate.
             let dupes: Vec<&str> = [
                 (s.index_hook, "index hook"),
                 (s.read_hook, "read-guard hook"),
@@ -383,9 +372,8 @@ fn render_text(r: &DoctorReport) {
                 } else {
                     "duplicate"
                 };
-                // `cona agents` defaults to the project scope, so a global
-                // duplicate needs the flag or the fix touches the wrong tree.
-                // Install alone suffices: with the plugin it strips duplicates.
+                // `cona agents` defaults to project scope, so a global
+                // duplicate needs the flag. Install alone strips duplicates.
                 let scope = if s.label == "global" { " --global" } else { "" };
                 println!(
                     "  {}",
@@ -458,9 +446,8 @@ fn render_text(r: &DoctorReport) {
         ),
     }
 
-    // MCP is informational, never an "issue": an optional second surface (the
-    // CLI + skill work without it), and most harnesses only get it once their
-    // config directory exists.
+    // MCP is informational, never an "issue": optional (CLI + skill work
+    // without it) and only registered where a harness config dir exists.
     println!("\n{}", ui::heading("mcp server (cona mcp)"));
     if r.claude_plugin {
         println!("  {}", ui::ok("claude: provided by the cona plugin"));
@@ -600,9 +587,8 @@ fn render_text(r: &DoctorReport) {
     }
 }
 
-/// `cona doctor` — report install + agent-integration health so the user can
-/// see exactly why Claude Code may or may not be picking cona up. Returns the
-/// issue count so the caller can exit non-zero (scriptable: `cona doctor || …`).
+/// `cona doctor` — install + agent-integration health. Returns the issue count
+/// so the caller can exit non-zero (`cona doctor || …`).
 pub fn cmd_doctor(project_root: &Path, json: bool) -> Result<usize> {
     let report = gather(project_root)?;
     if json {

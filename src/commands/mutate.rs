@@ -7,9 +7,8 @@ use rusqlite::Connection;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-/// Resolve a mutation target and prove it remains inside the project root.
-/// Existing files are canonicalized to catch symlinks; for insertion, the
-/// nearest existing parent is canonicalized instead.
+/// Resolve a mutation target and prove it stays inside the project root.
+/// Canonicalizes the file (or, for a new file, its parent) to catch symlinks.
 fn project_path(root: &Path, supplied: &str) -> Result<PathBuf> {
     let rel = Path::new(supplied);
     if supplied.is_empty() || rel.is_absolute() {
@@ -103,17 +102,15 @@ fn write_verified(root: &Path, path: &str, new_src: &str, force: bool) -> Result
             );
         }
     }
-    // Atomic replace: write a sibling temp file, then rename over the target.
-    // A crash or ENOSPC mid-write must never leave a truncated source file —
-    // the rename either fully lands or the original survives intact.
+    // Atomic replace via sibling temp file + rename: a crash or ENOSPC
+    // mid-write must never leave a truncated source file.
     let tmp = abs.with_extension(format!(
         "{}.cona-tmp",
         abs.extension().and_then(|e| e.to_str()).unwrap_or("")
     ));
     std::fs::write(&tmp, new_src)
         .and_then(|()| {
-            // carry over the original's permissions (exec bits etc.) — the temp
-            // file was created with defaults
+            // keep the original's permissions (exec bits etc.)
             if let Ok(meta) = std::fs::metadata(&abs) {
                 let _ = std::fs::set_permissions(&tmp, meta.permissions());
             }
@@ -125,9 +122,9 @@ fn write_verified(root: &Path, path: &str, new_src: &str, force: bool) -> Result
     Ok(())
 }
 
-/// `edit --range S-E FILE` — replace absolute lines S..=E of a file directly,
-/// bypassing symbol resolution. Lets an agent patch a few lines without
-/// resending a whole symbol body. Still syntax-verified + rolled back.
+/// `edit --range S-E FILE` — replace absolute lines S..=E, bypassing symbol
+/// resolution, so a few lines can be patched without resending a whole body.
+/// Still syntax-verified + rolled back.
 pub fn cmd_edit_range(
     root: &Path,
     conn: &Connection,
@@ -140,8 +137,8 @@ pub fn cmd_edit_range(
     if start == 0 || end < start {
         bail!("invalid --range {start}-{end} (1-based, start ≤ end)");
     }
-    // validate the path is in-root BEFORE any read/reindex, so an out-of-root
-    // `../` file never even enters the index
+    // validate in-root BEFORE any read/reindex, so a `../` file never enters
+    // the index
     let abs = project_path(root, file)?;
     // reindex so the file on disk and the index agree afterward
     indexer::reindex_file(root, conn, file)?;
@@ -154,11 +151,10 @@ pub fn cmd_edit_range(
     ))
 }
 
-/// `insert` — add new source without touching an existing body. Two targeting
-/// modes: relative to a SYMBOL (`--before`/`--after`), or an absolute file
-/// position (`--at <file> <line>`, `line` 0 = prepend, past-EOF = append).
-/// The `--at` mode works on files with no indexed symbol (e.g. a fresh/empty
-/// file). Fills the no-add-a-symbol gap; whole-file syntax is re-verified.
+/// `insert` — add new source without touching an existing body. Anchored on a
+/// SYMBOL (`--before`/`--after`) or an absolute position (`--at <file> <line>`,
+/// 0 = prepend, past-EOF = append); `--at` also works on fresh/empty files.
+/// Whole-file syntax is re-verified.
 pub fn cmd_insert(
     root: &Path,
     conn: &Connection,
@@ -291,8 +287,8 @@ pub fn cmd_rename(
     }
     let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
-    // plan all edits in memory first — nothing is written until every file
-    // passes; the original source rides along as the rollback copy
+    // plan all edits in memory first; nothing is written until every file
+    // passes, and the original rides along as the rollback copy
     let mut plans: Vec<(String, String, String, usize)> = Vec::new(); // rel, orig, new_src, hits
     let mut fallback_files: Vec<String> = Vec::new();
     for rel in &files {
@@ -358,8 +354,7 @@ pub fn cmd_rename(
         per_file.push_str(&format!("  {rel}: {hits}\n"));
         total += hits;
     }
-    // One line says it all for a single file; the per-file list only earns
-    // its lines when the rename spread.
+    // per-file list only when the rename spans several files
     let mut out = format!(
         "renamed '{name}' → '{new_name}': {} in {}{}\n",
         crate::ui::plural(total, "occurrence"),

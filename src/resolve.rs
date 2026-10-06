@@ -1,16 +1,14 @@
 //! Optional semantic name resolution via the out-of-process stack-graphs
-//! helper (`cona-resolve-helper`). This is the sharpest tier of the
-//! disambiguation policy: when the cheap heuristics in `graph::narrow_by_scope`
-//! (scope → file → dir → arity) leave a name ambiguous AND the language has
-//! published TSG rules, cona asks the helper to resolve the exact reference
-//! to its definition(s).
+//! helper (`cona-resolve-helper`) — the sharpest disambiguation tier: when
+//! `graph::narrow_by_scope` (scope → file → dir → arity) leaves a name
+//! ambiguous AND the language has TSG rules, the helper resolves the exact
+//! reference to its definition(s).
 //!
-//! Everything here is FAIL-OPEN. The helper is a separate binary (it carries an
-//! incompatible tree-sitter runtime — see docs/architecture.md) so
-//! it may simply be absent. A missing binary, a spawn error, a non-zero exit,
-//! or unparseable output all return `None` — the caller then keeps its
-//! name-based + arity result, exactly as if this tier didn't exist. Semantic
-//! resolution only ever NARROWS; it never invents or drops a result on error.
+//! Everything here is FAIL-OPEN. The helper is a separate binary (incompatible
+//! tree-sitter runtime — see docs/architecture.md) and may be absent. Missing
+//! binary, spawn error, non-zero exit or bad output all return `None`, and the
+//! caller keeps its name-based + arity result. Semantic resolution only ever
+//! NARROWS; it never invents or drops a result on error.
 
 use crate::install::{fetch_release_archive, release_target, HELPER_EXE};
 use serde::{Deserialize, Serialize};
@@ -19,9 +17,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-/// A reference to resolve: 1-based line + symbol name. No column — matching is
-/// by (line, name), so cona and the helper never have to agree on a column
-/// encoding. A (line, name) that isn't unique yields no semantic answer.
+/// A reference to resolve: 1-based line + symbol name. No column, so cona and
+/// the helper never have to agree on a column encoding. A non-unique
+/// (line, name) yields no semantic answer.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct Ref {
     pub line: usize,
@@ -38,8 +36,8 @@ struct Request<'a> {
     deps: Vec<DepFile>,
 }
 
-/// A dependency file fed to the helper for cross-file resolution: a reference
-/// in the primary file can resolve to a definition living in one of these.
+/// A dependency file for cross-file resolution: a primary-file reference can
+/// resolve to a definition in one of these.
 #[derive(Serialize, Clone)]
 pub struct DepFile {
     pub path: String,
@@ -64,8 +62,8 @@ struct Resolved {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Def {
-    /// File the definition resolved to. With cross-file resolution this may be
-    /// a dep file's path, not the primary file. Older helpers omit it → "".
+    /// File the definition resolved to (may be a dep file). Older helpers omit
+    /// it → "".
     #[serde(default)]
     pub file: String,
     pub line: usize,
@@ -74,9 +72,8 @@ pub struct Def {
     pub symbol: Option<String>,
 }
 
-/// Languages the helper ships TSG rules for. cona's own `detect_lang`
-/// labels map straight through. Anything else → no semantic tier (the caller
-/// never even spawns the helper).
+/// Languages the helper ships TSG rules for (`detect_lang` labels). Anything
+/// else → no semantic tier; the helper is never spawned.
 pub fn lang_supported(lang: &str) -> bool {
     matches!(
         lang,
@@ -84,16 +81,15 @@ pub fn lang_supported(lang: &str) -> bool {
     )
 }
 
-/// Located once per process: `Some(path)` if the helper binary is findable,
-/// `None` if not (cached so we don't re-probe PATH on every ambiguous name).
+/// Located once per process, so PATH isn't re-probed per ambiguous name.
 fn helper_path() -> Option<&'static PathBuf> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
     PATH.get_or_init(locate_helper).as_ref()
 }
 
-/// The four non-fetching discovery steps, in order, each tagged with how the
-/// helper was found. Shared by `locate_helper` (which falls through to fetch)
-/// and `helper_status` (which stops here) so the probe order can't drift.
+/// The four non-fetching discovery steps, each tagged with how the helper was
+/// found. Shared by `locate_helper` (then fetches) and `helper_status` (stops
+/// here) so the probe order can't drift.
 fn probe_existing() -> Option<(PathBuf, &'static str)> {
     // 1) explicit override
     if let Ok(p) = std::env::var("CONA_RESOLVE_HELPER") {
@@ -133,10 +129,9 @@ fn locate_helper() -> Option<PathBuf> {
     if let Some((p, _)) = probe_existing() {
         return Some(p);
     }
-    // `cargo install` users have no sibling helper — fetch the matching binary
-    // from the GitHub release for THIS cona version (once). All fail-open:
-    // offline / no prebuilt / extract error → None, and cona keeps its
-    // name-based + arity result.
+    // `cargo install` users have no sibling helper — fetch it from the GitHub
+    // release for THIS cona version (once). Fail-open: offline / no prebuilt /
+    // extract error → None.
     fetch_helper().ok().filter(|p| p.is_file())
 }
 
@@ -145,10 +140,9 @@ fn fetched_helper_path() -> Option<PathBuf> {
     Some(crate::db::data_dir().ok()?.join("bin").join(HELPER_EXE))
 }
 
-/// Download the release archive for the current cona version, extract just
-/// the helper binary into `~/.cona/bin`, and return its path. Best-effort:
-/// any failure (no prebuilt for this platform, network down, archive without a
-/// helper) returns `Err` and the caller degrades gracefully.
+/// Download this version's release archive and extract just the helper into
+/// `~/.cona/bin`. Best-effort: any failure (no prebuilt, network down, archive
+/// without a helper) returns `Err` and the caller degrades gracefully.
 fn fetch_helper() -> anyhow::Result<PathBuf> {
     use anyhow::{anyhow, bail};
 
@@ -156,11 +150,10 @@ fn fetch_helper() -> anyhow::Result<PathBuf> {
     if std::env::var("CONA_NO_FETCH_HELPER").is_ok() {
         bail!("helper fetch disabled via CONA_NO_FETCH_HELPER");
     }
-    // (a cached binary is already returned by `probe_existing` step 4 before we
-    // ever get here, so no need to re-check `dst.is_file()`)
+    // (a cached binary was already returned by `probe_existing` step 4)
     let dst = fetched_helper_path().ok_or_else(|| anyhow!("no home dir"))?;
-    // back off after a failed attempt so an offline machine doesn't fire a
-    // (slow) curl on every ambiguous query — retry at most once per 24h.
+    // back off after a failure so an offline machine doesn't curl on every
+    // ambiguous query — retry at most once per 24h.
     let stamp = dst.with_file_name(".helper-fetch-attempt");
     if let Ok(meta) = std::fs::metadata(&stamp) {
         if let Ok(modified) = meta.modified() {
@@ -183,8 +176,7 @@ fn fetch_helper() -> anyhow::Result<PathBuf> {
     fetch_release_archive(ver, target, &tmp)?;
     let extracted = tmp.join(HELPER_EXE);
     if !extracted.is_file() {
-        // release for this platform shipped without a helper — expected on
-        // targets where the helper build was skipped; don't retry churn.
+        // expected on targets where the helper build was skipped
         bail!("archive has no helper for {target}");
     }
     if let Some(dir) = dst.parent() {
@@ -201,15 +193,14 @@ fn fetch_helper() -> anyhow::Result<PathBuf> {
     Ok(dst)
 }
 
-/// Whether a resolve helper is available at all — lets callers skip the whole
-/// ambiguity-detection dance when there's no semantic tier to consult.
+/// Whether a resolve helper is available — lets callers skip ambiguity
+/// detection entirely when there's no semantic tier.
 pub fn available() -> bool {
     helper_path().is_some()
 }
 
-/// Status for `doctor`: the already-present helper path WITHOUT triggering an
-/// auto-fetch. Returns the path and how it was found, or `None` if it would
-/// have to be fetched.
+/// Status for `doctor`: the present helper and how it was found, WITHOUT
+/// triggering an auto-fetch (`None` = would have to be fetched).
 pub fn helper_status() -> Option<(PathBuf, &'static str)> {
     probe_existing()
 }
@@ -217,23 +208,20 @@ pub fn helper_status() -> Option<(PathBuf, &'static str)> {
 /// The languages the semantic tier covers, for display.
 pub const SUPPORTED_LANGS: &str = "typescript, tsx, javascript, python, rust";
 
-/// Resolve reference positions to their definition sites. Returns, per input
-/// ref (same order), the list of definition positions the helper found; an
-/// empty inner list means "no semantic answer for that ref". Returns `None`
-/// (fail-open) if the helper is unavailable or anything goes wrong.
+/// Resolve reference positions to definition sites: per input ref (same
+/// order), the defs found; empty = no semantic answer. `None` (fail-open) if
+/// the helper is unavailable or anything goes wrong.
 pub fn resolve_refs(lang: &str, path: &str, source: &str, refs: &[Ref]) -> Option<Vec<Vec<Def>>> {
     resolve_refs_in(lang, path, source, refs, &[])
 }
 
 /// Cache of helper responses, keyed by a hash of everything the answer
-/// depends on: (lang, primary path+source, refs, dep paths+sources, helper
-/// binary). Two tiers. In memory for the process — what makes a repeated
-/// ambiguous query within one MCP session or one `rename` free. On disk under
-/// `<data_dir>/resolve-cache/` across processes: the TS/TSX helper spends
-/// ~0.7s compiling its TSG rules on EVERY spawn, so without it each CLI
-/// `context` on a TSX file paid 1–2s for an answer that only changes when the
-/// sources do. Content-keyed (not mtime), so a stale hit is impossible and
-/// the key does not depend on the cwd the paths are relative to.
+/// depends on (lang, primary path+source, refs, deps, helper binary). Two
+/// tiers: in memory, making repeats within one MCP session or `rename` free;
+/// on disk under `<data_dir>/resolve-cache/`, because the TS/TSX helper spends
+/// ~0.7s compiling TSG rules on EVERY spawn (1–2s per CLI `context`).
+/// Content-keyed (not mtime): a stale hit is impossible and the key is
+/// cwd-independent.
 type CacheMap = std::collections::HashMap<u64, Option<Vec<Vec<Def>>>>;
 fn response_cache() -> &'static std::sync::Mutex<CacheMap> {
     static CACHE: OnceLock<std::sync::Mutex<CacheMap>> = OnceLock::new();
@@ -309,11 +297,10 @@ fn cache_key(lang: &str, path: &str, source: &str, refs: &[Ref], deps: &[DepFile
     h.finish()
 }
 
-/// A candidate definition an ambiguous reference might bind to: its bare name
-/// plus the (file, line) where the definition lives. Callers build these from
-/// their own index rows; `disambiguate` matches semantic resolutions against
-/// them so stack-graphs' intermediate binding nodes (imports, re-exports) never
-/// masquerade as the answer.
+/// A candidate definition (bare name + file, line) built from the caller's
+/// index rows. `disambiguate` matches resolutions against these so
+/// stack-graphs' intermediate nodes (imports, re-exports) never masquerade as
+/// the answer.
 #[derive(Clone)]
 pub struct Candidate {
     pub name: String,
@@ -321,14 +308,12 @@ pub struct Candidate {
     pub line: i64,
 }
 
-/// The shared semantic-disambiguation policy used by `context`, `callers`/
-/// `callees`, and `rename`. For each ambiguous ref, ask the helper (with `deps`
-/// for cross-file resolution), then keep only resolved defs that coincide with
-/// one of that name's `candidates`. Returns, per input ref (same order), the
-/// uniquely-resolved `(file, line)` — or `None` for that ref when the helper
-/// gave no answer, resolved to something that isn't a candidate, or stayed
-/// ambiguous among candidates. Fail-open: a missing/broken helper yields all
-/// `None`, so every caller simply keeps its name-based result.
+/// THE semantic-disambiguation policy for `context`, `callers`/`callees` and
+/// `rename`. Asks the helper (with `deps` for cross-file resolution) and keeps
+/// only defs that coincide with one of that name's `candidates`. Per input ref
+/// (same order): the uniquely-resolved `(file, line)`, or `None` when there
+/// was no answer, a non-candidate, or ambiguity among candidates. Fail-open: a
+/// missing/broken helper yields all `None`.
 pub fn disambiguate(
     lang: &str,
     path: &str,
@@ -342,8 +327,7 @@ pub fn disambiguate(
         return out;
     };
     for (i, (r, defs)) in refs.iter().zip(results).enumerate() {
-        // resolved defs that actually coincide with one of this name's
-        // candidate rows (a def with empty `file` means the primary file).
+        // defs matching a candidate row (empty `file` = the primary file)
         let matched: Vec<(String, i64)> = defs
             .iter()
             .map(|d| {
@@ -363,9 +347,8 @@ pub fn disambiguate(
     out
 }
 
-/// Like [`resolve_refs`] but also stitches `deps` (extra files) into the same
-/// stack graph so a reference can resolve to a definition in another file
-/// (cross-file resolution). `deps` may be empty for same-file-only resolution.
+/// Like [`resolve_refs`] but stitches `deps` into the same stack graph for
+/// cross-file resolution (empty = same-file only).
 pub fn resolve_refs_in(
     lang: &str,
     path: &str,

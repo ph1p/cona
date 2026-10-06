@@ -1,7 +1,6 @@
-//! The two tool-call intercepts (Read and Grep, native or via a shell tool)
-//! plus the PostToolUse re-nudge and the PreCompact restatement: payload
-//! parsing, fact gathering, and the emitted decision. The pure policy they
-//! consult lives in the parent module.
+//! The Read and Grep intercepts (native or via a shell tool), the PostToolUse
+//! re-nudge and the PreCompact restatement: payload parsing, fact gathering,
+//! emitted decision. The pure policy lives in the parent module.
 
 use super::markers::{
     bump_partial_reads, note_denied, nudge_due, peek_reads, record_read, session_id, tick_toolcall,
@@ -38,8 +37,7 @@ pub(crate) fn try_pretooluse() -> Result<()> {
             let surgical = !input["glob"].is_null()
                 || !input["type"].is_null()
                 || !input["head_limit"].is_null();
-            // bounded output (file list, counts, context windows) = the same
-            // restraint the shell path reads from -l/-c/-C — advisory tier
+            // bounded output = the restraint the shell path reads from -l/-c/-C
             let soft = matches!(
                 input["output_mode"].as_str(),
                 Some("files_with_matches" | "count")
@@ -48,10 +46,9 @@ pub(crate) fn try_pretooluse() -> Result<()> {
                 || !input["-C"].is_null();
             try_grep(&v, pattern, path, surgical, soft)
         }
-        // Harnesses whose only file tool is a shell (Codex runs `sed -n
-        // '1,240p' f` / `rg Foo` through `tool_name = "Bash"`) never emit a
-        // Read or Grep call. Recover the intent from the command line so the
-        // same two intercepts work there; anything unrecognised passes.
+        // Shell-only harnesses (Codex: `sed -n '1,240p' f` / `rg Foo` as
+        // "Bash") never emit Read/Grep; recover the intent from the command
+        // line. Anything unrecognised passes.
         Some(name) if SHELL_TOOLS.contains(&name) => {
             let Some(cmd) = v["tool_input"]["command"].as_str() else {
                 return Ok(());
@@ -91,14 +88,10 @@ fn file_indexed(conn: &rusqlite::Connection, rel: &str) -> bool {
 /// The biggest few symbols in an indexed file, longest first, as a
 /// ready-to-paste `cona show` example.
 ///
-/// The redirect used to spell `cona show <Symbol>` — a template the agent has to
-/// translate into a real command before it can act, which is exactly the step
-/// that gets skipped under momentum. The grep intercept has always interpolated
-/// its real pattern; the read path has the same information available (it is
-/// indexed by definition here) and should name it too. Longest-first because a
-/// redirect answers "what is in this file" and the largest symbols carry most of
-/// it. Fully fail-open: any DB trouble yields None and the caller falls back to
-/// the placeholder wording.
+/// A `<Symbol>` template must be translated before acting — the step that gets
+/// skipped under momentum — so the redirect names real symbols, like the grep
+/// intercept interpolates its pattern. Longest-first: the largest symbols
+/// answer "what is in this file". Any DB trouble → None (placeholder wording).
 fn top_symbols(conn: &rusqlite::Connection, rel: &str, limit: usize) -> Option<Vec<String>> {
     let mut stmt = conn
         .prepare(
@@ -116,9 +109,8 @@ fn top_symbols(conn: &rusqlite::Connection, rel: &str, limit: usize) -> Option<V
     (!names.is_empty()).then_some(names)
 }
 
-/// Build a non-blocking read advisory: the caller's specific observation, then
-/// the one shared "here's the cheaper move" tail. Kept in one place so the three
-/// advisory triggers (mid-size, re-read, volume streak) cannot drift apart.
+/// Build a non-blocking read advisory: the caller's observation, then the one
+/// shared "cheaper move" tail, so the advisory triggers cannot drift apart.
 fn advisory(lead: &str, rel: &str) -> String {
     format!(
         "{lead}. If you need one function, `cona show <Symbol>` prints just its lines and \
@@ -128,10 +120,8 @@ fn advisory(lead: &str, rel: &str) -> String {
     )
 }
 
-/// PostToolUse: the opt-in periodic re-nudge (see `DEFAULT_RENUDGE_EVERY` —
-/// off unless `CONA_RENUDGE_EVERY=<n>`). additionalContext ONLY — never a
-/// permission decision — so it can never block or auto-approve a call. Fully
-/// fail-open.
+/// PostToolUse: the opt-in periodic re-nudge (see `DEFAULT_RENUDGE_EVERY`).
+/// additionalContext ONLY, so it can never block or auto-approve a call.
 pub(crate) fn try_posttooluse() -> Result<()> {
     let every = renudge_every();
     if every == 0 {
@@ -147,11 +137,9 @@ pub(crate) fn try_posttooluse() -> Result<()> {
         .map(|c| db::git_root_from(&c))
         .unwrap_or_else(|| db::git_root_from(Path::new(".")));
 
-    // Cheap indexed-repo gate: a single stat, no DB open. Ticking + the cadence
-    // check run BEFORE the expensive `has_index` (which opens the SQLite DB) so
-    // the common case — a call that will NOT nudge — never pays for a
-    // connection. Only a call that actually lands on a nudge boundary opens
-    // the DB, and only to confirm the index is real (not just a stale db file).
+    // Cheap stat gate, then tick + cadence BEFORE `has_index` (opens SQLite),
+    // so a call that will NOT nudge never pays for a connection. Only a nudge
+    // boundary opens the DB, to confirm the index is real (not a stale file).
     if !db::project_db_path(&root).exists() {
         return Ok(());
     }
@@ -168,16 +156,13 @@ pub(crate) fn try_posttooluse() -> Result<()> {
 
 /// Restate the navigation habit across a compaction boundary.
 ///
-/// Compaction summarizes the CONVERSATION and drops injected hook context, so
-/// the SessionStart block is gone from here on while the session keeps running.
-/// That is the one moment the habit reliably lapses: the post-compact agent
-/// resumes from a summary full of concrete `file.rs:120` pointers, which makes
-/// `sed -n`/`grep` feel like the shortest path, and nothing in the live hook
-/// path restates the rule (the re-nudge is off by default — see
-/// DEFAULT_RENUDGE_EVERY). This is deliberately NOT the SessionStart block: the
-/// orientation map is re-orientation the agent no longer needs mid-task, and
-/// re-spending ~900 tokens of a freshly-compacted window on it would be the
-/// very waste cona exists to prevent. Rule only, no map.
+/// Compaction drops injected hook context, so the SessionStart block is gone
+/// while the session continues. That is when the habit lapses: the agent
+/// resumes from a summary full of `file.rs:120` pointers that make `sed -n`/
+/// `grep` feel shortest, and nothing restates the rule (re-nudge is off by
+/// default — DEFAULT_RENUDGE_EVERY). Deliberately NOT the SessionStart block:
+/// re-spending ~900 tokens of a fresh window on the orientation map is the very
+/// waste cona exists to prevent. Rule only, no map.
 pub(crate) fn try_precompact() -> Result<()> {
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
@@ -190,8 +175,7 @@ pub(crate) fn try_precompact() -> Result<()> {
         .unwrap_or_else(|| db::git_root_from(Path::new(".")));
 
     // Cheap stat before the DB open; never create a project DB from a hook.
-    // `counts` needs the connection anyway, so it doubles as the index check —
-    // an empty index reports zero files and is treated as no index.
+    // `counts` doubles as the index check — zero files = no index.
     if !db::project_db_path(&root).exists() {
         return Ok(());
     }
@@ -225,9 +209,8 @@ struct Target {
     callable: bool,
 }
 
-/// Locate the file a read names and classify its language. Shared by the full
-/// and partial read paths so the two agree on which repo root and relative path
-/// a given tool call refers to — the marker keys are derived from both.
+/// Locate the file a read names and classify its language. Shared by full and
+/// partial reads so both agree on root + relative path (the marker keys).
 fn resolve_target(v: &serde_json::Value, file_path: &str) -> Target {
     // A relative path (`sed -n '1,240p' main.rs`) resolves against the tool
     // call's cwd, not ours — the hook runs wherever the harness launched it.
@@ -258,14 +241,10 @@ fn resolve_target(v: &serde_json::Value, file_path: &str) -> Target {
     }
 }
 
-/// Cross-call accounting for narrow reads of ONE file.
-///
-/// Every individual slice here is exactly what the per-call rules want and
-/// always passes. What no per-call rule can see is the SHAPE: four separate
-/// slices of one file is `cona outline` + `show` spelled the long way, with the
-/// surrounding context re-paid each time. So this only ever advises, never
-/// blocks — and only for indexed callable source, where an outline really is
-/// the better call.
+/// Cross-call accounting for narrow reads of ONE file. Each slice passes; the
+/// SHAPE (four slices = `outline` + `show` the long way, context re-paid each
+/// time) is what this catches. Advises only, and only for indexed callable
+/// source, where an outline really is the better call.
 fn try_partial_read(v: &serde_json::Value, file_path: &str) -> Result<()> {
     let streak = partial_streak_every();
     if streak == 0 {
@@ -280,10 +259,8 @@ fn try_partial_read(v: &serde_json::Value, file_path: &str) -> Result<()> {
     if !db::project_db_path(&t.root).exists() {
         return Ok(());
     }
-    // Tick + cadence BEFORE opening SQLite, as in try_posttooluse: only a call
-    // that actually lands on a streak boundary pays for a connection, which is
-    // then used to confirm THIS file is really in the index (not just that a db
-    // file exists).
+    // Tick + cadence BEFORE opening SQLite (as in try_posttooluse): only a
+    // streak boundary pays for a connection, to confirm THIS file is indexed.
     let n = bump_partial_reads(&t.root, &t.rel, &session_id(v));
     if !fires_on_cadence(n, streak) {
         return Ok(());
@@ -303,10 +280,9 @@ fn try_partial_read(v: &serde_json::Value, file_path: &str) -> Result<()> {
     allow_with_reason(&t.root, "hook:partial-streak", rel, &reason)
 }
 
-/// The shared read intercept. `partial` is the caller's "the agent already
-/// narrowed this" signal; `upto` is a shell-side upper line bound (see
-/// `ShellIntent::Read`) that only counts as narrowing once we know the file is
-/// actually longer than it.
+/// The shared read intercept. `partial` = "the agent already narrowed this";
+/// `upto` is a shell-side upper line bound (`ShellIntent::Read`) that only
+/// counts as narrowing if the file is actually longer.
 fn try_read(
     v: &serde_json::Value,
     file_path: &str,
@@ -314,8 +290,7 @@ fn try_read(
     upto: Option<i64>,
 ) -> Result<()> {
     if partial {
-        // A narrowed read is never blocked; it only feeds the cross-call slice
-        // accounting, which resolves the target itself.
+        // Never blocked; only feeds the cross-call slice accounting.
         return try_partial_read(v, file_path);
     }
     let Target {
@@ -326,31 +301,25 @@ fn try_read(
         callable,
     } = resolve_target(v, file_path);
 
-    // Cheap gates BEFORE reading any bytes: partial/non-code reads are Allow
-    // regardless of size, and a multi-GB data file must never be slurped into
-    // the hook just to be allowed anyway. A file of N lines is ≥ N bytes, so
-    // size ≤ threshold guarantees lines ≤ threshold without reading. The floor
-    // is the LOWEST active threshold (the advise tier when enabled), or we would
-    // bail on mid-size files before the advisory path ever sees them. These
-    // gates are deliberately narrower than decide_read's own cheap-gate — they
-    // must NOT fold in `in_repo`, or a large indexed file in a non-git repo
-    // would bail here before we ever check the index (that was the bug).
+    // Cheap gates BEFORE reading any bytes: non-code reads are Allow at any
+    // size, and a multi-GB data file must never be slurped just to be allowed.
+    // These gates must NOT fold in `in_repo`, or a large indexed file in a
+    // non-git repo would bail before the index check (that was the bug).
     let max_lines = max_lines();
     let advise_min_lines = advise_min_lines();
     if !is_code {
         return Ok(());
     }
-    // A file of N lines is >= N bytes, so a size below the threshold proves the
-    // line count is too — used to skip the read_to_string, NOT to skip the
-    // bookkeeping below (a re-read and the read streak are both size-blind).
+    // N lines >= N bytes, so a small size proves a small line count — used to
+    // skip the read_to_string, NOT the bookkeeping below (re-read and streak
+    // are size-blind).
     let byte_len = match std::fs::metadata(&file_abs) {
         Ok(m) => m.len() as i64,
         Err(_) => return Ok(()),
     };
-    // Cap what we are willing to slurp. Past this size the exact line count no
-    // longer changes the outcome (any such file is far over max_lines, so it is
-    // a Redirect), and a multi-GB file must never be pulled into the hook.
-    // Bytes >= lines, so the floor below is a sound lower bound for the message.
+    // Cap what we slurp: past this size the exact line count cannot change the
+    // outcome (far over max_lines → Redirect). Bytes >= lines, so the floor
+    // below is a sound lower bound for the message.
     const MAX_HOOK_READ_BYTES: i64 = 4 * 1024 * 1024;
     let measured = byte_len <= MAX_HOOK_READ_BYTES;
     let (lines, tokens) = if measured {
@@ -362,8 +331,8 @@ fn try_read(
     } else {
         (max_lines + 1, db::est_tokens(byte_len as usize))
     };
-    // A shell-side upper bound only narrows the read if the file actually runs
-    // past it. `sed -n '1,240p'` over a 30-line file read the whole thing.
+    // A shell-side bound only narrows if the file runs past it: `sed -n
+    // '1,240p'` over a 30-line file read the whole thing.
     if upto.is_some_and(|n| n < lines) {
         return Ok(());
     }
@@ -374,10 +343,8 @@ fn try_read(
         format!("~{tokens} tokens")
     };
 
-    // Is it indexed? Only open the DB if one already exists; never create a
-    // project DB from a hook (mirrors try_grep's has_index gate). A missing DB
-    // is NOT an early exit — the Nudge tier exists precisely for repos with no
-    // index yet, so we fall through with indexed=false and let decide_read run.
+    // Only open an existing DB; never create one from a hook. A missing DB is
+    // NOT an early exit — the Nudge tier exists for exactly that case.
     let conn = if db::project_db_path(&root).exists() {
         Some(db::open_project_db(&root)?)
     } else {
@@ -385,15 +352,12 @@ fn try_read(
     };
     let indexed: bool = conn.as_ref().is_some_and(|c| file_indexed(c, &rel));
 
-    // Track full reads of indexed source files: re-read detection and the
-    // read-volume streak are both size-blind, so this applies even to files
-    // far below the advisory floor. Skipped when unindexed (nothing to point at)
-    // or non-callable (prose/data — a run of README reads is not the pattern we
-    // are looking for, and must not inflate the counter for real source files),
-    // and skipped entirely when both tiers that consume it are disabled, so the
-    // default hot path pays no marker IO it cannot use. Peek here; each arm
-    // records the read only if it actually goes through (a denied read never
-    // reached the agent), and marks it uncounted when it carried an advisory.
+    // Track full reads of indexed source (size-blind: re-read + streak).
+    // Skipped when unindexed (nothing to point at), non-callable (README reads
+    // must not inflate the source counter), or when both consuming tiers are
+    // off (no useless marker IO). Peek here; each arm records the read only if
+    // it goes through (a denied read never reached the agent), uncounted when
+    // it carried an advisory.
     let streak_every = read_streak_every();
     let tracking_reads = advise_min_lines > 0 || streak_every > 0;
     let tracking = indexed && callable && tracking_reads;
@@ -416,11 +380,8 @@ fn try_read(
     };
     match decide_read(&facts) {
         Decision::Allow => {
-            // Individually fine, but volume is its own cost: several full reads
-            // in one session is the drain pattern no single-call rule catches.
-            // Always counted — even when the streak reminder fires on this
-            // very read, it must advance the counter or the same multiple
-            // would re-fire on every subsequent read.
+            // Volume is its own cost. Always counted — even when the streak
+            // fires on this read — or the same multiple would re-fire forever.
             let read_count = prior_reads + 1;
             if tracking {
                 record_read(&root, &rel, &session_id(v), true);
@@ -437,9 +398,8 @@ fn try_read(
             if tracking {
                 record_read(&root, &rel, &session_id(v), false);
             }
-            // A re-read gets its own short, imperative message instead of the
-            // generic "one function is cheaper" tail — the file is already in
-            // context, so the useful advice is different in kind.
+            // A re-read gets its own message: the file is already in context,
+            // so the useful advice differs in kind.
             let msg = if reread {
                 format!(
                     "Re-read: {rel} ({size_desc}) is already in your context from \
@@ -460,9 +420,8 @@ fn try_read(
                     let _ = indexer::reindex_file(&root, conn, &rel);
                 }
             }
-            // A second full-read attempt after a block yields: the loop where
-            // following "read it in chunks" (or plain stubbornness) meets the
-            // same wall with the same words forever must not exist.
+            // A second attempt after a block yields — the same wall with the
+            // same words forever must not exist.
             if note_denied(&root, &rel, &session_id(v)) {
                 if tracking {
                     // this read goes through — seen, but advised, so uncounted
@@ -478,10 +437,8 @@ fn try_read(
             // costs the same tokens in more calls, and is judged as a full
             // read anyway (`ShellIntent::Slice`).
             let chunk_hint = "repeat this exact read and it goes through";
-            // Name real symbols from this very file when we can, so the redirect
-            // hands over a runnable command instead of a template to fill in
-            // (the grep intercept has always interpolated its real pattern).
-            // The reindex above ran first, so these names are current.
+            // Name real symbols so the redirect hands over a runnable command,
+            // not a template. The reindex above ran first, so names are current.
             let show_hint = match conn.as_ref().and_then(|c| top_symbols(c, &rel, 3)) {
                 Some(names) => format!(
                     "then `cona show <Symbol>` prints only those lines — in this file, \
@@ -503,7 +460,6 @@ fn try_read(
         }
         Decision::Nudge => {
             // Fresh repo, large code file — indexing unlocks the fast path.
-            // One hint per session so it never nags on subsequent reads.
             if !nudge_due(&root, &session_id(v)) {
                 return Ok(());
             }
@@ -518,15 +474,10 @@ fn try_read(
     }
 }
 
-/// The shared grep intercept. `surgical` is the caller's "already narrowed"
-/// signal — the native path derives it from glob/type/head_limit, the shell
-/// path from the command's own flags.
-/// Where a grep starts searching: an absolute path argument wins; a relative
-/// one (`grep -rn foo src/`, `rg foo .`) resolves against the tool call's cwd
-/// — the hook runs wherever the harness launched it, same rule as try_read.
-/// Without the join, `src/` resolved against the HOOK's own cwd, walked to a
-/// relative "root" whose hash matches no project DB, and a fully-indexed repo
-/// answered Nudge ("isn't indexed yet") instead of the redirect.
+/// Where a grep starts searching: an absolute path wins; a relative one
+/// (`grep -rn foo src/`, `rg foo .`) resolves against the tool call's cwd, as
+/// in try_read. Against the HOOK's cwd, `src/` hashed to no project DB and an
+/// indexed repo answered Nudge instead of the redirect.
 pub(crate) fn grep_start(path: Option<&str>, cwd: Option<&str>) -> PathBuf {
     match (path, cwd) {
         (Some(p), Some(c)) if !Path::new(p).is_absolute() => Path::new(c).join(p),
@@ -536,6 +487,8 @@ pub(crate) fn grep_start(path: Option<&str>, cwd: Option<&str>) -> PathBuf {
     }
 }
 
+/// The shared grep intercept. `surgical` = "already narrowed" (native: glob/
+/// type/head_limit; shell: the command's own flags).
 fn try_grep(
     v: &serde_json::Value,
     pattern: &str,
@@ -543,16 +496,14 @@ fn try_grep(
     surgical: bool,
     soft: bool,
 ) -> Result<()> {
-    // cheap gate first — only a broad search pays for the stat and the DB
-    // check below
+    // cheap gate first — only a broad search pays for the stat and DB check
     if surgical {
         return Ok(());
     }
     let identifier = lang::is_valid_ident(pattern);
 
-    // Tracked separately from `surgical`: narrow enough never to block, but the
-    // one shape `cona show`/`refs` answers strictly better. Resolved against the
-    // payload cwd, like the search itself.
+    // Separate from `surgical`: never blocks, but `show`/`refs` answers this
+    // shape strictly better. Resolved against the payload cwd.
     let start = grep_start(path, v["cwd"].as_str());
     let single_file = path.is_some() && start.is_file();
     if !identifier && single_file {
@@ -572,11 +523,8 @@ fn try_grep(
     match decide_grep(&facts) {
         Decision::Allow => Ok(()),
         Decision::Advise => {
-            // Three shapes land here and want different advice: a broad
-            // literal/regex search has no symbol to name, a single-file search
-            // is looking for a definition it could have had whole, and a
-            // -l/-c/context search is a broad search with bounded output. All
-            // ran as-is.
+            // Three shapes, different advice: literal/regex (no symbol to
+            // name), single-file (wants a definition), bounded -l/-c/context.
             let (tag, reason) = if !identifier {
                 ("hook:grep-literal", literal_advice(pattern))
             } else if single_file {
@@ -629,11 +577,9 @@ fn try_grep(
     }
 }
 
-/// The advisory for a broad search whose pattern is not an identifier: a CSS
-/// class, a message string, a regex. `refs`/`show` have nothing to offer, so
-/// the hint is `cona grep` alone, spelled ready to paste — `--regex` only
-/// when the pattern actually uses regex syntax, since a literal like
-/// `foo.bar` is almost always meant literally.
+/// The advisory for a broad non-identifier search (CSS class, string, regex):
+/// `cona grep` alone, ready to paste — `--regex` only when the pattern uses
+/// regex syntax, since `foo.bar` is almost always meant literally.
 pub(super) fn literal_advice(pattern: &str) -> String {
     // grep's BRE alternation `a\|b` between literals needs no --regex: cona
     // grep reads it as "either literal" in both modes.
@@ -669,8 +615,7 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// Emit the PreToolUse deny decision and count the intercept. Credits no
-/// tokens — the follow-up cona query logs the actual savings, crediting
-/// the redirect too would count the same avoided read twice.
+/// tokens — the follow-up query logs the savings; crediting both double-counts.
 fn deny(root: &Path, cmd: &str, target: &str, reason: &str) -> Result<()> {
     db::log_usage_detail(root, cmd, 0, 1, 0, 0, target);
     let out = serde_json::json!({
@@ -684,10 +629,9 @@ fn deny(root: &Path, cmd: &str, target: &str, reason: &str) -> Result<()> {
     Ok(())
 }
 
-/// Let the tool call proceed but attach a hint the agent sees — a nudge, not
-/// a block. Deliberately NO permissionDecision: emitting "allow" would bypass
-/// the permission system (silently auto-approving e.g. an out-of-workspace
-/// read); additionalContext leaves the permission flow untouched.
+/// Let the call proceed with a hint attached. Deliberately NO
+/// permissionDecision: "allow" would bypass the permission system (silently
+/// auto-approving e.g. an out-of-workspace read).
 fn allow_with_reason(root: &Path, cmd: &str, target: &str, reason: &str) -> Result<()> {
     db::log_usage_detail(root, cmd, 0, 1, 0, 0, target);
     print!("{}", super::additional_context("PreToolUse", reason));

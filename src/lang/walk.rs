@@ -6,9 +6,9 @@ use super::names::{first_line_sig, node_name};
 use super::Sym;
 use tree_sitter::Node;
 
-/// JS/TS: a `variable_declarator` (or class field) whose value is a function —
-/// `const foo = () => …`, `bar = function …` — is a function definition in all
-/// but node kind. Returns the value node so walk() can descend for nested defs.
+/// JS/TS: a declarator or class field whose value is a function
+/// (`const foo = () => …`) is a function definition in all but node kind.
+/// Returns the value node so walk() can descend for nested defs.
 fn fn_valued_declarator<'a>(decl: Node<'a>, src: &str) -> Option<(String, Node<'a>)> {
     let value = decl.child_by_field_name("value")?;
     if !matches!(
@@ -17,8 +17,8 @@ fn fn_valued_declarator<'a>(decl: Node<'a>, src: &str) -> Option<(String, Node<'
     ) {
         return None;
     }
-    // `name` (TS fields) or `property` (JS field_definition); destructuring
-    // patterns are skipped — there is no single name to index.
+    // `name` (TS) or `property` (JS field_definition); destructuring has no
+    // single name, so it is skipped
     let name_node = decl
         .child_by_field_name("name")
         .or_else(|| decl.child_by_field_name("property"))?;
@@ -29,9 +29,8 @@ fn fn_valued_declarator<'a>(decl: Node<'a>, src: &str) -> Option<(String, Node<'
     (!name.is_empty()).then_some((name, value))
 }
 
-/// Go: the type a method's receiver names — `func (f *Food) Per()` → `Food`,
-/// generics and pointers peeled — so the method is addressable as `Food.Per`,
-/// the way Go code and agents spell it.
+/// Go: the receiver's type with generics and pointers peeled
+/// (`func (f *Food) Per()` → `Food`), so the method is addressable as `Food.Per`.
 fn go_receiver_type(method: Node, src: &str) -> Option<String> {
     let param = method
         .child_by_field_name("receiver")?
@@ -68,9 +67,8 @@ fn at_file_scope(node: Node) -> bool {
     false
 }
 
-/// JS/TS: the names of a file-scope `const X = <non-function>` — config
-/// tables, zod schemas, object-literal clients. Agents ask for them by name
-/// (`show MEASURE_CHIPS`) as often as for functions.
+/// JS/TS: file-scope `const X = <non-function>` (config tables, schemas,
+/// object-literal clients) — agents ask for these by name as often as for fns.
 fn top_level_consts<'a>(decl: Node<'a>, src: &str) -> Vec<(String, Node<'a>)> {
     if decl.kind() != "lexical_declaration"
         || !decl
@@ -95,9 +93,8 @@ fn top_level_consts<'a>(decl: Node<'a>, src: &str) -> Vec<(String, Node<'a>)> {
 
 pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<Sym>) {
     use std::rc::Rc;
-    // Explicit worklist, NOT recursion: recursion depth would equal AST depth,
-    // and generated/minified files nest arbitrarily deep — a recursive walk
-    // overflows the parse threads' stack and aborts the whole process.
+    // Explicit worklist, NOT recursion: generated/minified files nest
+    // arbitrarily deep, and overflowing a parse thread's stack aborts the process.
     enum Job<'t> {
         /// Classify this node as a child of `parent` (the loop body below).
         Visit(Node<'t>, Option<Rc<str>>),
@@ -148,8 +145,7 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
             }
             Job::Visit(child, parent) => (child, parent),
         };
-        // js/ts: function-valued bindings — the declarator, not a classifiable
-        // statement kind, carries the symbol
+        // js/ts: function-valued bindings — the declarator carries the symbol
         if matches!(lang, "javascript" | "typescript" | "tsx") {
             let declish = matches!(
                 child.kind(),
@@ -242,9 +238,8 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
                     end_line: child.end_position().row + 1,
                     signature: first_line_sig(child, src),
                 });
-                // Descend into every named symbol to catch nested defs
-                // (methods in a class, closures with inner fns, …). Containers
-                // and leaf defs are handled identically here.
+                // Descend into every named symbol (containers and leaf defs
+                // alike) to catch nested defs: class methods, inner fns, …
                 push_children(&mut stack, child, Some(Rc::from(qualified)));
                 continue;
             }

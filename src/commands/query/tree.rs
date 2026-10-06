@@ -82,10 +82,9 @@ pub fn cmd_tree(
     Ok((out, db::orient_baseline(bytes as usize)))
 }
 
-/// Rank top-level symbols by reference fan-in: identifier occurrences of the
-/// symbol's name in files OTHER than its defining one (semantic per file when
-/// parseable, textual fallback — same rules as `refs`). The "what is
-/// load-bearing here" view, à la Aider's repo map.
+/// Rank top-level symbols by fan-in: occurrences of the name in files OTHER
+/// than the defining one (same rules as `refs`). The "what is load-bearing"
+/// view, à la Aider's repo map.
 pub fn cmd_tree_rank(
     root: &Path,
     conn: &Connection,
@@ -123,8 +122,8 @@ pub fn cmd_tree_rank(
     let names: HashSet<&str> = syms.iter().map(|s| s.name.as_str()).collect();
     let defining: HashSet<&str> = syms.iter().map(|s| s.path.as_str()).collect();
 
-    // one pass over the repo: global occurrence totals per name, plus each
-    // defining file's own counts so fan-in = total − self (O(symbols) ranking)
+    // One pass: global totals per name plus each defining file's own counts,
+    // so fan-in = total − self.
     let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let all_files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
     let mut total: HashMap<String, i64> = HashMap::new();
@@ -147,8 +146,7 @@ pub fn cmd_tree_rank(
     let mut ranked: Vec<(i64, &RankSym)> = syms
         .iter()
         .filter(|sym| pf.ok(&sym.path))
-        // one-line `mod x;` declarations soak up their module's whole fan-in
-        // but point at no code — orientation noise, drop them from the ranking
+        // `mod x;` soaks up its module's fan-in but points at no code — drop it
         .filter(|sym| !(sym.kind == "mod" && sym.start == sym.end))
         .map(|sym| {
             let own = self_counts
@@ -159,8 +157,7 @@ pub fn cmd_tree_rank(
             (total.get(&sym.name).copied().unwrap_or(0) - own, sym)
         })
         .collect();
-    // tie-break by name before path so same-named symbols (equal fan-in by
-    // construction) form one contiguous run for the collapse below
+    // name before path: same-named symbols form one run for the collapse below
     ranked.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then_with(|| a.1.name.cmp(&b.1.name))
@@ -184,8 +181,7 @@ pub fn cmd_tree_rank(
     let mut i = 0;
     while i < ranked.len() {
         let (fan, sym) = &ranked[i];
-        // fan-in is per NAME, so same-named symbols (16× `mod tests`) form
-        // identical-count runs with zero orientation value — collapse to one row
+        // fan-in is per NAME: same-named runs (16× `mod tests`) collapse to one row
         let run = ranked[i..]
             .iter()
             .take_while(|(f, s2)| f == fan && s2.name == sym.name && s2.kind == sym.kind)

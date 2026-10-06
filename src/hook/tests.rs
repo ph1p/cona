@@ -80,8 +80,8 @@ fn allows_large_unindexed_file_outside_any_repo() {
 
 #[test]
 fn never_redirects_exactly_at_threshold() {
-    // Exactly at max_lines must not block. With the advise tier enabled it
-    // lands in the advisory band (300 >= 120), which still allows the read.
+    // Exactly at max_lines must not block; with the advise tier on it lands in
+    // the advisory band (300 >= 120), still allowed.
     assert_eq!(
         decide_read(&ReadFacts {
             lines: 300,
@@ -168,8 +168,7 @@ fn reread_still_redirects_when_large() {
 
 #[test]
 fn advisory_tiers_need_an_index() {
-    // Nothing to point at in an unindexed project: stay silent rather than
-    // advertising commands that would not work yet.
+    // Nothing to point at in an unindexed project: stay silent.
     assert_eq!(
         decide_read(&ReadFacts {
             lines: 216,
@@ -191,8 +190,7 @@ fn advisory_tiers_need_an_index() {
 
 #[test]
 fn partial_reread_is_untouched() {
-    // An explicit offset/limit is the surgical path we asked for — never
-    // second-guess it, even on a repeat visit.
+    // An explicit offset/limit is surgical — never second-guessed, even on repeat.
     assert_eq!(
         decide_read(&ReadFacts {
             lines: 216,
@@ -228,8 +226,8 @@ fn no_advice_for_prose_or_data_files() {
 
 #[test]
 fn huge_prose_file_still_redirects() {
-    // The advisory tier is gated on `callable`, but size-based Redirect is
-    // not: outline/show are still the cheap way into a 5k-line changelog.
+    // Advisory is gated on `callable`, size-based Redirect is not: outline/show
+    // are still the cheap way into a 5k-line changelog.
     assert_eq!(
         decide_read(&ReadFacts {
             callable: false,
@@ -241,9 +239,8 @@ fn huge_prose_file_still_redirects() {
 
 #[test]
 fn callable_languages_classified() {
-    // xml and html index real symbols (elements, named by tag plus an
-    // identifying child/attribute), so the advisory tier must fire on a
-    // pom.xml or a template like it does on any code file
+    // xml and html index real symbols (`tag#identity` elements), so the
+    // advisory tier must fire on a pom.xml or template like on any code file
     for l in [
         "rust",
         "typescript",
@@ -262,8 +259,8 @@ fn callable_languages_classified() {
     }
 }
 
-/// Every deny-list entry must be a language `detect_lang` can actually
-/// return, or it is dead weight pretending to cover a file type.
+/// Every deny-list entry must be a language `detect_lang` can return, or it
+/// is dead weight.
 #[test]
 fn non_callable_languages_are_reachable() {
     for (path, lang) in [
@@ -300,8 +297,8 @@ fn renudge_disabled_at_zero() {
 
 #[test]
 fn partial_read_streak_fires_on_every_multiple() {
-    // Four narrow slices of one file is the shape that passes every per-call
-    // rule and still wastes the context an outline would have covered once.
+    // Four narrow slices of one file pass every per-call rule yet waste what
+    // one outline would have covered.
     let every = DEFAULT_PARTIAL_STREAK;
     assert_eq!(every, 3);
     assert!(!fires_on_cadence(1, every));
@@ -351,9 +348,8 @@ fn advises_soft_grep_in_indexed_project() {
 
 #[test]
 fn advises_single_file_grep_but_never_blocks() {
-    // `grep -n foo one.rs` is `cona show foo` spelled the long way: it hands
-    // back a line number the agent then slices around. Narrow enough that it
-    // must never be blocked, informative enough to be worth a hint.
+    // `grep -n foo one.rs` is `cona show foo` the long way: never blocked,
+    // but worth a hint.
     assert_eq!(
         decide_grep(&GrepFacts {
             single_file: true,
@@ -365,8 +361,7 @@ fn advises_single_file_grep_but_never_blocks() {
 
 #[test]
 fn single_file_grep_in_unindexed_repo_stays_silent() {
-    // Too narrow to justify pitching a whole-project index — a broad search in
-    // the same repo still gets the Nudge.
+    // Too narrow to pitch a whole-project index; a broad search still Nudges.
     assert_eq!(
         decide_grep(&GrepFacts {
             single_file: true,
@@ -463,8 +458,7 @@ fn allows_broad_grep_outside_any_repo() {
     );
 }
 
-// ---- shell-command normalization (harnesses whose only file tool is a
-// shell: Codex sends `tool_name = "Bash"` with a command line) ----
+// ---- shell-command normalization (Codex: `tool_name = "Bash"`) ----
 
 fn read_of(cmd: &str) -> Option<(String, Option<i64>)> {
     match classify_shell(cmd) {
@@ -579,9 +573,8 @@ fn classifies_whole_file_dumps() {
 
 #[test]
 fn classifies_bounded_sed_as_a_read_with_a_bound() {
-    // The idiom Codex actually emits: a bound the agent expects to exceed
-    // the file length. Only the caller (which knows the real line count)
-    // can tell that apart from a genuine partial read.
+    // The idiom Codex emits: a bound expected to exceed the file length. Only
+    // the caller (knowing the real line count) can tell it from a partial read.
     assert_eq!(
         read_of("sed -n '1,240p' main.rs"),
         Some(("main.rs".into(), Some(240)))
@@ -608,9 +601,8 @@ fn narrowed_shell_reads_are_partial() {
     }
 }
 
-/// The slice accounting keys on a file, so a partial read must carry the ONE
-/// file it sliced — and only when that is unambiguous. A metadata probe reads no
-/// content and must not be counted as a slice of anything.
+/// A partial read must carry the ONE file it sliced, only when unambiguous; a
+/// metadata probe reads no content and is a slice of nothing.
 #[test]
 fn partial_reads_carry_their_file_only_when_unambiguous() {
     // flag values must not be mistaken for operands
@@ -703,8 +695,7 @@ fn classifies_broad_shell_greps() {
 
 #[test]
 fn narrowed_shell_greps_pass_through() {
-    // Every one of these narrows the search; only a bare broad search is a
-    // candidate for the semantic redirect.
+    // Each of these narrows the search; only a bare broad one can redirect.
     for cmd in [
         "rg -g '*.rs' UserService",
         "rg --files -g 'AGENTS.md' .",
@@ -717,8 +708,7 @@ fn narrowed_shell_greps_pass_through() {
 
 #[test]
 fn output_bounded_shell_greps_are_soft() {
-    // Bounded output = still a broad search, but the agent showed
-    // restraint — classify as Grep{soft} so it gets the advisory tier.
+    // Bounded output = broad but restrained → Grep{soft}, advisory tier.
     for cmd in [
         "rg -l UserService",
         "rg -c UserService",
@@ -836,8 +826,8 @@ fn piped_stdin_filters_are_neutral() {
 
 #[test]
 fn grep_start_resolves_relative_paths_against_payload_cwd() {
-    // The regression: a relative path arg must join the payload cwd, or the
-    // project-root walk lands on a relative "root" no index hash matches.
+    // Regression: a relative path must join the payload cwd, or the root walk
+    // lands on a relative "root" no index hash matches.
     assert_eq!(
         grep_start(Some("src/"), Some("/repo")),
         PathBuf::from("/repo/src/")

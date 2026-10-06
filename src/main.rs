@@ -57,12 +57,10 @@ fn run() -> Result<()> {
                 session_start,
             } = a;
             if db::is_home_or_fs_root(&root) {
-                // A typed `cona index` in $HOME is a deliberate act: warn, then
-                // do it. The SessionStart hook is not — it fires unattended in
-                // whatever cwd the harness happens to have, and an agent app
-                // launched from $HOME made every session walk the whole home
-                // tree (several concurrent multi-hundred-MB walks). Refuse
-                // there, quietly and with success: the hook is fail-open, a
+                // A typed `cona index` in $HOME is deliberate: warn, then do
+                // it. The SessionStart hook fires unattended in whatever cwd
+                // the harness has — an agent app launched from $HOME made every
+                // session walk the home tree. Refuse quietly with success: a
                 // session must never break over a missing index.
                 if *session_start {
                     return Ok(());
@@ -76,12 +74,10 @@ fn run() -> Result<()> {
                 }
             }
             let conn = db::open_project_db(&root)?;
-            // Sessions opening together each fire this hook on the same tree.
-            // Only one walk is useful: the loser reads the counts the winner is
-            // writing and still emits its orientation block, so the session
-            // gets its context without paying for a duplicate walk. Only the
-            // hook dedupes — a typed `cona index` always indexes, because the
-            // user asked for a walk, not for a warm index.
+            // Sessions opening together fire this hook on the same tree; only
+            // one walk is useful. The loser reads the winner's counts and still
+            // emits its orientation block. Only the hook dedupes — a typed
+            // `cona index` always walks, because the user asked for one.
             let lock = session_start.then(|| db::IndexLock::acquire(&root));
             let skipped = matches!(lock, Some(None));
             let r = if skipped {
@@ -105,11 +101,9 @@ fn run() -> Result<()> {
                 db::log_usage(&root, "index", ms, r.total_symbols, 0, 0);
             }
             if *session_start {
-                // The SessionStart hook runs `index --quiet --session-start`.
-                // Beyond keeping the index warm, hand the agent repo-specific
-                // orientation up front (the static guide alone was too easy to
-                // skim past). Fail-open: any error → no context block, never a
-                // broken session start.
+                // SessionStart hook: besides keeping the index warm, hand the
+                // agent repo-specific orientation up front (the static guide
+                // was too easy to skim). Fail-open: error → no context block.
                 print!("{}", session_start_context(&root, &conn, &r));
             }
             if *watch {
@@ -585,9 +579,8 @@ fn run() -> Result<()> {
                 Some(AgentAction::Uninstall) => {
                     install::cmd_agents(&root, "uninstall", names, *all, *global)?;
                 }
-                // Bare `cona agents`: interactive checklist on a TTY, else status.
-                // (clap requires an ACTION before any AGENT, so names/--all
-                // never arrive here without a verb.)
+                // Bare `cona agents`: checklist on a TTY, else status. (clap
+                // requires an ACTION before any AGENT, so names never get here.)
                 None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
                     install::cmd_agents_interactive(&root, *global)?;
                 }
@@ -598,15 +591,10 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-/// The one shape shared by every query arm in `run()`: open the index, run the
-/// body against it, print its output, log it via `finish`. `target` is the
-/// stats detail (symbol/file) — the caller computes it up front, and a failed
-/// body logs nothing. Mutations reuse it with a baseline of 0 (nothing was
-/// "read instead").
 /// Run a one-target query over several targets — agents batch them
-/// (`outline a.ts b.ts`) and a hard arg error costs a whole retry. One target
-/// keeps its exact output; several are concatenated (text) or wrapped in a
-/// JSON array, and one bad target is flagged without aborting the rest.
+/// (`outline a.ts b.ts`). One target keeps its exact output; several are
+/// concatenated (text) or wrapped in a JSON array, and one bad target is
+/// flagged without aborting the rest.
 fn each(
     root: &Path,
     cmd: &str,
@@ -643,6 +631,9 @@ fn each(
     Ok((out, baseline))
 }
 
+/// The one shape shared by every query arm in `run()`: open the index, run the
+/// body, print, log via `finish`. `target` is the stats detail; a failed body
+/// logs nothing. Mutations reuse it with a baseline of 0.
 fn queried(
     root: &Path,
     t0: Instant,
@@ -687,9 +678,8 @@ fn read_only_command(cmd: &Cmd) -> bool {
             | Cmd::BlameFlat(_)
             | Cmd::HotFlat(_)
             | Cmd::CouplingFlat(_)
-            // stats/projects only read: telemetry writes are already suppressed
-            // by the read-only DB layer, and SKILL.md sells --read-only as safe
-            // for all inspection
+            // stats/projects only read (telemetry is suppressed by the read-only
+            // DB layer); SKILL.md sells --read-only as safe for all inspection
             | Cmd::Project(Project::Stats(_))
             | Cmd::Project(Project::Projects)
             | Cmd::StatsFlat(_)
@@ -726,9 +716,6 @@ fn read_replacement(file: Option<&str>) -> Result<String> {
     }
 }
 
-/// One-shot setup. Indexes the project, then wires agent integration for the
-/// project and/or the global home configs. No scope → interactive chooser on
-/// a terminal, both otherwise.
 /// Thousands-separated count for human-facing tallies (e.g. `1234567` → `1,234,567`).
 fn fmt_count(n: i64) -> String {
     let s = n.abs().to_string();
@@ -748,11 +735,9 @@ fn fmt_count(n: i64) -> String {
 
 /// Build the SessionStart context block the agent sees at the top of a session.
 ///
-/// For an indexed project: a short reference-ranked symbol map (the fastest
-/// orientation cona offers) plus the one-line habit. Failure to render the
-/// map degrades to just the habit line — never an error. Emitted as Claude's
-/// `hookSpecificOutput.additionalContext` JSON so the text lands in context
-/// without a user-visible message.
+/// A short reference-ranked symbol map plus the one-line habit; a failed map
+/// degrades to the habit line, never an error. Emitted as `additionalContext`
+/// so the text lands in context without a user-visible message.
 fn session_start_context(
     root: &Path,
     conn: &rusqlite::Connection,
@@ -770,13 +755,10 @@ fn session_start_context(
          searches code semantically.\n",
         report.total_files, report.total_symbols
     ));
-    // One statement is enough for current models — the "standing rule for the
-    // WHOLE session" reinforcement paragraph that used to follow here was
-    // repeated-instruction noise (same rule as the line above and the agent
-    // guide). The PreToolUse redirect remains the backstop for an actual
-    // wrong Read/Grep.
-    // A little social proof: surface what the habit has already bought on this
-    // project. Cheap SELECT, fully fail-open — no tally, no line.
+    // One statement is enough for current models; the PreToolUse redirect is
+    // the backstop for an actual wrong Read/Grep.
+    // Social proof: what the habit already saved here. Fail-open — no tally,
+    // no line.
     if let Some(saved) = db::open_global_db()
         .and_then(|g| db::totals(&g, root.to_str()))
         .map(|t| t.tokens_saved)
@@ -803,6 +785,8 @@ fn session_start_context(
     hook::additional_context("SessionStart", &ctx)
 }
 
+/// One-shot setup: index, then wire agents for the project and/or home
+/// configs. No scope → interactive chooser on a terminal, both otherwise.
 fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
     use std::io::IsTerminal;
     println!("{}", ui::banner("cona setup"));
@@ -816,9 +800,8 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
     let interactive =
         !yes && !explicit && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
-    // Record where this binary lives if `install` never did (prebuilt-binary
-    // users install via curl/wget, not from a source checkout) — otherwise
-    // `cona upgrade` / auto-update have no target path to replace.
+    // Record the binary path if `install` never did (curl/wget installs), or
+    // `cona upgrade` / auto-update have no target to replace.
     if db::meta_get("install_path")?.is_none() {
         if let Ok(exe) = std::env::current_exe() {
             db::meta_set("install_path", &exe.to_string_lossy())?;
@@ -862,8 +845,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
             }
         }
     } else {
-        // non-interactive: install every detected agent in the active scopes.
-        // Nothing is removed — an unattended run never takes integrations away.
+        // non-interactive: install every detected agent; never remove any.
         let home = dirs::home_dir().unwrap_or_default();
         let detected = |on: bool, global: bool| install::ScopePlan {
             add: if on {
@@ -876,8 +858,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
         (detected(do_project, false), detected(do_global, true))
     };
 
-    // Distinct agents, not agent×scope: Claude in project AND home is one
-    // agent configured, not two.
+    // Distinct agents, not agent×scope: Claude in project AND home is one.
     let (mut configured, mut removed) = (Vec::new(), Vec::new());
     for (global, plan, label) in [
         (false, &proj_plan, "project"),
@@ -887,8 +868,7 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
             continue;
         }
         println!("\n{}", ui::heading(&format!("agents — {label}")));
-        // Remove first: an agent can only be in one of the two lists, but
-        // removing before installing keeps the printed order readable.
+        // Remove before install keeps the printed order readable.
         if !plan.remove.is_empty() {
             install::cmd_agents(root, "uninstall", &plan.remove, false, global)?;
             removed.extend(plan.remove.iter().copied());
@@ -914,8 +894,8 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
     }
     println!("\n{}", ui::ok(&ui::bold(&summary)));
 
-    // Lead with what to DO now (the payoff), then how to manage what was just
-    // wired. Aligned table, same shape as `install`'s next-steps block.
+    // What to DO now, then how to manage it — same shape as `install`'s
+    // next-steps block.
     println!("\n{}", ui::heading("try it"));
     print!(
         "{}",

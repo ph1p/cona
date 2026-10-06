@@ -1,40 +1,35 @@
 //! Registering cona as an MCP server in each agent harness's config.
 //!
-//! The guide/skill blocks teach an agent to *shell out* to `cona`; this wires
-//! the same commands in as native MCP tools (`cona mcp`) for the harnesses that
-//! speak MCP. Two config shapes cover every one of them:
+//! Wires the commands the guide/skill blocks teach as native MCP tools
+//! (`cona mcp`). Two config shapes cover every harness:
 //!
-//! * JSON with a server map under one top-level key — Claude Code (`.mcp.json`,
-//!   the checked-in project scope), Cursor (`.cursor/mcp.json`), Gemini CLI
-//!   (`.gemini/settings.json`), Windsurf, Qwen, Copilot. The key name is NOT
-//!   universal (`mcpServers` for most, `mcp` for OpenCode/Crush,
-//!   `context_servers` for Zed), so it is a parameter — writing the wrong key
-//!   is a silent no-op the harness never reports. See `ServerKey`.
+//! * JSON with a server map under one top-level key — Claude Code (`.mcp.json`),
+//!   Cursor, Gemini CLI, Windsurf, Qwen, Copilot. The key is NOT universal
+//!   (`mcp` for OpenCode/Crush, `context_servers` for Zed), and a wrong key is
+//!   a silent no-op. See `ServerKey`.
 //! * TOML with an `[mcp_servers.cona]` table — Codex (`~/.codex/config.toml`).
 //!
-//! Both writers are idempotent and surgical: they touch ONLY the `cona` entry
-//! and leave every foreign server, key and (for JSON, via serde_json's
-//! `preserve_order`) key order untouched. Uninstall removes exactly that entry.
+//! Both writers are idempotent and touch ONLY the `cona` entry; foreign
+//! servers, keys and (JSON, via `preserve_order`) key order stay untouched.
 
 use super::{write_if_changed, Change};
 use anyhow::{anyhow, bail, Result};
 use std::path::Path;
 
-/// The MCP server name cona registers under. Also the identity uninstall
-/// matches on, so it must stay stable.
+/// The MCP server name cona registers under. Uninstall matches on it, so it
+/// must stay stable.
 pub const SERVER_NAME: &str = "cona";
 
-/// The top-level key a harness keeps its MCP server map under. There is no
-/// single spelling across the ecosystem, and a wrong key does not error — the
-/// harness simply never sees the server — so each agent names its own.
+/// The top-level key a harness keeps its MCP server map under. A wrong key
+/// does not error — the harness never sees the server — so each agent names
+/// its own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ServerKey {
-    /// `{"mcpServers": {…}}` — Claude Code, Cursor, Gemini, Windsurf, Qwen,
-    /// Copilot. The majority spelling.
+    /// `{"mcpServers": {…}}` — the majority spelling.
     McpServers,
     /// `{"mcp": {…}}` — OpenCode, Crush.
     Mcp,
-    /// `{"context_servers": {…}}` — Zed, which calls them context servers.
+    /// `{"context_servers": {…}}` — Zed.
     ContextServers,
 }
 
@@ -47,15 +42,12 @@ impl ServerKey {
         }
     }
 
-    /// The entry shape this harness expects under that key. Most take the
-    /// stdio triple; OpenCode/Crush tag the transport `"local"` and name the
-    /// argv `command` (an ARRAY, binary first), and Zed nests it under
-    /// `source: "custom"`.
+    /// The entry shape under that key. Most take the stdio triple;
+    /// OpenCode/Crush tag the transport `"local"` with `command` as an ARRAY
+    /// (binary first); Zed adds `source: "custom"`.
     ///
-    /// `exe` is the resolved ABSOLUTE path (see `agents::agent_exe`) in every
-    /// shape, so the harness does not depend on cona being on ITS `PATH` — an
-    /// agent launched from a GUI often has a different environment than the
-    /// shell cona was installed from.
+    /// `exe` is the ABSOLUTE path (`agents::agent_exe`): an agent launched from
+    /// a GUI often lacks the installing shell's `PATH`.
     fn entry(self, exe: &str) -> serde_json::Value {
         match self {
             ServerKey::McpServers => serde_json::json!({
@@ -78,17 +70,12 @@ impl ServerKey {
 }
 
 /// Add/remove the cona entry in a JSON config carrying an `mcpServers` object.
-/// Returns the `Change` so callers can report Created/Updated/Unchanged like
-/// every other install target.
 ///
-/// Foreign content is preserved: an existing file is parsed and re-serialized
-/// (serde_json's `preserve_order` keeps the user's key order), and only the
-/// `mcpServers.cona` key is touched. An unparsable config is an error rather
-/// than an overwrite — same rule as `claude_hooks` on settings.json
-/// (invariant 6: never clobber foreign file content).
+/// Only `mcpServers.cona` is touched; `preserve_order` keeps the user's key
+/// order. An unparsable config is an error, not an overwrite — same rule as
+/// `claude_hooks` on settings.json (invariant 6).
 ///
-/// Production code always goes through `json_server_keyed` (the harness table
-/// carries the key); this default-key shorthand survives for the tests below.
+/// Default-key shorthand for the tests; production uses `json_server_keyed`.
 #[cfg(test)]
 pub fn json_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
     json_server_keyed(path, exe, install, ServerKey::McpServers)
@@ -102,8 +89,7 @@ pub fn json_server_keyed(path: &Path, exe: &str, install: bool, key: ServerKey) 
         return Ok(Change::Unchanged);
     }
     let raw = existing.unwrap_or_else(|| "{}".into());
-    // An empty (or whitespace-only) file is a valid starting point, not a
-    // parse error — `touch .mcp.json` is a thing users do.
+    // An empty file is a valid start, not a parse error (`touch .mcp.json`).
     let mut root: serde_json::Value = if raw.trim().is_empty() {
         serde_json::json!({})
     } else {
@@ -118,8 +104,7 @@ pub fn json_server_keyed(path: &Path, exe: &str, install: bool, key: ServerKey) 
         bail!("{} top level is not an object", path.display());
     }
     let name = key.as_str();
-    // Uninstall never creates the map — a config that never had one must come
-    // back out byte-identical, not carrying a fresh empty scaffold.
+    // Uninstall never creates the map: such a config stays byte-identical.
     if !install && !root.get(name).is_some_and(|v| v.is_object()) {
         return Ok(Change::Unchanged);
     }
@@ -139,8 +124,7 @@ pub fn json_server_keyed(path: &Path, exe: &str, install: bool, key: ServerKey) 
         // leave no empty scaffold behind in a file we may have created
         root.as_object_mut().unwrap().remove(name);
     }
-    // A file that would be left with nothing but `{}` after uninstall was ours
-    // to begin with — remove it rather than littering an empty config.
+    // A file left as bare `{}` after uninstall was ours — remove it.
     if !install && root.as_object().is_some_and(|o| o.is_empty()) {
         std::fs::remove_file(path)?;
         return Ok(Change::Updated);
@@ -148,23 +132,20 @@ pub fn json_server_keyed(path: &Path, exe: &str, install: bool, key: ServerKey) 
     write_if_changed(path, &format!("{}\n", serde_json::to_string_pretty(&root)?))
 }
 
-/// Marker comments delimiting the cona table in a TOML config. TOML has no
-/// dependency-free structural editor here, and a whole-file parse/re-emit would
-/// discard the user's comments and formatting — so the cona table is a marked
-/// block appended at the end, the same discipline as the markdown guides.
+/// Markers around the cona table in a TOML config. A parse/re-emit would drop
+/// the user's comments and formatting, so the table is a marked block appended
+/// at the end, like the markdown guides.
 const TOML_BEGIN: &str = "# cona:begin (managed by cona — do not edit)";
 const TOML_END: &str = "# cona:end";
 
 /// Render the marked `[mcp_servers.cona]` block for a Codex-style config.
 fn toml_block(exe: &str) -> String {
-    // TOML basic strings take backslash escapes — a Windows path would
-    // otherwise smuggle escape sequences into the value.
+    // TOML basic strings take backslash escapes; escape Windows paths.
     let esc = exe.replace('\\', "\\\\").replace('"', "\\\"");
     format!("{TOML_BEGIN}\n[mcp_servers.{SERVER_NAME}]\ncommand = \"{esc}\"\nargs = [\"mcp\"]\n{TOML_END}\n")
 }
 
-/// Strip the cona block (and any trailing blank run it leaves) from a TOML
-/// config. Pure — tested. Returns the config without the block.
+/// Strip the cona block (and the blank tail it leaves) from a TOML config.
 fn strip_toml_block(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     let mut skipping = false;
@@ -190,8 +171,7 @@ fn strip_toml_block(body: &str) -> String {
 }
 
 /// Add/remove the `[mcp_servers.cona]` block in a Codex-style TOML config.
-/// Idempotent: an existing block is replaced in place (so a moved binary
-/// self-heals), foreign tables are never touched.
+/// Foreign tables are never touched.
 pub fn toml_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
     let existing = std::fs::read_to_string(path).ok();
     if !install {
@@ -209,9 +189,8 @@ pub fn toml_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
         return write_if_changed(path, &stripped);
     }
     let block = toml_block(exe);
-    // Strip any block we already own (replace in place, so a moved binary
-    // self-heals) and append after whatever foreign config remains. Stripping
-    // is a no-op on a config that has no cona block, so both cases are one path.
+    // Strip our old block (so a moved binary self-heals) and append after the
+    // foreign config; stripping is a no-op without a block, so one path.
     let head = existing.map(|b| strip_toml_block(&b)).unwrap_or_default();
     let head = head.trim_end();
     let updated = if head.is_empty() {
@@ -222,16 +201,13 @@ pub fn toml_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
     write_if_changed(path, &updated)
 }
 
-/// Is cona registered as an MCP server in this config file? One probe for both
-/// shapes — the JSON files carry a `"cona"` key under `mcpServers`, the TOML one
-/// carries the marker.
+/// Is cona registered as an MCP server in this config file (JSON key or TOML
+/// marker)?
 ///
-/// Substring, not a parse: this sits on the auto-refresh hot path (every command
-/// → `maybe_refresh_project_config` → `project_has_cona` → `installed`), where a
-/// `serde_json` parse of up to eight harness configs per invocation is real cost
-/// for a boolean. Same trade the existing `Presence::Needle` probe makes, and
-/// the needles are specific — `"mcpServers"` plus a quoted `"cona"` key. The
-/// writers still parse properly; only this yes/no answer is approximate.
+/// Substring, not a parse: this is on the auto-refresh hot path (every command
+/// → `maybe_refresh_project_config` → `project_has_cona` → `installed`), where
+/// parsing up to eight configs is real cost for a boolean. Same trade as
+/// `Presence::Needle`; the writers still parse properly.
 pub fn registered(path: &Path) -> bool {
     let Ok(body) = std::fs::read_to_string(path) else {
         return false;
@@ -239,10 +215,8 @@ pub fn registered(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()) == Some("toml") {
         return body.contains(TOML_BEGIN);
     }
-    // The quoted `"cona"` key is the identity; any of the three server-map
-    // spellings qualifies as the container. Checking all three (rather than
-    // threading the agent's key in) keeps this a pure path→bool probe, and a
-    // config only ever carries the one its own harness reads.
+    // Any of the three map spellings qualifies, keeping this a pure path→bool
+    // probe; a config only carries the one its own harness reads.
     let keyed = [
         ServerKey::McpServers,
         ServerKey::Mcp,
@@ -399,9 +373,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Each non-default spelling must round-trip under its OWN key and be seen
-    /// by `registered()`. A wrong key is silent — the harness just never loads
-    /// the server — so nothing but an explicit assertion catches it.
+    /// Each spelling must round-trip under its OWN key and be seen by
+    /// `registered()`. A wrong key is silent, so only an assertion catches it.
     #[test]
     fn alternate_server_keys_round_trip_under_their_own_name() {
         for (key, name) in [
@@ -427,8 +400,7 @@ mod tests {
             // Foreign keys survive.
             assert_eq!(v["theme"], "dark");
 
-            // Uninstall strips the entry AND the now-empty map, leaving the
-            // user's own config behind.
+            // Uninstall strips the entry AND the now-empty map.
             assert_eq!(
                 json_server_keyed(&p, "/bin/cona", false, key).unwrap(),
                 Change::Updated
@@ -441,9 +413,7 @@ mod tests {
         }
     }
 
-    /// OpenCode/Crush name the argv `command` as an ARRAY and tag the transport
-    /// `"local"`; Zed nests it under `source: "custom"`. Getting the shape wrong
-    /// fails the same silent way a wrong key does.
+    /// A wrong entry shape fails as silently as a wrong key.
     #[test]
     fn entry_shapes_match_each_harness_contract() {
         let stdio = ServerKey::McpServers.entry("/bin/cona");
@@ -462,8 +432,7 @@ mod tests {
         assert_eq!(zed["args"], serde_json::json!(["mcp"]));
     }
 
-    /// Uninstall must never CREATE the server map: a config that never had one
-    /// comes back byte-identical, not carrying a fresh empty scaffold.
+    /// Uninstall must never CREATE the server map.
     #[test]
     fn uninstall_on_a_config_without_our_key_is_a_no_op() {
         let dir = tmp("nokey");

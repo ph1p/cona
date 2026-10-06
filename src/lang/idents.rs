@@ -1,6 +1,6 @@
-//! Identifier extraction: semantic (tree-sitter identifier leaves) with the
-//! textual word-boundary fallback. Every fail-open policy for refs/grep/
-//! rename/call-graph identifier scans lives here.
+//! Identifier extraction: semantic (tree-sitter identifier leaves) with a
+//! word-boundary text fallback. Every fail-open policy for identifier scans
+//! (refs/grep/rename/call graph) lives here.
 
 use super::parse;
 use tree_sitter::Node;
@@ -35,8 +35,7 @@ pub fn extract_idents(src: &str) -> Vec<String> {
 }
 
 /// Identifier occurrences as (name, 1-based line) via tree-sitter. Only
-/// *identifier-kind leaf nodes* are collected, so occurrences inside string
-/// literals and comments never match — the semantic upgrade over a text scan.
+/// identifier-kind leaves count, so strings and comments never match.
 /// Errors when the language can't be parsed; callers fall back to text.
 pub fn ident_occurrences(lang: &str, src: &str) -> anyhow::Result<Vec<(String, usize)>> {
     let mut out = Vec::new();
@@ -44,10 +43,9 @@ pub fn ident_occurrences(lang: &str, src: &str) -> anyhow::Result<Vec<(String, u
     Ok(out)
 }
 
-/// Iterative pre-order over `root` and every descendant. `visit` returns
-/// whether to descend into the node's children. Recursion-free like `walk`:
-/// traversal depth would equal AST depth, and generated/minified files nest
-/// deeper than any thread's stack. TreeCursor keeps it allocation-free.
+/// Iterative pre-order over `root`; `visit` returns whether to descend.
+/// Recursion-free like `walk`, since generated/minified files nest deeper than
+/// any thread's stack. TreeCursor keeps it allocation-free.
 pub(crate) fn for_each_node<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>) -> bool) {
     let mut cursor = root.walk();
     'down: loop {
@@ -66,10 +64,9 @@ pub(crate) fn for_each_node<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>) 
 }
 
 fn collect_idents(node: Node, src: &str, out: &mut Vec<(String, usize)>) {
-    // Lean traversal for the flag-less callers (refs / tree --rank): pushes
-    // (name, line) directly. Deliberately does NOT run call_node_of per ident —
-    // that ancestor walk is pure waste when the call flag is thrown away, and
-    // this path runs over every identifier of every file on hot commands.
+    // Lean path for flag-less callers (refs / tree --rank). Deliberately skips
+    // call_node_of: that ancestor walk is waste when the call flag is dropped,
+    // and this runs over every identifier of every file on hot commands.
     for_each_node(node, |n| {
         if n.child_count() == 0 && n.kind().ends_with("identifier") {
             if let Ok(text) = n.utf8_text(src.as_bytes()) {
@@ -81,12 +78,10 @@ fn collect_idents(node: Node, src: &str, out: &mut Vec<(String, usize)>) {
     });
 }
 
-/// 1-based lines where `name` occurs as an identifier. Semantic via
-/// tree-sitter when the language parses; word-boundary text scan otherwise
-/// (fail-open: an unparseable file still yields its textual hits).
+/// 1-based lines where `name` occurs as an identifier: semantic when the
+/// language parses, else fail-open word-boundary text scan.
 pub fn ref_lines(lang: Option<&str>, src: &str, name: &str) -> Vec<usize> {
-    // substring pre-check: identifier occurrences are a subset of substring
-    // hits, so a miss here skips the whole (dominant) tree-sitter parse
+    // identifier hits are a subset of substring hits — a miss skips the parse
     if !src.contains(name) {
         return Vec::new();
     }
@@ -109,9 +104,8 @@ fn collect_named_lines(node: Node, src: &str, name: &str, out: &mut Vec<usize>) 
     out.extend(pos.into_iter().map(|(ln, _)| ln));
 }
 
-/// Occurrence counts of the `names` of interest in `src` — semantic when the
-/// language parses, token-scan fallback otherwise. The fail-open policy for
-/// counting lives only here.
+/// Occurrence counts of `names` in `src`, semantic or token-scan fallback.
+/// The fail-open policy for counting lives only here.
 pub fn ident_counts(
     lang: Option<&str>,
     src: &str,
@@ -135,11 +129,9 @@ pub fn ident_counts(
     counts
 }
 
-/// Ordered-unique identifier names (≥2 chars) within lines [start, end] of
-/// `src` — semantic when parseable, token scan of the sliced lines otherwise.
-/// Used by `context` for callee candidates; the whole file is parsed (not the
-/// body slice) because fragment parsing is unreliable for indentation-based
-/// grammars.
+/// Ordered-unique identifiers (≥2 chars) in lines [start, end] — `context`'s
+/// callee candidates. Parses the whole file, not the slice: fragment parsing
+/// is unreliable for indentation-based grammars.
 pub fn idents_in_range(lang: Option<&str>, src: &str, start: usize, end: usize) -> Vec<String> {
     match lang.and_then(|l| ident_occurrences(l, src).ok()) {
         Some(occ) => {
@@ -161,14 +153,11 @@ pub fn idents_in_range(lang: Option<&str>, src: &str, start: usize, end: usize) 
     }
 }
 
-/// Identifier occurrences with the standard fail-open policy: semantic when
-/// the language parses, per-line token scan otherwise. Feeds the call graph.
-/// The bool marks CALL POSITION: the identifier is the function of a call /
-/// method call / macro invocation. The trailing `Option<usize>` is the arg
-/// count at that call site (`None` when not a call, or when the arg group
-/// isn't recognisable) — the arity signal for scope narrowing. Textual
-/// fallback can't see syntax and marks everything as a (potential) call with
-/// no arg count so edges stay fail-open.
+/// Identifier occurrences for the call graph, fail-open. The bool marks CALL
+/// POSITION (callee of a call / method call / macro); the `Option<usize>` is
+/// the arg count there (`None` if not a call or no recognisable arg group) —
+/// the arity signal for scope narrowing. The text fallback can't see syntax,
+/// so it marks everything as a potential call with no arg count.
 pub fn ident_occurrences_failopen(
     lang: Option<&str>,
     src: &str,
@@ -187,11 +176,8 @@ pub fn ident_occurrences_failopen(
     out
 }
 
-/// Is this identifier node the callee of a call? Covers plain calls
-/// (`foo(…)`), method/attribute calls (`x.foo(…)`) and rust macros
-/// (`foo!(…)`) across the bundled grammars:
-/// rust call_expression/macro_invocation, python call, js/ts call_expression
-/// (+ new_expression), with field/member/attribute hops in between.
+/// Call node kinds across the bundled grammars: plain calls (`foo(…)`),
+/// constructors (`new`), and rust macros (`foo!(…)`).
 fn is_call_kind(k: &str) -> bool {
     matches!(
         k,
@@ -205,9 +191,8 @@ fn is_call_kind(k: &str) -> bool {
     )
 }
 
-/// The enclosing call node when `node` is the callee identifier of a call
-/// (plain, method, or macro), else `None` — i.e. `Some(_)` marks CALL
-/// POSITION. Arg counting derives from the returned node.
+/// The enclosing call node when `node` is its callee (plain, method, macro);
+/// `Some(_)` marks CALL POSITION, and arg counting uses the returned node.
 fn call_node_of(node: Node) -> Option<Node> {
     let parent = node.parent()?;
     let pk = parent.kind();
@@ -256,11 +241,9 @@ fn call_node_of(node: Node) -> Option<Node> {
     None
 }
 
-/// Number of arguments passed at a call node — the arity signal paired with
-/// `param_count`. Finds the arguments group (`arguments`/`argument_list`/…)
-/// and counts its NAMED children (skips the `(` `)` `,` anonymous tokens).
-/// `None` when the group is absent (e.g. a macro without a plain arg list) so
-/// the arity tiebreak simply doesn't fire rather than guessing.
+/// Arguments at a call node (pairs with `param_count`): NAMED children of the
+/// arg group, skipping `(` `)` `,`. `None` without a group (e.g. a macro), so
+/// the arity tiebreak doesn't fire rather than guessing.
 fn arg_count_of(call: Node) -> Option<usize> {
     if let Some(args) = call.child_by_field_name("arguments") {
         return Some(args.named_child_count());
@@ -299,10 +282,9 @@ fn collect_idents_with_call(
     });
 }
 
-/// Byte-exact positions of `name` as an identifier: (1-based line, byte col).
-/// Semantic when parseable; word-boundary text scan otherwise (fallback also
-/// matches strings/comments — rename callers must warn on that path).
-/// Returns (positions, semantic?).
+/// Positions of `name` as an identifier, (1-based line, byte col), plus
+/// whether the scan was semantic. The text fallback also matches
+/// strings/comments — rename callers must warn on that path.
 pub fn ident_positions(lang: Option<&str>, src: &str, name: &str) -> (Vec<(usize, usize)>, bool) {
     if !src.contains(name) {
         return (Vec::new(), true); // no occurrences — no fallback was needed
@@ -317,8 +299,8 @@ pub fn ident_positions(lang: Option<&str>, src: &str, name: &str) -> (Vec<(usize
     (textual_positions(src, name), false)
 }
 
-/// THE word-boundary text scanner — every textual fallback that needs
-/// positions or lines derives from this one implementation.
+/// THE word-boundary text scanner; every textual fallback needing positions
+/// or lines derives from it.
 fn textual_positions(src: &str, name: &str) -> Vec<(usize, usize)> {
     let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let mut out = Vec::new();

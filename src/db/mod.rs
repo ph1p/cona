@@ -7,9 +7,8 @@ use std::sync::Once;
 static READ_ONLY: AtomicBool = AtomicBool::new(false);
 static EPHEMERAL_DATA_DIR_NOTICE: Once = Once::new();
 
-/// Enable the process-wide inspection-only mode used by the CLI's
-/// `--read-only` flag. This deliberately applies to the database layer too,
-/// so a future command cannot accidentally write telemetry or schema changes.
+/// Process-wide inspection-only mode (`--read-only`). Enforced in the DB layer
+/// so no command can accidentally write telemetry or schema changes.
 pub fn set_read_only(enabled: bool) {
     READ_ONLY.store(enabled, Ordering::Relaxed);
 }
@@ -18,11 +17,10 @@ pub fn is_read_only() -> bool {
     READ_ONLY.load(Ordering::Relaxed)
 }
 
-/// Find the project root: nearest ancestor containing .git, else cwd.
-/// Nearest ancestor of `start` (inclusive) containing a `.git`, else `start`
-/// itself. The single source of truth for "which project does this path belong
-/// to" — the hook and `project_root` both resolve through here so a file's root
-/// and the indexed root can never diverge on the walk.
+/// Nearest ancestor of `start` (inclusive) containing a `.git`, else `start`.
+/// THE answer to "which project does this path belong to" — the hook and
+/// `project_root` both resolve here, so a file's root and the indexed root
+/// can never diverge.
 pub fn git_root_from(start: &Path) -> PathBuf {
     let mut dir = start;
     loop {
@@ -40,13 +38,12 @@ pub fn project_root() -> Result<PathBuf> {
     Ok(git_root_from(&std::env::current_dir()?))
 }
 
-/// Resolved once per process. `data_dir` is on the hook hot path and reached
-/// several times per command (global db, project db, `project_db_path`), and
-/// resolving it writes: `ensure_writable_data_dir` does mkdir + create + unlink.
-/// Repeating that probe per call turns the documented "single stat, no DB open"
-/// hook check into a dozen syscalls. Caching is sound because neither input
-/// changes mid-process: `CONA_DATA_DIR` is read from the environment, and
-/// `--read-only` is set before any storage access.
+/// Resolved once per process. `data_dir` sits on the hook hot path, is reached
+/// several times per command, and resolving it writes (mkdir + create + unlink
+/// probe) — per call that turns the "single stat, no DB open" hook check into a
+/// dozen syscalls. Sound because neither input changes mid-process:
+/// `CONA_DATA_DIR` comes from the env, `--read-only` is set before any storage
+/// access.
 static DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 pub fn data_dir() -> Result<PathBuf> {
@@ -59,17 +56,15 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 
 /// The automatic sandbox fallback location — THE one definition. A read-only
-/// lookup that disagrees with where the fallback index was written reports "no
-/// existing index", indistinguishable from an unindexed repo, so the path must
-/// not be spelled out per call site.
+/// lookup that disagrees with where the fallback index was written looks like
+/// an unindexed repo, so never spell the path out per call site.
 pub fn ephemeral_data_dir() -> PathBuf {
     std::env::temp_dir().join("cona")
 }
 
 fn resolve_data_dir() -> Result<PathBuf> {
-    // CONA_DATA_DIR is explicit: never silently redirect a user's chosen
-    // storage location. The fallback below is only for the default ~/.cona,
-    // which agent sandboxes commonly make read-only.
+    // CONA_DATA_DIR is explicit: never silently redirect it. The fallback
+    // below is only for the default ~/.cona, which sandboxes often make read-only.
     if let Some(v) = std::env::var_os("CONA_DATA_DIR").filter(|v| !v.is_empty()) {
         let d = PathBuf::from(v);
         if !is_read_only() {
@@ -82,10 +77,9 @@ fn resolve_data_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("no home dir; set CONA_DATA_DIR to a writable directory"))?
         .join(".cona");
     if is_read_only() {
-        // In read-only mode never probe by creating directories. A readable
-        // global database is the durable-storage marker: merely seeing the
-        // ~/.cona directory is not enough, because sandboxes often expose the
-        // directory but deny database access inside it.
+        // Read-only: never probe by creating directories. A readable global.db
+        // marks durable storage — the bare ~/.cona dir is not enough, since
+        // sandboxes often expose it but deny database access inside.
         return Ok(
             if std::fs::File::open(preferred.join("global.db")).is_ok() {
                 preferred
@@ -117,10 +111,9 @@ fn resolve_data_dir() -> Result<PathBuf> {
     }
 }
 
-/// Creating a directory alone is not enough to establish that SQLite can put
-/// a database there: a sandbox may expose an existing `~/.cona` directory but
-/// deny new files inside it. A short-lived, PID-scoped probe catches that case
-/// before a navigation command reaches rusqlite's opaque open error.
+/// A created directory doesn't prove SQLite can write there: a sandbox may
+/// expose `~/.cona` but deny new files inside. A PID-scoped probe file catches
+/// that before rusqlite's opaque open error does.
 fn ensure_writable_data_dir(d: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(d.join("projects"))?;
     let probe = d.join(format!(".write-probe-{}", std::process::id()));
@@ -210,9 +203,9 @@ pub fn open_project_db(root: &Path) -> Result<Connection> {
          );
          CREATE INDEX IF NOT EXISTS idx_notes_symbol ON notes(symbol);",
     )?;
-    // Index rows are only re-extracted when a file's mtime/size moves, so an
-    // extractor change would never reach an existing index. An older stamp
-    // marks every file stale; the next refresh reparses them all once.
+    // Rows are only re-extracted when mtime/size moves, so an extractor change
+    // would never reach an existing index. An older stamp marks every file
+    // stale; the next refresh reparses them all once.
     let ver: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if ver < EXTRACT_VERSION {
         conn.execute_batch(&format!(
@@ -227,10 +220,9 @@ pub fn open_project_db(root: &Path) -> Result<Connection> {
 /// 1: Go methods qualified by receiver type; JS/TS/Go top-level constants.
 const EXTRACT_VERSION: i64 = 1;
 
-/// Open an already-built project index without creating files or running
-/// migrations. Prefer durable storage, but also look in the automatic
-/// sandbox fallback so `cona --read-only` can inspect an index created earlier
-/// in the same sandbox.
+/// Open an already-built project index without creating files or migrating.
+/// Prefers durable storage, but also checks the sandbox fallback so
+/// `--read-only` can inspect an index built earlier in the same sandbox.
 pub fn open_existing_project_db(root: &Path) -> Result<Connection> {
     let rel = PathBuf::from("projects").join(format!("{}.db", project_hash(root)));
     [project_db_path(root), ephemeral_data_dir().join(rel)]
@@ -284,8 +276,8 @@ pub fn open_global_db() -> Result<Connection> {
             tokens_saved INTEGER NOT NULL
          );",
     )?;
-    // migration: `detail` records the query target (symbol/file/pattern) so
-    // stats can surface top symbols/files. Additive + nullable — safe on old DBs.
+    // migration: `detail` = query target (symbol/file/pattern) for top-target
+    // stats. Additive — safe on old DBs.
     if !column_exists(&conn, "usage", "detail")? {
         conn.execute_batch("ALTER TABLE usage ADD COLUMN detail TEXT NOT NULL DEFAULT ''")?;
     }
@@ -377,17 +369,12 @@ pub fn register_project(root: &Path, files: i64, symbols: i64) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// stats aggregation (shared by `cona stats` and `cona ui`)
-// ---------------------------------------------------------------------------
-
-/// Whether `root` already has a populated index. Never creates a DB —
-/// safe to call from hooks on arbitrary directories.
+/// Whether `root` already has a populated index. Never creates a DB — safe
+/// from hooks on arbitrary directories.
 ///
-/// Routes through the same read-only-aware open as `open_indexed`: gating on
-/// `project_db_path` alone would answer "not indexed" for an index sitting in
-/// the sandbox fallback, which `open_indexed` finds and would then happily
-/// query — two callers disagreeing about whether the same repo is indexed.
+/// Uses the same read-only-aware open as `open_indexed`: gating on
+/// `project_db_path` alone would miss an index in the sandbox fallback that
+/// `open_indexed` finds, so the two would disagree about the same repo.
 pub fn has_index(root: &Path) -> bool {
     let conn = if is_read_only() {
         open_existing_project_db(root)
@@ -416,23 +403,20 @@ pub fn project_db_path(root: &Path) -> PathBuf {
 
 /// Guard for "one walk of this project at a time across processes".
 ///
-/// Several agent sessions opening at once each fire the SessionStart hook, and
-/// every one of them used to start its own full walk of the same tree — N times
-/// the CPU and the peak memory for one shared result. The lock is an
-/// exclusively-created marker file next to the project DB; the loser skips its
-/// walk rather than waiting, because the winner is producing exactly the index
-/// it wanted and a few seconds of staleness is invisible (`locate_fresh`
-/// re-checks per query anyway).
+/// N sessions opening together each fire SessionStart; without this each
+/// walks the same tree — N times the CPU and peak memory for one result. The
+/// lock is an exclusively-created marker next to the project DB; the loser
+/// skips rather than waits, since the winner builds the same index and brief
+/// staleness is invisible (`locate_fresh` re-checks per query anyway).
 ///
-/// Held for the lifetime of the returned guard, which unlinks on drop. A marker
-/// left behind by a killed process would block every later walk, so one older
-/// than `IndexLock::STALE_SECS` is reclaimed.
+/// Held for the guard's lifetime, unlinked on drop. A marker left by a killed
+/// process would block every later walk, so one older than
+/// `IndexLock::STALE_SECS` is reclaimed.
 pub struct IndexLock(PathBuf);
 
 impl IndexLock {
-    /// Age past which a marker is assumed orphaned. Comfortably longer than any
-    /// real walk (a huge tree indexes in seconds), short enough that a crashed
-    /// process doesn't wedge indexing for a whole session.
+    /// Age past which a marker is assumed orphaned: far longer than any real
+    /// walk, short enough that a crash doesn't wedge indexing for a session.
     const STALE_SECS: u64 = 300;
 
     /// Whether a marker of this age is orphaned. `None` = the age is unknown
@@ -442,15 +426,14 @@ impl IndexLock {
         age.is_none_or(|a| a.as_secs() > Self::STALE_SECS)
     }
 
-    /// `Some(guard)` if this process may index `root`; `None` if another one is
-    /// already doing it. Any filesystem trouble yields a guard — failing open
-    /// keeps indexing working, which matters more than the deduplication.
+    /// `Some(guard)` if this process may index `root`; `None` if another one
+    /// is. Filesystem trouble yields a guard — fail-open: indexing matters more
+    /// than dedup.
     pub fn acquire(root: &Path) -> Option<Self> {
         Self::at(&project_db_path(root).with_extension("indexing"))
     }
 
-    /// `acquire` against an explicit marker path — the whole policy, with the
-    /// data-dir lookup lifted out so it is testable without a global data dir.
+    /// `acquire` against an explicit marker path — testable without a data dir.
     fn at(path: &Path) -> Option<Self> {
         if path.as_os_str().is_empty() {
             return Some(Self(PathBuf::new()));

@@ -2,43 +2,35 @@
 
 use std::path::Path;
 
-/// What a shell command turns out to be, once normalized. Harnesses that run
-/// every file operation through a shell tool (Codex: `tool_name = "Bash"`,
-/// `tool_input.command = "sed -n '1,240p' main.rs"`) never emit a `Read`/`Grep`
-/// tool call, so without this the whole PreToolUse tier is dead there.
+/// What a shell command turns out to be, once normalized. Shell-only harnesses
+/// (Codex: `tool_name = "Bash"`, `command = "sed -n '1,240p' main.rs"`) never
+/// emit `Read`/`Grep`, so without this the PreToolUse tier is dead there.
 ///
-/// Deliberately narrow. Anything not recognised is `Other` and passes through —
-/// this hook may never block work it does not fully understand.
+/// Deliberately narrow: anything unrecognised is `Other` and passes — the hook
+/// may never block work it does not fully understand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellIntent {
-    /// A read of `path` starting at line 1. `upto` is the last line the command
-    /// asks for (`None` = to the end, as with `cat` or `sed -n '1,$p'`).
+    /// A read of `path` from line 1. `upto` is the last line asked for (`None`
+    /// = to the end, as with `cat` or `sed -n '1,$p'`).
     ///
-    /// A numeric bound is NOT automatically a partial read: `sed -n '1,240p'` is
-    /// exactly how an agent spells "show me the file" — it picks a bound it
-    /// expects to exceed the length. The caller compares `upto` against the real
-    /// line count and only treats it as partial when the file is genuinely
-    /// longer, so a capped read of a longer file still passes through.
+    /// A numeric bound is NOT automatically partial: `sed -n '1,240p'` is how
+    /// an agent spells "show me the file". The caller treats it as partial only
+    /// when the real file is longer than `upto`.
     Read { path: String, upto: Option<i64> },
     /// A read the agent already narrowed (line range, `head -n`, …) — the
-    /// shell-side equivalent of Read with offset/limit. Never intercepted, but
-    /// distinguished from `Other` so the intent is explicit.
+    /// shell equivalent of Read with offset/limit. Never intercepted.
     ///
-    /// `path` is `Some` only when the command actually pulls a slice of ONE
-    /// named file into context, which is what the cross-call slice accounting
-    /// counts. Metadata probes (`wc`, `ls`, `stat`, `echo`) share this variant
-    /// so they cannot poison an otherwise-recognised line, but they carry no
-    /// path: they read no content, and counting them would nag an agent for
-    /// commands that cost it nothing.
+    /// `path` is `Some` only when ONE named file's slice enters context (what
+    /// the slice accounting counts). Metadata probes (`wc`, `ls`, `stat`,
+    /// `echo`) share the variant so they cannot poison a recognised line, but
+    /// carry no path: they read no content and must not be nagged about.
     PartialRead { path: Option<String> },
-    /// `sed -n 'A,Bp' f` with A > 1: a slice of `span` lines. Narrow slices are
-    /// partial reads; one wider than the full-read threshold is a full read
-    /// split to dodge it, and is judged as one (the threshold lives in config,
-    /// so intercept decides).
+    /// `sed -n 'A,Bp' f` with A > 1: a slice of `span` lines. One wider than
+    /// the full-read threshold is a split full read and judged as one (the
+    /// threshold lives in config, so intercept decides).
     Slice { path: String, span: i64 },
-    /// A broad content search for `pattern` under an optional path. `soft`
-    /// marks a search whose output is already bounded (`-l`, `-c`, context
-    /// flags) — still broad, but the redirect softens to an advisory.
+    /// A broad content search for `pattern` under an optional path. `soft` =
+    /// output already bounded (`-l`, `-c`, context flags): advisory, not block.
     Grep {
         pattern: String,
         path: Option<String>,
@@ -49,10 +41,9 @@ pub enum ShellIntent {
 }
 
 /// Split ONE simple command into words, honouring single/double quotes.
-/// Returns `None` on anything that makes the words untrustworthy: an
-/// unterminated quote, a redirect, a substitution (`$(`, backticks) or a
-/// backslash escape. Chaining operators are handled by `split_segments` before
-/// this ever runs, so reaching one here is also a bail.
+/// `None` on anything that makes the words untrustworthy: unterminated quote,
+/// redirect, substitution (`$(`, backticks), backslash escape, or a chaining
+/// operator (`split_segments` should have removed those already).
 pub fn shell_words(cmd: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut cur = String::new();
@@ -96,12 +87,10 @@ pub fn shell_words(cmd: &str) -> Option<Vec<String>> {
 }
 
 /// Split a command line on the chaining operators `&&`, `||`, `;` and `|`,
-/// respecting quotes. Compound commands are the NORM in a shell-tool harness
-/// (`wc -l f && sed -n '1,500p' f`), so refusing them outright would leave the
-/// intercept dead; instead each segment is classified on its own and the caller
-/// only acts when every one of them is a read.
-///
-/// `None` when quoting is unbalanced — we cannot tell where a segment ends.
+/// respecting quotes. Compound commands are the NORM in shell harnesses
+/// (`wc -l f && sed -n '1,500p' f`), so each segment is classified on its own
+/// and the caller acts only when every one is a read. `None` on unbalanced
+/// quoting.
 pub fn split_segments(cmd: &str) -> Option<Vec<String>> {
     Some(
         split_pipeline(cmd)?
@@ -112,9 +101,8 @@ pub fn split_segments(cmd: &str) -> Option<Vec<String>> {
 }
 
 /// `split_segments`, with each segment flagged `true` when it reads the
-/// previous one's output through a single `|`. A piped `sort`/`cut`/`grep -v`
-/// only filters what came before and reads no file of its own, so
-/// `classify_shell` can treat it as neutral instead of unrecognised.
+/// previous one's output through a single `|`, so `classify_shell` can treat
+/// a piped filter (`sort`, `cut`, `grep -v`) as neutral.
 pub fn split_pipeline(cmd: &str) -> Option<Vec<(String, bool)>> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -165,9 +153,8 @@ pub fn split_pipeline(cmd: &str) -> Option<Vec<(String, bool)>> {
 }
 
 /// Peel a `sh -c "…"` / `bash -lc "…"` / `zsh -lc "…"` wrapper off a command
-/// line, returning the inner script. Codex issues every tool call as
-/// `/bin/zsh -lc "<script>"`, so without this the classifier only ever sees the
-/// shell itself. Returns `None` when the command is not such a wrapper.
+/// line, returning the inner script (Codex issues every call as
+/// `/bin/zsh -lc "<script>"`). `None` when the command is not such a wrapper.
 pub fn unwrap_shell_wrapper(cmd: &str) -> Option<String> {
     let words = shell_words(cmd)?;
     let (prog, args) = words.split_first()?;
@@ -184,17 +171,13 @@ pub fn unwrap_shell_wrapper(cmd: &str) -> Option<String> {
 
 /// Classify a whole command line, wrapper and chaining included.
 ///
-/// A line is a read/search only when EVERY segment is one — a single
-/// unrecognised segment (an edit, a build, a `rm`) makes the whole line
-/// `Other`, because blocking it would block that segment too. Among the
-/// recognised segments the strongest intent wins: a full `Read` outranks a
-/// `Grep`, which outranks a `PartialRead`, so `wc -l f && sed -n '1,500p' f`
-/// is judged on the read.
+/// A line is a read/search only when EVERY segment is one — one unrecognised
+/// segment (an edit, a build, `rm`) makes it `Other`, since blocking the line
+/// blocks that segment too. The strongest intent wins (`Read` > `Grep` >
+/// `PartialRead`), so `wc -l f && sed -n '1,500p' f` is judged on the read.
 ///
-/// Two segment shapes are recognised without being intents of their own:
-/// `cd DIR` moves the directory later relative paths resolve against (agents
-/// prefix nearly every command with one), and a piped stdin filter (`| sort`,
-/// `| cut -c1-80`, `| grep -v x`) only reshapes the previous segment's output.
+/// Recognised but not intents: `cd DIR` (moves where later relative paths
+/// resolve) and a piped stdin filter (`| sort`, `| grep -v x`).
 pub fn classify_shell(cmd: &str) -> ShellIntent {
     let inner = unwrap_shell_wrapper(cmd);
     let line = inner.as_deref().unwrap_or(cmd);
@@ -249,9 +232,8 @@ fn cd_target(seg: &str) -> Option<Option<String>> {
     })
 }
 
-/// Join a shell path onto a `cd` directory with `/`, not `Path::join`: the
-/// line is shell syntax, and `Path::join` would emit `\` on Windows. An
-/// absolute `p` replaces `dir`, as a shell would.
+/// Join a shell path onto a `cd` directory with `/` (`Path::join` would emit
+/// `\` on Windows). An absolute `p` replaces `dir`, as a shell would.
 fn shell_join(dir: &str, p: &str) -> String {
     if p.starts_with('/') || Path::new(p).is_absolute() {
         return p.to_string();
@@ -260,8 +242,7 @@ fn shell_join(dir: &str, p: &str) -> String {
 }
 
 /// Resolve an intent's relative paths against the `cd` directory in effect.
-/// A path-less search (`rg X`) searches the cwd, so it becomes a search of
-/// that directory.
+/// A path-less search (`rg X`) becomes a search of that directory.
 fn rebase(intent: ShellIntent, dir: Option<&str>) -> ShellIntent {
     let Some(dir) = dir else {
         return intent;
@@ -293,9 +274,8 @@ fn rebase(intent: ShellIntent, dir: Option<&str>) -> ShellIntent {
 }
 
 /// A command that, fed through a pipe, only filters or reshapes its stdin.
-/// Only consulted for piped segments: `grep x` alone searches the cwd, while
-/// `ls | grep x` searches nothing but `ls`'s output. A grep or sed that names
-/// a file of its own is not a filter and gets classified normally.
+/// Only consulted for piped segments (`ls | grep x` searches only `ls`'s
+/// output). A grep/sed naming a file of its own is classified normally.
 fn is_stdin_filter(seg: &str) -> bool {
     let Some(words) = shell_words(seg) else {
         return false;
@@ -310,8 +290,7 @@ fn is_stdin_filter(seg: &str) -> bool {
     match prog.as_ref() {
         "sort" | "uniq" | "cut" | "tr" | "column" | "nl" | "rev" | "tac" | "fold" | "fmt"
         | "awk" | "jq" | "head" | "tail" | "wc" => true,
-        // No operand after the pattern = it greps stdin. A second operand
-        // would be a path, and that grep is judged as a search of its own.
+        // No operand after the pattern = greps stdin; a second one is a path.
         "grep" | "rg" | "ag" | "ack" => operands() <= 1,
         // Only a script, no file: prints stdin. `-i` needs a file to edit.
         "sed" => {
@@ -324,10 +303,9 @@ fn is_stdin_filter(seg: &str) -> bool {
     }
 }
 
-/// The one file operand of a flag-carrying command, or `None` when there isn't
-/// exactly one (`head -n 5 a.rs b.rs`, or a pipe-fed `head -n 5` with no
-/// operand at all). Flag VALUES are the trap: `-n 50` must not read as a file,
-/// so a numeric word following a bare short flag is skipped.
+/// The one file operand of a flag-carrying command, or `None` unless exactly
+/// one (`head -n 5 a.rs b.rs`, pipe-fed `head -n 5`). Flag VALUES are the
+/// trap: `-n 50` must not read as a file.
 fn sole_operand(args: &[String]) -> Option<String> {
     let mut files: Vec<&String> = Vec::new();
     let mut skip_next = false;
@@ -354,9 +332,8 @@ fn sole_operand(args: &[String]) -> Option<String> {
 fn rank(i: &ShellIntent) -> u8 {
     match i {
         ShellIntent::Other => 0,
-        // A pathless metadata probe is the weakest recognised intent; a partial
-        // read that names a file outranks it, so `wc -l f && sed -n '40,80p' f`
-        // is judged on the slice rather than on whichever segment came first.
+        // A pathless probe is weakest, so `wc -l f && sed -n '40,80p' f` is
+        // judged on the slice, not on whichever segment came first.
         ShellIntent::PartialRead { path: None } => 1,
         ShellIntent::PartialRead { path: Some(_) } | ShellIntent::Slice { .. } => 2,
         ShellIntent::Grep { .. } => 3,
@@ -364,16 +341,13 @@ fn rank(i: &ShellIntent) -> u8 {
     }
 }
 
-/// Classify ONE simple command (no chaining, no wrapper). Pure and unit-tested:
-/// the risky half (what does this command *do*) is decided by testable code,
-/// and the decision half is the one already shared with the native Read/Grep
-/// path.
+/// Classify ONE simple command (no chaining, no wrapper). Pure and unit-tested;
+/// the decision half is shared with the native Read/Grep path.
 pub fn classify_command(cmd: &str) -> ShellIntent {
     let Some(words) = shell_words(cmd) else {
         return ShellIntent::Other;
     };
-    // Skip leading `VAR=value` assignments (`LC_ALL=C grep …`) — they change the
-    // environment, not what the command does.
+    // Skip leading `VAR=value` assignments (`LC_ALL=C grep …`).
     let start = words
         .iter()
         .position(|w| {
@@ -402,16 +376,12 @@ pub fn classify_command(cmd: &str) -> ShellIntent {
         "head" | "tail" => ShellIntent::PartialRead {
             path: sole_operand(args),
         },
-        // Metadata probes: they pull no file content into context, and an agent
-        // routinely pairs one with the read it is about to do (`wc -l f &&
-        // sed -n '1,500p' f`). Treated as harmless company so they cannot
-        // poison an otherwise-recognised line.
+        // Metadata probes pull no content and routinely accompany a read
+        // (`wc -l f && sed -n '1,500p' f`); harmless, so they cannot poison it.
         "wc" | "ls" | "pwd" | "file" | "stat" | "basename" | "dirname" | "echo" => {
             ShellIntent::PartialRead { path: None }
         }
-        // `sed -n '<range>p' FILE`. A range that starts past line 1 or stops
-        // early is a partial read; `1,$p` / `1,99999p` over a shorter file is
-        // how agents spell "read it all", so those fall through to Read.
+        // `sed -n '<range>p' FILE`; `1,$p` / `1,99999p` is "read it all".
         "sed" => classify_sed(args),
         "rg" | "grep" | "ag" | "ack" => classify_grep(args),
         _ => ShellIntent::Other,
@@ -419,8 +389,7 @@ pub fn classify_command(cmd: &str) -> ShellIntent {
 }
 
 /// `sed -n '1,240p' FILE` → the read half of `classify_shell`. Only the
-/// print-range idiom is understood; every other sed script is `Other` (it may
-/// be an edit, and we must not touch it).
+/// print-range idiom; any other sed script is `Other` (it may be an edit).
 fn classify_sed(args: &[String]) -> ShellIntent {
     let mut script: Option<&str> = None;
     let mut files: Vec<&String> = Vec::new();
@@ -453,9 +422,8 @@ fn classify_sed(args: &[String]) -> ShellIntent {
         // A single-line script (`sed -n '5p'`) is as partial as it gets.
         None => return narrowed,
     };
-    // Only a read that starts at line 1 can be a full read; `sed -n '40,80p'`
-    // is the agent already narrowing — unless the slice is wide enough to be
-    // a full read in pieces (`sed -n '20,420p'`), which intercept judges.
+    // Only a read from line 1 is a full read; `sed -n '40,80p'` is narrowing —
+    // unless wide enough to be a full read in pieces (intercept judges).
     if start.trim() != "1" {
         return match (start.trim().parse::<i64>(), end.trim().parse::<i64>()) {
             (Ok(a), Ok(b)) if b >= a => ShellIntent::Slice {
@@ -507,9 +475,8 @@ const GREP_PRESENTATION_LONG: &[&str] = &[
 ];
 
 /// `rg PATTERN [PATH]` → the grep half of `classify_shell`. A narrowing flag
-/// (`-g`, `-t`, `--files`, `-m`, …) makes it surgical and therefore `Other`.
-/// Output-bounding flags (`-l`, `-c`, context windows) keep it a `Grep` but
-/// mark it `soft` — the search is still broad, only its presentation isn't.
+/// (`-g`, `-t`, `--files`, `-m`, …) makes it surgical → `Other`.
+/// Output-bounding flags (`-l`, `-c`, context) keep it a `Grep`, marked `soft`.
 fn classify_grep(args: &[String]) -> ShellIntent {
     let all_digits = |v: &str| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit());
     let mut positional: Vec<&String> = Vec::new();
@@ -520,15 +487,12 @@ fn classify_grep(args: &[String]) -> ShellIntent {
             positional.push(a);
             continue;
         };
-        // `-r`/`-R`/`-n`/`-i` and friends only affect presentation or
-        // recursion; anything else narrows the search or changes its shape.
         let plain = flag.trim_start_matches('-');
         if plain.is_empty() {
             continue;
         }
-        // A short-flag cluster (`-rn`, `-rhno`, `-rl`) is judged letter by
-        // letter: every letter must be presentation-only or output-bounding.
-        // One narrowing or inverting letter (`-v`, `-e`, `-m`) → not ours.
+        // A short-flag cluster (`-rn`, `-rhno`) is judged per letter; one
+        // narrowing or inverting letter (`-v`, `-e`, `-m`) → not ours.
         let is_cluster = !flag.starts_with('-') && plain.chars().all(|c| c.is_ascii_alphabetic());
         if is_cluster
             && plain
@@ -558,8 +522,7 @@ fn classify_grep(args: &[String]) -> ShellIntent {
             soft = true;
             continue;
         }
-        // Bare context flags take the count as the NEXT argument; anything
-        // non-numeric there makes the line untrustworthy → not ours.
+        // Bare context flags take the count as the NEXT argument.
         if matches!(
             plain,
             "A" | "B" | "C" | "context" | "after-context" | "before-context"
@@ -574,8 +537,8 @@ fn classify_grep(args: &[String]) -> ShellIntent {
         }
         return ShellIntent::Other;
     }
-    // A bare pattern searches the cwd (rg) or is a grep without a path — both
-    // are the broad search this tier wants. A second operand is the directory.
+    // A bare pattern searches the cwd — the broad search this tier wants. A
+    // second operand is the directory.
     let (pattern, path) = match positional.as_slice() {
         [p] => (p, None),
         [p, dir] => (p, Some((*dir).clone())),

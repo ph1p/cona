@@ -7,10 +7,9 @@ use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
 
-/// One budgeted context pack for a symbol: its full source, the signatures of
-/// indexed symbols its body references (callees), and the sites that call it
-/// (callers, deduped per enclosing symbol). Replaces the show → refs → N×show
-/// round-trip chain with a single command.
+/// One budgeted pack for a symbol: full source, signatures of the indexed
+/// symbols it calls, and its call sites (deduped per enclosing symbol).
+/// Replaces the show → refs → N×show round-trip chain.
 pub fn cmd_context(
     root: &Path,
     conn: &Connection,
@@ -27,10 +26,9 @@ pub fn cmd_context(
     let body = lines[body_start..body_end].join("\n");
     let name = db::name_tail(&q).to_string();
 
-    // callees: identifiers in the body that resolve to indexed symbols
-    // (semantic with textual fail-open fallback — policy lives in lang.rs).
-    // Ordered-unique by name, carrying the call-site arg count (arity signal)
-    // and the line of the first occurrence (for the semantic-resolve tier).
+    // callees: body identifiers that resolve to indexed symbols (fail-open
+    // policy lives in lang.rs). Unique by name, with the call-site arg count
+    // (arity signal) and first-occurrence line (for the semantic-resolve tier).
     let mut idents: Vec<(String, Option<usize>, usize)> = Vec::new();
     {
         let mut seen = std::collections::HashSet::new();
@@ -109,16 +107,14 @@ pub fn cmd_context(
         }
     }
 
-    // Semantic-resolve tier (fail-open, opt-in on the helper binary): for names
-    // still ambiguous after scope/file/dir/arity, ask the out-of-process
-    // stack-graphs helper. The candidate definitions for an ambiguous name may
-    // live in OTHER files, so we feed those files to the helper as deps and let
-    // it resolve cross-file. When it points at exactly ONE of the ambiguous
-    // rows (matched by (file, line)), we collapse the rest and clear the mark.
+    // Semantic-resolve tier (fail-open, opt-in on the helper binary): names
+    // still ambiguous after scope/file/dir/arity go to the stack-graphs
+    // helper, with the candidates' OTHER files fed as deps so it can resolve
+    // cross-file. If it points at exactly ONE ambiguous row (by file, line),
+    // the rest collapse and the mark clears.
     if !ambiguous_refs.is_empty() {
-        // candidate rows = every ambiguous callee, keyed by (bare name, file,
-        // line); deps = the distinct non-primary files they live in, so a ref
-        // can resolve into them cross-file.
+        // candidates keyed by (bare name, file, line); deps = their distinct
+        // non-primary files
         let candidates: Vec<resolve::Candidate> = callees
             .iter()
             .filter(|c| c.6)
@@ -168,9 +164,8 @@ pub fn cmd_context(
             if keep.len() != 1 {
                 continue;
             }
-            // unmark the keeper FIRST (index still valid), then drop the other
-            // ambiguous rows for this name. After this the keeper is
-            // c.6 == false, so the retain predicate spares it.
+            // unmark the keeper FIRST (index still valid) so the retain
+            // below spares it while dropping the other ambiguous rows
             callees[keep[0]].6 = false;
             callees.retain(|c| !(c.6 && db::name_tail(&c.1) == *rname));
         }
@@ -196,9 +191,8 @@ pub fn cmd_context(
             if !seen_callers.insert((rel.to_string(), encl.to_string())) {
                 return true; // one entry per enclosing symbol and file
             }
-            // Well-tested symbols have far more test callers than real ones, and
-            // the cap below is first-come — unfiltered, tests crowd out the
-            // production call sites that actually answer "who uses this?".
+            // the cap below is first-come, so on well-tested symbols test
+            // callers would crowd out the production ones
             if no_tests && (entries::is_test_symbol(encl) || entries::is_test_path(rel)) {
                 tests_hidden += 1;
                 return true;

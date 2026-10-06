@@ -6,10 +6,9 @@ use crate::{db, ui};
 use anyhow::{bail, Result};
 use std::path::PathBuf;
 
-/// `cona install [--bin-dir DIR]`
-/// Run inside the cona source checkout: builds (if needed), installs the
-/// binary, records source/install paths, and wires git hooks in the source
-/// repo so every commit/merge rebuilds the installed binary.
+/// `cona install [--bin-dir DIR]` — from the source checkout: build if needed,
+/// install the binary, record paths, and wire source-repo git hooks so every
+/// commit/merge rebuilds it.
 pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
     println!("{}", ui::banner("cona install"));
 
@@ -53,9 +52,8 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
         ui::ok(&format!("{verb} → {}", crate::install::short_path(&dst)))
     );
 
-    // Optional semantic-resolve helper: a separate crate (own tree-sitter 0.24
-    // runtime — can't share cona's build). Build + install it beside cona
-    // best-effort; failure is non-fatal (cona degrades to its heuristics).
+    // Optional resolve helper: a separate crate (own tree-sitter 0.24 runtime).
+    // Best-effort; on failure cona degrades to its heuristics.
     match install_resolve_helper(&src_root, &bin_dir) {
         Ok(Some(p)) => println!(
             "  {}",
@@ -99,9 +97,8 @@ pub fn cmd_install(bin_dir: Option<&str>) -> Result<()> {
         println!(
             "  {}",
             ui::warn(&format!(
-                // The prose half shortens; the `export` line must stay
-                // absolute — it is meant to be copied into a shell rc, where
-                // `~` may not expand and `./` means something else entirely.
+                // The `export` line stays absolute: it is copied into a shell
+                // rc, where `~` may not expand and `./` means something else.
                 "{} is not on your PATH — add it, e.g. `export PATH=\"{}:$PATH\"`",
                 crate::install::short_path(&bin_dir),
                 bin_dir.display()

@@ -470,8 +470,7 @@ fn dockerfile_symbols() {
 #[test]
 fn parse_only_langs_parse_without_symbols() {
     // nix/svelte/vue/r/graphql are parsed for refs/grep but extract no symbols.
-    // xml is NOT in this list any more — it yields element symbols; see
-    // `xml_elements_named_by_identifying_child`.
+    // (xml yields element symbols: `xml_elements_named_by_identifying_child`.)
     for (lang, src) in [
         ("nix", "{ pkgs }: { hello = pkgs.hello; }\n"),
         ("svelte", "<script>let x = 0;</script>\n<b>{x}</b>\n"),

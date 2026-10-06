@@ -1,6 +1,5 @@
-//! `cona ui` — a live TUI showing what cona is doing and, crucially,
-//! how many tokens it is saving the agent in real time. Read-only: it polls the
-//! SQLite databases (~1s) and never mutates anything.
+//! `cona ui` — a live TUI of what cona is doing and how many tokens it saves.
+//! Read-only: polls the SQLite databases (~1s), never mutates anything.
 
 use crate::{db, indexer};
 use anyhow::Result;
@@ -103,9 +102,8 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, root: &Path) -> Result<()
     // WAL still makes external reindexes visible to these long-lived handles.
     let g = db::open_global_db()?;
     let pconn = db::open_project_db(&root)?;
-    // The index-state scan (one fs stat per indexed file) is the expensive part;
-    // it rarely changes, so recompute it at most every 5s while the cheap usage
-    // stats refresh every 1s.
+    // The index-state scan (one stat per indexed file) is the expensive part
+    // and rarely changes: every 5s, while usage stats refresh every 1s.
     let mut idx = gather_index_state(&g, &pconn, &root)?;
     let mut snap = gather(&g, &root, project_scope, sort, &idx)?;
     let mut last = Instant::now();
@@ -162,8 +160,8 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, root: &Path) -> Result<()
     Ok(())
 }
 
-/// Slow-changing project index state (file/symbol counts, staleness). One fs
-/// stat per indexed file — throttled by the caller so it doesn't run every tick.
+/// Slow-changing project index state (file/symbol counts, staleness). One
+/// stat per indexed file — the caller throttles it.
 struct IndexState {
     files: i64,
     symbols: i64,
@@ -179,8 +177,8 @@ fn gather_index_state(g: &Connection, pconn: &Connection, root: &Path) -> Result
     let symbols: i64 = pconn
         .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
         .unwrap_or(0);
-    // Batch: pull (path, mtime, size) once and compare against a single fs stat
-    // per file — was N SQL queries (one per path via is_stale) every scan.
+    // Batch: pull (path, mtime, size) once, then one stat per file — not one
+    // SQL query per path via is_stale.
     let mut stale = 0i64;
     {
         let mut stmt = pconn.prepare("SELECT path, mtime, size FROM files")?;
@@ -244,8 +242,7 @@ fn gather(
         totals: db::totals(g, scope_ref)?,
         per_cmd,
         top: db::top_targets(g, scope_ref, 8)?,
-        // live activity shows real queries only — index/edit/hook:* maintenance
-        // carries no savings and is just noise in the feed
+        // live activity shows real queries only — maintenance is feed noise
         recent: db::recent(g, scope_ref, 40, true)?,
     })
 }
@@ -365,8 +362,8 @@ fn draw_middle(f: &mut Frame, area: Rect, s: &Snapshot, sort: SortKey) {
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(cols[0]);
 
-    // per-command table — queries only; maintenance rows (index/edit/hook:*)
-    // never carry savings and are folded into one dim line below the table.
+    // per-command table — queries only; maintenance (no savings) is folded
+    // into one dim line below.
     let (queries, maint): (Vec<_>, Vec<_>) = s
         .per_cmd
         .iter()

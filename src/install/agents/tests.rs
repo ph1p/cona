@@ -34,8 +34,7 @@ fn project_has_cona_detects_markers_and_ignores_clean() {
 
 #[test]
 fn quiet_reinstall_is_a_noop_when_already_current() {
-    // pid-suffixed so concurrent test invocations (e.g. `cargo test` in two
-    // checkouts) can't race on one shared directory
+    // pid-suffixed so concurrent test runs can't race on one directory
     let dir =
         std::env::temp_dir().join(format!("cona-quiet-reinstall-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -45,16 +44,12 @@ fn quiet_reinstall_is_a_noop_when_already_current() {
     // first install writes the guide block → changed
     let first = cmd_agents_q(&dir, "install", &[AgentName::Claude], false, false, true).unwrap();
     assert!(first, "first install must report a change");
-    // Second install with identical baked content → no change. The MCP
-    // entry bakes in `agent_exe()`, which reads `install_path` from the
-    // SHARED global.db that a concurrently running lib test may rewrite
-    // between installs; that flips the entry's command and makes a rerun
-    // report a change for a reason this test isn't about. Retry until an
-    // install reports no change — each rerun re-bakes the currently
-    // resolved exe, so it converges once the flipping stops, while a real
-    // "reinstall always reports change" bug still exhausts the retries.
-    // (Comparing agent_exe() before/after one call is NOT enough: the flip
-    // can land between the previous install and the `before` sample.)
+    // Second install with identical content → no change. The MCP entry bakes
+    // in `agent_exe()`, read from the SHARED global.db that a concurrent lib
+    // test may rewrite between installs, flipping the command. Retry: it
+    // converges once the flipping stops, while a real "reinstall always
+    // changes" bug still exhausts the retries. (Sampling agent_exe() around
+    // one call is NOT enough — the flip can land before the sample.)
     let mut second = true;
     for _ in 0..5 {
         second = cmd_agents_q(&dir, "install", &[AgentName::Claude], false, false, true).unwrap();
@@ -123,9 +118,8 @@ fn detected_agents_project_core_plus_present_dirs() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// The upgrade refresh path targets `installed_agents` — an agent that is
-/// merely DETECTED (its dir exists) but never got cona config must not be
-/// in the set, or every upgrade would install config the user never chose.
+/// Upgrade refreshes `installed_agents`; a merely DETECTED agent must not be
+/// in it, or every upgrade would install config the user never chose.
 #[test]
 fn installed_agents_refresh_set_excludes_detected_but_unconfigured() {
     let tmp = std::env::temp_dir().join(format!("cona-installedset-{}", std::process::id()));
@@ -135,8 +129,7 @@ fn installed_agents_refresh_set_excludes_detected_but_unconfigured() {
     std::fs::create_dir_all(proj.join(".cursor")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
 
-    // .cursor exists (detected) but carries no cona rule; AGENTS.md holds
-    // the marker block (installed).
+    // .cursor detected but without a cona rule; AGENTS.md installed.
     std::fs::write(
         proj.join("AGENTS.md"),
         format!("{}\nguide\n", crate::install::BLOCK_BEGIN),
@@ -201,8 +194,7 @@ fn subagents_are_patched_recursively() {
     assert!(has_marker(&deep), "nested agent definition must be patched");
     assert!(!has_marker(&doc), "non-definition doc must stay untouched");
 
-    // the probe shares the walk: a nested-only footprint must still count as
-    // installed, else uninstall/re-sync skip the scope
+    // the probe shares the walk: a nested-only footprint still counts
     std::fs::remove_file(&top).unwrap();
     assert!(project_has_cona(&proj));
 
@@ -272,12 +264,9 @@ fn installed_reflects_add_then_remove_per_agent() {
 fn config_paths_empty_only_for_pi_project_scope() {
     let proj = Path::new("/proj");
     let home = Path::new("/home");
-    // Exactly the agents whose project-scope guide is the project AGENTS.md
-    // the generic bucket already owns. Writing it from their block too would
-    // put two owners on one marker block, so they contribute an MCP entry
-    // there and nothing else. Derived from ALL, not a second hand-kept list:
-    // a new agent that forgets a project target then fails HERE rather than
-    // silently installing nothing.
+    // Exactly the agents whose project guide is the AGENTS.md the generic
+    // bucket owns (two owners would fight over one marker block). Checked
+    // over ALL, so a new agent that forgets a project target fails HERE.
     let no_project_target = [AgentName::Pi, AgentName::Opencode, AgentName::Zed];
     for a in AgentName::ALL {
         let empty = a.config_paths(proj, home, false).is_empty();
@@ -287,8 +276,7 @@ fn config_paths_empty_only_for_pi_project_scope() {
             "{} project-scope config_paths emptiness",
             a.slug()
         );
-        // Every agent has a global target — that is what makes it an entry
-        // of its own rather than a row in the generic AGENTS.md bucket.
+        // A global target is what makes an agent its own entry.
         assert!(
             !a.config_paths(proj, home, true).is_empty(),
             "{} has no global config target",
@@ -297,10 +285,8 @@ fn config_paths_empty_only_for_pi_project_scope() {
     }
 }
 
-/// `Mark::render` pads the label to a fixed column; a longer one pushes its
-/// row's verb and path out of line with every other row. Checked for every
-/// agent, so adding one with a verbose label fails here rather than
-/// producing a ragged install log nobody notices.
+/// `Mark::render` pads the label to a fixed column; a longer one misaligns its
+/// row. Checked for every agent so a verbose new label fails here.
 #[test]
 fn label_widths_fit_the_column() {
     for a in AgentName::ALL {
@@ -315,10 +301,9 @@ fn label_widths_fit_the_column() {
     }
 }
 
-/// Pruning must clean up the scaffolding an install created without ever
-/// taking a directory the user also keeps things in, and without walking
-/// out of the scope it was given. The stop-at-first-non-empty rule is what
-/// buys both: it is the same guarantee, checked from three directions.
+/// Pruning cleans up install scaffolding without taking a directory the user
+/// also uses or walking out of its scope — one guarantee (stop at the first
+/// non-empty dir), checked from three directions.
 #[test]
 fn prune_stops_at_non_empty_dirs_and_at_the_anchor() {
     let tmp = std::env::temp_dir().join(format!("cona-prune-{}", std::process::id()));
@@ -379,8 +364,7 @@ fn uninstall_removes_a_settings_file_that_only_held_our_hooks() {
     assert!(claude_hooks(&p, true).unwrap(), "install must write");
     assert!(p.exists());
     assert!(claude_hooks(&p, false).unwrap(), "uninstall must change");
-    // No `{"hooks": {"PreToolUse": [], …}}` husk left behind: the file cona
-    // created, and whose only content was cona's, goes away entirely.
+    // No `{"hooks": {"PreToolUse": [], …}}` husk left behind.
     assert!(!p.exists(), "cona-only settings.json must be removed");
     let _ = std::fs::remove_dir_all(p.parent().unwrap());
 }
@@ -406,11 +390,9 @@ fn uninstall_keeps_foreign_settings_and_prunes_only_what_it_emptied() {
     let _ = std::fs::remove_dir_all(p.parent().unwrap());
 }
 
-/// An event array that was ALREADY empty before the install belongs to the
-/// user, not to us. The uninstall sweep removes empty arrays as husks of
-/// our own hooks, so without remembering which ones arrived empty it would
-/// delete this one — and, since it was the file's only key, take the whole
-/// settings.json with it (invariant 6: never touch foreign content).
+/// An event array that was ALREADY empty before install is the user's. The
+/// uninstall husk sweep must not delete it — nor, as the only key, the whole
+/// settings.json (invariant 6: never touch foreign content).
 #[test]
 fn uninstall_keeps_an_event_array_that_was_empty_before_we_installed() {
     let p = settings_tmp("preempty");

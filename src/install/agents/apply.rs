@@ -15,15 +15,13 @@ use std::path::{Path, PathBuf};
 
 /// How deep a `.claude/agents` tree is walked. Shipped collections nest one
 /// level (`engineering/backend.md`); the cap keeps a stray checkout or symlink
-/// loop under `.claude/agents` from turning the walk unbounded.
+/// loop from making the walk unbounded.
 pub(super) const SUBAGENT_MAX_DEPTH: usize = 4;
 
 /// Every `.md` under a `.claude/agents` tree. THE subagent enumeration rule —
-/// `sync_subagents` and `project_has_cona` both consume it, so "definitions nest
-/// in category subdirectories" is encoded ONCE (a flat `read_dir` sees none of
-/// them). Fail-open: an unreadable directory yields nothing rather than aborting
-/// a whole install. Does not follow symlinks, and stops at
-/// `SUBAGENT_MAX_DEPTH`.
+/// `sync_subagents` and `project_has_cona` both use it, so "definitions nest in
+/// category subdirectories" is encoded once. Fail-open (an unreadable dir yields
+/// nothing), does not follow symlinks, stops at `SUBAGENT_MAX_DEPTH`.
 pub(super) fn subagent_defs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     if depth >= SUBAGENT_MAX_DEPTH {
         return;
@@ -32,8 +30,8 @@ pub(super) fn subagent_defs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         return;
     };
     for entry in rd.flatten() {
-        // file_type() reads the dir entry (no extra stat) and does NOT follow
-        // symlinks — a link back into the tree can't make the walk recurse.
+        // file_type() does NOT follow symlinks, so a link back into the tree
+        // can't make the walk recurse.
         let Ok(ft) = entry.file_type() else { continue };
         let path = entry.path();
         if ft.is_dir() {
@@ -52,8 +50,7 @@ pub(super) fn is_agent_def(body: &str) -> bool {
 
 /// Splice (or strip) the guide block in every agent definition under `dir`.
 /// Install only touches definitions (`is_agent_def`); uninstall cleans ANY `.md`
-/// carrying the marker, so previously-patched files stay reachable even if their
-/// frontmatter changed.
+/// carrying the marker, even if its frontmatter has since changed.
 pub(super) fn sync_subagents(
     dir: &Path,
     install: bool,
@@ -63,8 +60,8 @@ pub(super) fn sync_subagents(
     subagent_defs(dir, 0, &mut paths);
     for path in paths {
         if install {
-            // ONE read per file: the frontmatter gate and the splice share it.
-            // Going through upsert_block_file would re-read every definition.
+            // ONE read per file, shared by the frontmatter gate and the splice
+            // (upsert_block_file would re-read it).
             let Ok(existing) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -87,19 +84,13 @@ pub(super) fn sync_subagents(
     Ok(())
 }
 
-/// Register (or remove) cona as an MCP server for one agent+scope, if that
-/// combination has a config we own. THE one place the two config shapes are
-/// chosen between. Fail-soft: a broken foreign config warns and leaves the rest
-/// of the install intact — losing the MCP entry must never cost the user the
-/// guide + hooks.
-/// Prune directories that only ever existed to hold the file just removed,
-/// walking up from it and stopping at `stop` (the project root or `$HOME`).
+/// Prune directories that only existed to hold the file just removed, walking
+/// up from it and stopping at `stop` (the project root or `$HOME`).
 ///
-/// `remove_dir` — never `remove_dir_all` — is what makes this safe: it fails on
-/// a non-empty directory, so a dir the user also keeps things in survives, and
-/// the walk ends at the first one that does. Without it an uninstall leaves a
-/// trail of empty `.cursor/rules`, `.windsurf/rules`, `.github` skeletons in a
-/// project that had none of them before cona, which reads as leftover state.
+/// `remove_dir` — never `remove_dir_all` — makes this safe: it fails on a
+/// non-empty dir, so anything the user keeps there survives and the walk ends.
+/// Without it an uninstall leaves empty `.cursor/rules`, `.windsurf/rules`,
+/// `.github` skeletons behind in a project that never had them.
 pub(super) fn prune_empty_dirs(file: &Path, stop: &Path) {
     let mut dir = file.parent();
     while let Some(d) = dir {
@@ -114,6 +105,10 @@ pub(super) fn prune_empty_dirs(file: &Path, stop: &Path) {
     }
 }
 
+/// Register (or remove) cona as an MCP server for one agent+scope, if that
+/// combination has a config we own. THE one place the two config shapes are
+/// chosen between. Fail-soft: a broken foreign config only warns — losing the
+/// MCP entry must never cost the user the guide + hooks.
 pub(super) fn mcp_register(
     agent: AgentName,
     ctx: &Ctx,
@@ -123,24 +118,21 @@ pub(super) fn mcp_register(
     let Some(path) = agent.mcp_path(ctx.project_root, ctx.home, ctx.global) else {
         return;
     };
-    // The plugin registers cona's MCP server itself; a project .mcp.json entry
-    // on top would offer every session the same server twice (every tool under
-    // two names). So run the uninstall path instead: never write it, and strip
-    // one a plugin-unaware install left — .mcp.json is Claude's alone among our
-    // agents, nothing else loses it.
+    // The plugin registers cona's MCP server itself; a .mcp.json entry on top
+    // would expose every tool twice. So take the uninstall path: never write
+    // it, and strip one a plugin-unaware install left (.mcp.json is Claude's
+    // alone among our agents).
     let plugin = agent == AgentName::Claude && ctx.claude_plugin;
     let why = plugin.then_some("plugin has it");
     let install = install && !plugin;
-    // Only create a harness's config directory when that harness is really
-    // there; installing into a project scope shouldn't conjure a `.cursor/` or
-    // `.gemini/` tree the user never had. `.mcp.json` sits at the project root,
-    // which always exists.
+    // Only create a harness's config dir when that harness is really there —
+    // don't conjure a `.cursor/` or `.gemini/` tree. `.mcp.json` sits at the
+    // project root, which always exists.
     let dir_ok = path
         .parent()
         .is_some_and(|d| d.exists() || d == ctx.project_root);
     if install && !dir_ok {
-        // Say so instead of vanishing: a user who expected the MCP server
-        // registered otherwise has no clue why doctor lists nothing.
+        // Say so, or the user has no clue why doctor lists no MCP server.
         mark_why(done, "mcp server", "skipped", Some("no config dir"), &path);
         return;
     }
@@ -159,9 +151,8 @@ pub(super) fn mcp_register(
             }
         }
         Ok(_) => {
-            // Uninstall deletes a config that held only our server, which can
-            // leave the harness dir `dir_ok` respected on the way in (`.cursor/`)
-            // standing empty.
+            // Deleting a config that held only our server can leave the
+            // harness dir (`.cursor/`) empty.
             let anchor: &Path = if ctx.global {
                 ctx.home
             } else {
@@ -174,8 +165,8 @@ pub(super) fn mcp_register(
     }
 }
 
-/// The per-invocation constants the MCP loop carries. `exe` in particular is
-/// resolved ONCE here rather than per agent — `agent_exe()` reads global.db.
+/// Per-invocation constants for the MCP loop. `exe` is resolved ONCE, not per
+/// agent — `agent_exe()` reads global.db.
 pub(super) struct Ctx<'a> {
     project_root: &'a Path,
     home: &'a Path,
@@ -190,9 +181,8 @@ pub(super) struct Ctx<'a> {
 static RESTART_NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// `cona agents install|uninstall [names…] [--all] [--global]`
-/// Injects/removes cona into the selected agent configs. With no names and
-/// no `--all`, installs into every detected agent (Claude Code + AGENTS.md are
-/// always configured; the rest are gated on detection).
+/// With no names and no `--all`, targets every detected agent (Claude Code +
+/// AGENTS.md always; the rest gated on detection).
 pub fn cmd_agents(
     project_root: &Path,
     action: &str,
@@ -203,9 +193,8 @@ pub fn cmd_agents(
     cmd_agents_q(project_root, action, names, all, global, false)
 }
 
-/// `quiet` suppresses the per-file/summary output and prints nothing when every
-/// target is already current — used by the auto-refresh paths that run without
-/// the user explicitly asking. A real change still emits a one-line restart note.
+/// `quiet` suppresses all output — used by the auto-refresh paths the user did
+/// not explicitly ask for.
 pub fn cmd_agents_q(
     project_root: &Path,
     action: &str,
@@ -217,8 +206,7 @@ pub fn cmd_agents_q(
     let install = action == "install";
     let mut done: Vec<crate::install::Mark> = Vec::new();
     let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
-    // How far up `prune_empty_dirs` may climb after deleting a file: never out
-    // of the scope this run was asked to touch.
+    // `prune_empty_dirs` never climbs out of the scope this run touches.
     let scope_root: &Path = if global { &home } else { project_root };
 
     let sel = AgentSel {
@@ -226,13 +214,11 @@ pub fn cmd_agents_q(
         all,
         install,
     };
-    // The Claude Code plugin ships hooks + skill + MCP itself; with it enabled,
-    // writing them again just makes every session fire each hook twice and
-    // inject the SessionStart context twice. Install therefore never writes
-    // those pieces, and REMOVES any a plugin-unaware install left behind — so
-    // one `agents install` is the whole fix, not uninstall-then-install.
-    // Uninstall removes them as always. Guide files and subagent patches stay
-    // ours — the plugin carries neither.
+    // The Claude Code plugin ships hooks + skill + MCP itself; writing them
+    // again makes every hook (and the SessionStart context) fire twice. So
+    // install never writes those pieces and REMOVES any a plugin-unaware
+    // install left — one `agents install` is the whole fix. Guide files and
+    // subagent patches stay ours; the plugin carries neither.
     let claude_plugin = install && claude_plugin_enabled(project_root, &home, global);
     let ctx = Ctx {
         project_root,
@@ -268,9 +254,9 @@ pub fn cmd_agents_q(
         } else if claude_plugin {
             mark_why(&mut done, "claude skill", "skipped", why, &skill);
         }
-        // CLAUDE.md — global installs keep the guide in its own CONA.md
-        // (RTK-style) and only reference it; project installs stay inline so the
-        // checked-in CLAUDE.md is self-contained.
+        // CLAUDE.md — global installs keep the guide in CONA.md and only
+        // reference it; project installs inline it so the checked-in CLAUDE.md
+        // is self-contained.
         let claude_md = if global {
             home.join(".claude/CLAUDE.md")
         } else {
@@ -300,9 +286,7 @@ pub fn cmd_agents_q(
         }
         // hooks in settings.json — keep the index fresh after agent edits
         let settings = claude_dir.join("settings.json");
-        // "created" vs "updated" is about OUR hooks, not the file: a
-        // settings.json that held only foreign config still gets cona's
-        // hooks created, not updated.
+        // "created" vs "updated" is about OUR hooks, not the file.
         let (had_index, had_read) = crate::install::doctor::settings_cona_hooks(&settings);
         match claude_hooks(&settings, want) {
             Ok(changed) => {
@@ -314,9 +298,8 @@ pub fn cmd_agents_q(
                     };
                     mark(&mut done, "claude hooks", verb, &settings);
                 } else if changed {
-                    // A settings.json that held only our hooks is deleted by
-                    // `claude_hooks`, which can leave `.claude/` empty in a
-                    // project that had no Claude config before cona.
+                    // `claude_hooks` deletes a settings.json that held only
+                    // our hooks, which can leave `.claude/` empty.
                     prune_empty_dirs(&settings, scope_root);
                     mark_why(&mut done, "claude hooks", "removed", why, &settings);
                 } else if claude_plugin {
@@ -325,21 +308,18 @@ pub fn cmd_agents_q(
             }
             Err(e) => println!("warning: could not edit {}: {e}", settings.display()),
         }
-        // subagents — they run on their own system prompt and don't reliably see
-        // CLAUDE.md, so each existing definition carries the guide itself (never
-        // creates agent files).
+        // subagents don't reliably see CLAUDE.md, so each existing definition
+        // carries the guide itself (never creates agent files).
         sync_subagents(&claude_dir.join("agents"), install, &mut done)?;
     } // 'claude
 
     // --- guide-file harnesses ---------------------------------------------
-    // Every agent but Claude (whose skill/hooks/subagents block sits above)
-    // reads one guide file per scope, so none needs a hand-written block:
-    // `config_paths` already IS the per-scope target list, and its `Presence`
-    // tag says how the file is written — `Marker` = splice a block into a file
-    // the user also owns, `Exists` = the file is ours alone (content from
-    // `guide_body`, which lets Cursor carry its .mdc frontmatter). Driving all
-    // of them from that ONE list keeps the writer and the installed()/uninstall
-    // probe from ever disagreeing about which file an agent owns.
+    // Every agent but Claude reads one guide file per scope. `config_paths` IS
+    // the per-scope target list, and its `Presence` tag says how to write it:
+    // `Marker` = splice a block into a file the user also owns, `Exists` = the
+    // file is ours alone (from `guide_body`, so Cursor keeps its .mdc
+    // frontmatter). One list keeps the writer and the installed()/uninstall
+    // probe from disagreeing about which file an agent owns.
     for a in AgentName::ALL {
         if a == AgentName::Claude {
             continue;
@@ -367,9 +347,8 @@ pub fn cmd_agents_q(
                         let ch = upsert_block_file(&path, GUIDE_MD)?;
                         mark(&mut done, label, ch.verb(), &path);
                     } else if remove_block_file(&path)? {
-                        // `remove_block_file` deletes a file that held nothing
-                        // but our block, which can empty a dir the install
-                        // created (`.github` for Copilot).
+                        // Deleting a block-only file can empty a dir the
+                        // install created (`.github` for Copilot).
                         prune_empty_dirs(&path, scope_root);
                         mark(&mut done, label, "removed", &path);
                     }
@@ -379,10 +358,9 @@ pub fn cmd_agents_q(
     }
 
     // --- MCP server ----------------------------------------------------------
-    // Native tools alongside the shell-out guides. Driven by ONE loop over the
-    // exhaustive `mcp_path` match rather than a call per agent block: a new
-    // agent then gets its MCP entry from that arm alone, and cannot end up with
-    // a path that `installed()` counts but nothing ever writes or strips.
+    // ONE loop over the exhaustive `mcp_path` match: a new agent gets its MCP
+    // entry from that arm alone, and can't end up with a path `installed()`
+    // counts but nothing writes or strips.
     for a in AgentName::ALL {
         if sel.want(a, a.detected(project_root, &home, global)) {
             mcp_register(a, &ctx, install, &mut done);
@@ -391,9 +369,8 @@ pub fn cmd_agents_q(
 
     if done.is_empty() {
         if !quiet {
-            // Name the scope that was searched: the default is the project, and
-            // a user cleaning up home configs otherwise sees a bare no-op with no
-            // clue that `--global` was the missing piece.
+            // Name the searched scope, or a user cleaning up home configs
+            // never learns `--global` was the missing piece.
             let msg = match (install, global) {
                 (false, false) => "nothing to remove in this project — home configs need --global",
                 (false, true) => {
@@ -405,22 +382,17 @@ pub fn cmd_agents_q(
         }
         return Ok(false);
     }
-    // Did anything actually move? Read the per-mark data — no text scanning.
     let changed = done.iter().any(|d| d.changed());
-    // Quiet auto-refresh stays fully silent unless (and even when) something
-    // moved: it runs on the query hot path, so it must never print.
+    // Quiet auto-refresh runs on the query hot path, so it never prints.
     if quiet {
         return Ok(changed);
     }
-    // Print what MOVED, one line each; collapse the already-current ones into a
-    // per-label tally. A big ~/.claude/agents tree yields 100+ "unchanged"
-    // subagent lines, which scroll the real result off the screen — the user
-    // needs to see what this run did, not an inventory of what it touched.
-    // Two agents can share one config file (several harnesses read the
-    // project `.mcp.json`): the first write creates it, the second finds it
-    // current. That no-op says nothing the "created" line didn't — drop it.
-    // A mark with a reason is a decision the user should see (why nothing was
-    // written there), not an already-current no-op — it keeps its own line.
+    // Print what MOVED, one line each; collapse already-current ones into a
+    // per-label tally (a big ~/.claude/agents tree yields 100+ "unchanged"
+    // lines that would scroll the result away). Two agents can share one
+    // config (`.mcp.json`): the second finds it current — drop that no-op.
+    // A mark with a reason explains why nothing was written, so it keeps its
+    // own line.
     let (moved, same): (Vec<_>, Vec<_>) = done
         .iter()
         .filter(|d| {
@@ -434,9 +406,8 @@ pub fn cmd_agents_q(
         println!("{}", d.render());
     }
     if !same.is_empty() {
-        // Linear scan, not a map: the label set is closed (≤ 8 values) and
-        // first-seen order matches the order the targets were touched, which a
-        // hash/btree map would replace with an arbitrary/alphabetical one.
+        // Linear scan, not a map: the label set is tiny (≤ 8) and this keeps
+        // first-seen (touch) order.
         let mut tally: Vec<(&str, usize)> = Vec::new();
         for d in &same {
             match tally.iter_mut().find(|(l, _)| *l == d.label) {
@@ -470,17 +441,14 @@ pub fn cmd_agents_q(
             if global { "global" } else { "project" }
         ))
     );
-    // Only relevant when a Claude hook/skill actually moved — no reason to nag
-    // about a restart for a Cursor/Gemini-only edit. Reads the raw label field,
-    // never the colored/padded rendered line.
+    // Restart note only when a Claude piece actually moved, not for a
+    // Cursor/Gemini-only edit.
     let claude_moved = done
         .iter()
         .any(|d| d.changed() && d.label.starts_with("claude"));
-    // Once per process: `setup` installs project AND home scope back to back,
-    // and one restart picks up both.
+    // Once per process: `setup` installs project AND home scope back to back.
     if install && claude_moved && !RESTART_NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        // Claude Code snapshots hooks + skills at startup for security, so a
-        // running session won't see fresh changes until it reloads them.
+        // Claude Code snapshots hooks + skills at session start.
         println!(
             "{}",
             ui::dim(
@@ -492,15 +460,13 @@ pub fn cmd_agents_q(
     Ok(true)
 }
 
-/// Cheap read-only probe: does this project carry ANY cona agent
-/// integration? Used by uninstall to skip registered-but-clean projects
-/// (which would otherwise each print an empty heading + "nothing to do").
-/// Mirrors the project-scoped removal targets in `cmd_agents`.
+/// Cheap read-only probe: does this project carry ANY cona agent integration?
+/// Lets uninstall skip registered-but-clean projects instead of printing an
+/// empty heading + "nothing to do" for each.
 pub fn project_has_cona(project_root: &Path) -> bool {
-    // The per-agent probe is THE source of which files carry an install; reuse
-    // it (project scope never reads home, so passing project_root as `home` is
-    // inert). Claude's footprint includes the subagent-defs probe, so a scope
-    // whose only trace is a marked nested subagent definition still counts.
+    // Reuse THE per-agent probe (project scope never reads home, so passing
+    // project_root as `home` is inert). Claude's probe includes nested
+    // subagent definitions.
     AgentName::ALL
         .iter()
         .any(|a| a.installed(project_root, project_root, false))
@@ -510,26 +476,22 @@ pub fn project_has_cona(project_root: &Path) -> bool {
 /// Returns Ok(true) if the file was changed.
 pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> {
     let mut root = load_settings(settings_path, "the hook")?;
-    // quoted: these commands run through a shell, and an install path with
-    // spaces would otherwise break every hook invocation
+    // Quoted: hooks run through a shell, and a path with spaces would break.
     let exe = crate::install::sh_quote(&agent_exe());
     let index_cmd = format!("{exe} index --quiet");
-    // SessionStart also emits a repo-orientation context block (see
-    // main.rs session_start_context). Distinct command, but its marker stays
-    // the shared "index --quiet" substring so reconcile/uninstall still match
-    // it (and self-heal an older plain `index --quiet` SessionStart entry to
-    // this one on reinstall).
+    // SessionStart also emits a repo-orientation block (main.rs
+    // session_start_context). Its marker stays the shared "index --quiet"
+    // substring so reconcile/uninstall match it (and self-heal an older plain
+    // `index --quiet` entry on reinstall).
     let session_cmd = format!("{exe} index --quiet --session-start");
     let pretool_cmd = format!("{exe} hook PreToolUse");
-    // Compaction drops injected hook context (it summarizes the conversation),
-    // so the SessionStart block is gone while the session keeps running — the
-    // one boundary where the habit reliably lapses. Restate the rule there.
+    // Compaction drops injected hook context, so the SessionStart block is
+    // gone mid-session — restate the rule there.
     let precompact_cmd = format!("{exe} hook PreCompact");
-    // Shell-gated: the re-nudge is off by default (see DEFAULT_RENUDGE_EVERY in
-    // hook.rs), and this entry fires on EVERY tool call — without the gate each
-    // call would fork the cona binary just to exit at the disabled check. The
-    // `[ … -gt 0 ]` test keeps the disabled path binary-free while the env var
-    // alone still opts in (no reinstall). `|| :` keeps it fail-open.
+    // Shell-gated: the re-nudge is off by default (DEFAULT_RENUDGE_EVERY) and
+    // this fires on EVERY tool call; the `[ … -gt 0 ]` test avoids forking cona
+    // just to exit, while the env var alone still opts in (no reinstall).
+    // `|| :` keeps it fail-open.
     let posttool_cmd = format!(
         "[ \"${{CONA_RENUDGE_EVERY:-0}}\" -gt 0 ] 2>/dev/null && {exe} hook PostToolUse || :"
     );
@@ -550,18 +512,16 @@ pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> 
             &pretool_cmd,
             "hook PreToolUse",
         ),
-        // periodic re-nudge: registered even though it's off by default (see
-        // posttool_cmd above — the shell gate makes the disabled path free).
-        // Distinct marker from the index PostToolUse entry above, so both
+        // periodic re-nudge: registered though off by default (the shell gate
+        // makes that free). Distinct marker from the index entry, so both
         // coexist.
         ("PostToolUse", None, &posttool_cmd, "hook PostToolUse"),
         // re-state the navigation rule across a compaction boundary
         ("PreCompact", None, &precompact_cmd, "hook PreCompact"),
     ];
     let mut changed = false;
-    // Uninstall never CREATES structure — only an install may. Without this an
-    // uninstall on a settings.json that has no cona entries would materialize
-    // `"hooks": {}` plus an empty array per event and leave that husk behind.
+    // Uninstall never CREATES structure (it would leave a `"hooks": {}` husk
+    // with an empty array per event).
     if !install && !root.get("hooks").map(|h| h.is_object()).unwrap_or(false) {
         return Ok(false);
     }
@@ -573,10 +533,9 @@ pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> 
     if !hooks.is_object() {
         bail!("settings.json 'hooks' is not an object");
     }
-    // Which event arrays were ALREADY empty before we touched anything. The
-    // uninstall sweep below removes empty arrays as husks of our own hooks, but
-    // an array that arrived empty is the user's — deleting it (and, when it was
-    // the only key, the whole file with it) would be us editing foreign config.
+    // Event arrays that were ALREADY empty. The uninstall sweep removes empty
+    // arrays as husks of our hooks, but one that arrived empty is the user's —
+    // deleting it would be editing foreign config.
     let preexisting_empty: Vec<String> = hooks
         .as_object()
         .map(|o| {
@@ -601,8 +560,7 @@ pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> 
                 .unwrap_or(false)
         };
         let events = hooks.as_object_mut().unwrap();
-        // Same rule per event: an install may add the array, an uninstall only
-        // ever edits one that is already there.
+        // Same rule per event: only install may add the array.
         let arr = if install {
             events.entry(event).or_insert_with(|| serde_json::json!([]))
         } else {
@@ -656,9 +614,8 @@ pub(super) fn claude_hooks(settings_path: &Path, install: bool) -> Result<bool> 
             changed = true;
         }
     }
-    // Uninstall leaves no husk: an event array we emptied goes, and so does
-    // `hooks` if that was all it held. Only arrays/objects that are now empty
-    // are touched — a foreign hook keeps its event alive.
+    // Uninstall leaves no husk: an event array we emptied goes, and `hooks`
+    // too if now empty. A foreign hook keeps its event alive.
     if !install && changed {
         if let Some(events) = hooks.as_object_mut() {
             events.retain(|k, v| {
@@ -702,13 +659,11 @@ fn store_settings(path: &Path, root: &serde_json::Value, install: bool) -> Resul
     Ok(())
 }
 
-/// Read-only cona subcommands the Bash allow rules are built from. Writers
-/// (edit/insert/rename/note/batch_edit) and maintenance (uninstall/setup/…) are
-/// deliberately absent — auto mode's classifier keeps judging those; an allow
-/// rule would wave them through. "Read-only" means read-only toward the
-/// project: `index` (and every query's auto-refresh) writes cona's OWN index
-/// under ~/.cona, never a source file. The MCP side needs no list: it derives
-/// from the tools' `readOnlyHint` (`read_only_tool_names`).
+/// Read-only cona subcommands the Bash allow rules are built from. Writers and
+/// maintenance commands are deliberately absent so auto mode's classifier keeps
+/// judging them. "Read-only" is toward the project: `index` writes only cona's
+/// own index under ~/.cona. The MCP side derives from the tools' `readOnlyHint`
+/// (`read_only_tool_names`).
 #[allow(dead_code)] // until claude_permissions is wired into `agents install`
 const READ_ONLY_CMDS: &[&str] = &[
     "tree", "outline", "find", "show", "refs", "context", "grep", "diff", "impact", "callers",
@@ -775,11 +730,10 @@ pub(super) fn cona_automode() -> [(&'static str, Vec<String>); 2] {
     ]
 }
 
-/// Splice `ours` into `obj[key]` (an array of strings). `is_ours` decides which
-/// present strings are ours; they are replaced wholesale on install (self-heals
-/// reworded prose) and dropped on uninstall. `seed` is prepended only when
-/// install CREATES the array — and an array left holding nothing but the seed
-/// is removed again on uninstall (equivalent to absent).
+/// Splice `ours` into `obj[key]` (an array of strings). Strings matching
+/// `is_ours` are replaced wholesale on install (self-heals reworded prose) and
+/// dropped on uninstall. `seed` is prepended only when install CREATES the
+/// array; an array left holding only the seed is removed on uninstall.
 #[allow(dead_code)] // until claude_permissions is wired into `agents install`
 fn splice_strings(
     obj: &mut serde_json::Map<String, serde_json::Value>,
@@ -837,10 +791,8 @@ fn with_object(
 
 /// Allow rules (+ `autoMode` prose when `automode`) in a Claude settings.json.
 /// `autoMode` is only read from user-level settings, so project installs pass
-/// `automode = false`. Same contract as `claude_hooks`: never touches foreign
-/// entries, uninstall never creates structure and leaves no husk, a file that
-/// held only ours is removed. Runs even with the plugin enabled — a plugin
-/// cannot ship settings, so this is not a duplicate.
+/// `false`. Same contract as `claude_hooks` (no foreign edits, no husks). Runs
+/// even with the plugin enabled — a plugin cannot ship settings.
 #[allow(dead_code)] // until claude_permissions is wired into `agents install`
 pub(super) fn claude_permissions(
     settings_path: &Path,
@@ -867,14 +819,13 @@ pub(super) fn claude_permissions(
         })?;
     }
 
-    // autoMode (user scope only). On a project install it is still cleaned
-    // on uninstall in case an older/global run left it there.
+    // autoMode (user scope only); still cleaned on any uninstall.
     if (install && automode) || (!install && obj.get("autoMode").is_some_and(|a| a.is_object())) {
         changed |= with_object(obj, "autoMode", install, |am| {
             let mut changed = false;
             for (key, prose) in cona_automode() {
-                // "$defaults" keeps Claude Code's built-in rules alongside
-                // ours — without it our array would REPLACE them.
+                // "$defaults" keeps Claude Code's built-in rules; without it
+                // our array would REPLACE them.
                 let tagged = |s: &str| s.starts_with(AUTOMODE_TAG);
                 changed |= splice_strings(am, key, &prose, tagged, Some("$defaults"), install)?;
             }

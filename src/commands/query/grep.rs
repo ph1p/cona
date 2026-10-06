@@ -9,9 +9,8 @@ use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Substring search over indexed code files only. Each hit is mapped to its
-/// enclosing symbol so the agent can jump straight to `show <Symbol>` instead
-/// of reading around the line.
+/// Substring search over indexed code files. Each hit carries its enclosing
+/// symbol so the agent can jump straight to `show <Symbol>`.
 pub fn cmd_grep(
     root: &Path,
     conn: &Connection,
@@ -32,10 +31,9 @@ pub fn cmd_grep(
     let pf = PathFilter::new(root, path_filter);
     let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let mut files: Vec<String> = stmt.query_map([], |r| r.get(0))?.flatten().collect();
-    // rg (or grep) prefilters the candidate files far faster than reading
-    // everything in-process; on any failure we fall back to the full scan.
-    // A directory scope is handed to rg as its search root, so a scoped query
-    // walks that subtree instead of the whole repo.
+    // rg (or grep) prefilters candidate files far faster than an in-process
+    // scan; on failure we fall back to the full scan. A directory scope becomes
+    // rg's search root, so a scoped query walks only that subtree.
     match grep_prefilter(
         root,
         matcher.source(pattern),
@@ -45,10 +43,9 @@ pub fn cmd_grep(
         include_deps,
     ) {
         // --include-deps searches OUTSIDE the index by design: dependency trees
-        // are deliberately never indexed, so intersecting with the index would
-        // make the flag a no-op. The prefilter's own list becomes the file list;
-        // hits in unindexed files simply carry no enclosing symbol, which the
-        // renderer already handles. Sorted so output stays deterministic.
+        // are never indexed, so intersecting with the index would make the flag
+        // a no-op. The prefilter's list becomes the file list (hits there just
+        // carry no enclosing symbol), sorted for deterministic output.
         Some(candidates) if include_deps => {
             files = candidates.into_iter().collect();
             files.sort();
@@ -69,8 +66,7 @@ pub fn cmd_grep(
     // Per hit, the surrounding lines asked for with -A/-B/-C (empty otherwise).
     let mut ctx: Vec<Vec<(usize, String)>> = Vec::new();
     // Honest baseline: per hit file, a grep pass + a Read window around each
-    // match line — what the same search costs an agent without cona, NOT
-    // the whole file.
+    // match — what this search costs without cona, NOT the whole file.
     let mut baseline: i64 = 0;
     let mut truncated = false;
     'outer: for rel in files {
@@ -78,9 +74,8 @@ pub fn cmd_grep(
             continue;
         };
         let mut match_lines: Vec<usize> = Vec::new();
-        // Full per-line lengths up front so the ±READ_PAD_LINES baseline window
-        // isn't clamped short when a match sits near the file's end or when the
-        // limit truncates this file mid-scan.
+        // Full line lengths up front, so the ±READ_PAD_LINES window isn't
+        // clamped near the file's end or when the limit truncates mid-scan.
         let line_lens: Vec<usize> = src.lines().map(str::len).collect();
         let lines: Vec<&str> = if before + after > 0 {
             src.lines().collect()
@@ -91,12 +86,10 @@ pub fn cmd_grep(
             if !matcher.is_match(line) {
                 continue;
             }
-            // symbol ranges come from the index — refresh before labeling.
-            // Skipped under --include-deps: those hits come from the prefilter,
-            // not the index, so most have no `files` row. is_stale() reports a
-            // missing row as stale, which would make every dependency hit pay a
-            // full parse plus a write txn to insert symbols the indexer
-            // deliberately never creates.
+            // Symbol ranges come from the index — refresh before labeling.
+            // Skipped under --include-deps: most dep hits have no `files` row,
+            // and is_stale() treats that as stale, so each would pay a full
+            // parse + write txn for symbols the indexer never creates.
             if match_lines.is_empty() && !include_deps {
                 indexer::ensure_fresh(root, conn, &rel);
             }
@@ -149,9 +142,8 @@ pub fn cmd_grep(
     }
     if hits.is_empty() {
         out.push_str(&format!("no matches for '{pattern}'"));
-        // Literal is the default. A regex-looking pattern returning zero hits is
-        // the worst failure mode — the agent concludes the code doesn't exist.
-        // Name the flag that would have matched instead of staying silent.
+        // A regex-looking pattern with zero literal hits is the worst failure
+        // mode — the agent concludes the code doesn't exist. Name the flag.
         if let Some(literal) =
             regexish_literal(pattern).filter(|_| matches!(matcher, Matcher::Literal { .. }))
         {
@@ -165,8 +157,8 @@ pub fn cmd_grep(
         } else if path_filter.is_some() {
             out.push_str(" — try without --path");
         } else {
-            // Plain identifier, no filter, zero hits: a typo or a half-remembered
-            // name is the likeliest cause — point at the recovery that handles it.
+            // Plain identifier, no filter, zero hits: likely a typo — point at
+            // the fuzzy recovery.
             out.push_str(&format!(
                 "\n  try `cona find {pattern}` — symbol search with a typo-tolerant fallback"
             ));
@@ -209,14 +201,11 @@ fn render_with_context(
     }
 }
 
-/// Regex metacharacters that make a pattern *look* like a regex. Used only to
-/// explain a zero-hit fixed-string search — never to change matching.
-/// THE line-matching rule behind `grep`, in one place so the per-line test is a
-/// single call and the mode can't drift between the in-process scan and the
-/// rg/grep prefilter that narrows the candidate files.
+/// THE line-matching rule behind `grep`, in one place so the mode can't drift
+/// between the in-process scan and the rg/grep prefilter.
 ///
-/// Literal is the default: patterns like `foo.bar` or `Vec<T>` are ordinary code
-/// and must not be reinterpreted. `--regex` opts in.
+/// Literal is the default: `foo.bar` or `Vec<T>` are ordinary code and must not
+/// be reinterpreted. `--regex` opts in.
 pub(crate) enum Matcher {
     /// Pre-lowercased when `ignore_case`, so the needle isn't rebuilt per line.
     Literal {
@@ -227,9 +216,8 @@ pub(crate) enum Matcher {
 }
 
 impl Matcher {
-    /// Case-sensitive literal — for callers whose pattern is an identifier, where
-    /// regex is never the right reading (a name holding `$` or `.` must match
-    /// itself).
+    /// Case-sensitive literal for identifier patterns — a name holding `$` or
+    /// `.` must match itself.
     pub(crate) fn literal(pattern: &str) -> Self {
         Matcher::Literal {
             needle: pattern.to_string(),
@@ -240,10 +228,10 @@ impl Matcher {
     /// `Err` only for an invalid regex — the caller surfaces it verbatim, since
     /// a silent fallback to literal would answer a different question.
     pub(super) fn new(pattern: &str, ignore_case: bool, regex: bool) -> Result<Self> {
-        // `a\|b` is how grep (BRE) spells alternation, and agents type it out of
-        // habit in both modes. Verbatim it matches nothing and reads as "the code
-        // doesn't exist", so it means either branch: literals stay literal, and
-        // under --regex it becomes `|` (a literal pipe there is `[|]`).
+        // `a\|b` is grep's (BRE) alternation, typed out of habit in both modes.
+        // Verbatim it matches nothing ("the code doesn't exist"), so it means
+        // either branch: literals stay literal; under --regex it becomes `|`
+        // (a literal pipe there is `[|]`).
         if pattern.contains("\\|") {
             let alt = if regex {
                 pattern.replace("\\|", "|")
@@ -294,10 +282,9 @@ impl Matcher {
         }
     }
 
-    /// The extra flag rg/grep needs to read the pattern the same way we do, if
-    /// any. rg is already Rust-regex by default — exactly our regex dialect —
-    /// so the regex case needs nothing from it; system grep needs ERE to come
-    /// close. A prefilter that disagreed would drop files holding real matches.
+    /// The flag rg/grep needs to read the pattern as we do, if any. rg already
+    /// speaks our Rust-regex dialect; system grep needs ERE to come close. A
+    /// disagreeing prefilter would drop files holding real matches.
     fn prefilter_flag(&self, bin: &str) -> Option<&'static str> {
         match self {
             Matcher::Literal { .. } if bin == "rg" => Some("--fixed-strings"),
@@ -308,13 +295,14 @@ impl Matcher {
     }
 }
 
+/// Some(longest plain run) when the pattern *looks* like a regex. Only explains
+/// a zero-hit literal search — never changes matching.
 fn regexish_literal(pattern: &str) -> Option<String> {
     const META: [char; 11] = ['(', ')', '[', ']', '|', '+', '*', '?', '^', '$', '\\'];
     if !pattern.contains(|c| META.contains(&c)) {
         return None;
     }
-    // The longest run of plain characters is the best literal fallback to
-    // suggest (`tokens_(out|saved)` → `tokens_`).
+    // e.g. `tokens_(out|saved)` → `tokens_`
     Some(
         pattern
             .split(|c| META.contains(&c) || c == '.' || c == '{' || c == '}')
@@ -324,12 +312,10 @@ fn regexish_literal(pattern: &str) -> Option<String> {
     )
 }
 
-/// Fixed-string list of files containing `pattern`, via ripgrep when
-/// installed, system grep as fallback. `None` = no prefilter available
-/// (tool missing or errored) — caller scans everything, fail-open.
-/// `scope` (a repo-relative directory) becomes the search root, so a scoped
-/// query makes rg walk only that subtree. Hits come back relative to it, so the
-/// scope is prefixed again to keep every path repo-relative.
+/// Files containing `pattern`, via ripgrep, else system grep. `None` = no
+/// prefilter (tool missing or errored) — caller scans everything, fail-open.
+/// `scope` (a repo-relative dir) becomes the search root, so rg walks only
+/// that subtree; it is prefixed back so every path stays repo-relative.
 pub(crate) fn grep_prefilter(
     root: &Path,
     pattern: &str,
@@ -343,20 +329,16 @@ pub(crate) fn grep_prefilter(
         ("grep", vec!["-r", "-l", "-I", "-s"]),
     ];
     for (bin, mut args) in attempts {
-        // rg honours .gitignore, which is what usually hides node_modules — so
-        // widening the search means telling rg to stop ignoring. It also needs
-        // --follow: a pnpm `node_modules` is a tree of symlinks into the store,
-        // and without following them the flag finds NOTHING on the package
-        // manager most likely to have a large dep tree. `grep -r` ignores no
-        // files and follows nothing, so `-R` is its counterpart.
+        // rg honours .gitignore, which usually hides node_modules, so widening
+        // means --no-ignore. It also needs --follow: a pnpm `node_modules` is a
+        // symlink farm into the store, and unfollowed the flag finds NOTHING.
+        // `grep -r` ignores nothing and follows nothing, so `-R` is its match.
         if include_deps {
             if bin == "rg" {
                 args.extend(["--no-ignore", "--follow"]);
             } else {
-                // -R is -r plus symlink following; swap rather than add, since
-                // passing both is a conflicting-flag error on some greps.
-                // Note plain grep never honoured .gitignore, so it was already
-                // searching dep dirs — here -R only adds the symlink farm.
+                // -R = -r plus symlinks; swap rather than add, since both is a
+                // conflicting-flag error on some greps.
                 args.retain(|a| *a != "-r");
                 args.push("-R");
             }
@@ -436,9 +418,8 @@ mod tests {
         assert!(Matcher::new("foo(", false, false).is_ok());
     }
 
-    /// The prefilter narrows which files are scanned at all, so it MUST read the
-    /// pattern the same way the in-process matcher does — a disagreement drops
-    /// files that hold real matches.
+    /// The prefilter MUST read the pattern as the in-process matcher does, or it
+    /// drops files that hold real matches.
     #[test]
     fn prefilter_flag_matches_the_matcher_mode() {
         let lit = Matcher::new("a.b", false, false).unwrap();
@@ -511,16 +492,13 @@ mod include_deps_tests {
     use super::*;
     use std::fs;
 
-    /// `--include-deps` has two independent ways to silently find nothing:
-    /// rg's .gitignore filter, and rg not following symlinks. A pnpm
-    /// `node_modules` is a symlink farm, so BOTH must be defeated or the flag
-    /// is a no-op exactly where it matters most.
+    /// `--include-deps` can silently find nothing two ways: rg's .gitignore
+    /// filter, and rg not following symlinks. A pnpm `node_modules` is a
+    /// symlink farm, so BOTH must be defeated.
     ///
-    /// Asserted against rg only. The guarantee is genuinely rg-specific: plain
-    /// `grep` has no .gitignore concept, so it already descends into
-    /// `node_modules` and reports the symlink target by its REAL path — under
-    /// the grep fallback the flag is a no-op and there is nothing to assert.
-    /// CI runners without rg would otherwise test the wrong backend.
+    /// Asserted against rg only: plain `grep` has no .gitignore concept and
+    /// reports symlink targets by their REAL path, so under the grep fallback
+    /// the flag is a no-op and there is nothing to assert.
     #[test]
     #[cfg(unix)] // symlink farm is the point of the test; std::os::unix builds it
     fn include_deps_reaches_gitignored_and_symlinked_files() {
@@ -531,8 +509,7 @@ mod include_deps_tests {
         {
             return; // no rg on this host — the fallback makes no such promise
         }
-        // No tempfile dev-dependency (this crate keeps its dep set lean), so
-        // build a uniquely-named dir by hand and clean it up at the end.
+        // No tempfile dev-dependency (lean dep set): unique dir by hand.
         let root = std::env::temp_dir().join(format!("cona-deps-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();

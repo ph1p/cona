@@ -7,9 +7,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 
-/// `show` for one symbol. When `all` is set and the name is ambiguous, every
-/// candidate is rendered in turn instead of erroring — the ambiguity is
-/// answered rather than bounced back for another round-trip.
+/// `show` for one symbol. With `all` and an ambiguous name, every candidate is
+/// rendered instead of erroring, saving the agent a round-trip.
 pub fn cmd_show(
     root: &Path,
     conn: &Connection,
@@ -19,21 +18,17 @@ pub fn cmd_show(
 ) -> Result<(String, i64)> {
     // `context` is not read here — it is `show_one`'s to apply, per candidate.
     let ShowOpts { kind, sig, all, .. } = opts;
-    // A path handed to `show` means "map this file" — answer with the outline
-    // instead of failing on a symbol name that was never a symbol. Directories
-    // route here too, so they reach cmd_outline's `tree --path` redirect rather
-    // than dead-ending in the symbol resolver. The filesystem is the authority;
-    // `split_locator` only keeps a `file.rs:Name` locator (which addresses a
-    // symbol) from being mistaken for a path.
+    // A path means "map this file" → outline (directories reach its
+    // `tree --path` redirect). The filesystem decides; `split_locator` only
+    // keeps a `file.rs:Name` locator from being mistaken for a path.
     if crate::commands::split_locator(symbol).is_none() && root.join(symbol).exists() {
         return cmd_outline(root, conn, symbol, sig, json);
     }
-    // Without --all, a SMALL ambiguity pool is auto-expanded instead of
-    // erroring: showing 2–3 short definitions answers the question the agent
-    // actually asked, where the error costs a whole retry round-trip. Big
-    // pools (or big bodies) still raise `locate_symbol`'s guided error via
-    // `show_one` — printing them all would be the token sink this tool exists
-    // to avoid. `locate_all` only reports >1 when locate erred on ambiguity.
+    // Without --all, a SMALL ambiguity pool is auto-expanded: 2–3 short
+    // definitions beat a retry round-trip. Big pools (or bodies) still raise
+    // `locate_symbol`'s guided error via `show_one` — printing them all is the
+    // token sink this tool exists to avoid. `locate_all` only reports >1 when
+    // locate erred on ambiguity.
     // candidates from deleted files must not fake an ambiguity (one stat each)
     crate::commands::prune_vanished(root, conn, symbol, kind);
     let cands = if all {
@@ -52,11 +47,10 @@ pub fn cmd_show(
     let auto_all = !all && cands.is_some();
     if let Some(cands) = cands {
         if cands.len() > 1 {
-            // Render each candidate from the row locate_all already resolved —
-            // re-resolving by `file:Name` would re-hit the ambiguity whenever
-            // the candidates share one file (enum + impl, struct + impl). The
-            // rows carry index line ranges, so refresh stale candidate files
-            // first (invariant 2) and re-run the ONE lookup if anything moved.
+            // Render from the rows locate_all resolved — re-resolving by
+            // `file:Name` re-hits the ambiguity when candidates share a file
+            // (enum + impl). Refresh stale candidate files first (invariant 2)
+            // and re-run the ONE lookup if anything moved.
             let refreshed =
                 indexer::refresh_files(root, conn, cands.iter().map(|(p, ..)| p.as_str()));
             let cands = if refreshed.any_refreshed {
@@ -107,10 +101,9 @@ fn show_one(
     show_located(root, conn, &located, opts, json, disclose_others)
 }
 
-/// Render one already-located symbol. Split from `show_one` so `--all` can
-/// print candidates it holds — resolving them again by name would re-raise
-/// the very ambiguity `--all` exists to bypass. Callers own freshness: the
-/// located row's line range is used as-is (invariant 2).
+/// Render one already-located symbol, so `--all` can print candidates without
+/// re-resolving (and re-raising the ambiguity) by name. Callers own freshness:
+/// the line range is used as-is (invariant 2).
 fn show_located(
     root: &Path,
     conn: &Connection,
@@ -121,8 +114,7 @@ fn show_located(
 ) -> Result<(String, i64)> {
     let ShowOpts { context, sig, .. } = opts;
     let (path, s, e, q) = located.clone();
-    // --sig: the signature is already in the index — print it without ever
-    // reading the file body. The leanest possible peek (one line, not the span).
+    // --sig: print the indexed signature without reading the file body
     if sig {
         let signature: String = conn
             .query_row(
@@ -132,9 +124,8 @@ fn show_located(
                 |r| r.get(0),
             )
             .unwrap_or_default();
-        // Baseline: without --sig the agent would `show` the whole span. Honest
-        // per-line width from the index (file size / its last symbol's end line)
-        // instead of a fabricated 80-char constant — no file read either way.
+        // Baseline: the whole span, at a per-line width estimated from the
+        // index (file size / last symbol end line) — no file read.
         let span_lines = ((e - s + 1).max(1)) as usize;
         let avg_len: usize = conn
             .query_row(
@@ -160,8 +151,7 @@ fn show_located(
     let abs = root.join(&path);
     let src = std::fs::read_to_string(&abs)?;
     let lines: Vec<&str> = src.lines().collect();
-    // Honest baseline: a targeted Read window around the symbol, not the whole
-    // file — anchor windows on the symbol's first and last line.
+    // baseline: Read windows anchored on the symbol's first and last line
     let line_lens: Vec<usize> = lines.iter().map(|l| l.len()).collect();
     let baseline = db::baseline_tokens(&line_lens, &[s as usize, e as usize]);
     let end = ((e as usize) + context).min(lines.len());
@@ -185,8 +175,7 @@ fn show_located(
     }
     push_numbered_lines(&mut out, &lines, start, end);
     // exact-name preference may have hidden same-named candidates — disclose
-    // them in one trailer line so the agent never gets a confidently wrong body.
-    // Skipped under `--all`, which is already printing every candidate.
+    // them in one trailer line (skipped under `--all`, which prints them all)
     if !disclose_others {
         return Ok((out, baseline));
     }

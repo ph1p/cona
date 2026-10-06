@@ -12,9 +12,7 @@ fn dir_of(path: &str) -> &str {
 }
 
 /// A disambiguation candidate: the signals `narrow_by_scope` compares against
-/// the caller. Beyond scope/file (the original policy) it carries the declared
-/// param count and whether the def is a method (implicit-receiver offset) so
-/// the arity rule can match a call's arg count.
+/// the caller. `params`/`is_method` (implicit-receiver offset) feed the arity rule.
 pub struct Candidate {
     pub scope: Option<String>,
     pub file: String,
@@ -23,14 +21,11 @@ pub struct Candidate {
 }
 
 /// THE scope-preference disambiguation policy (name-based, no type
-/// resolution), shared by `Graph::prefer_scope` and `context`: when several
-/// definitions share a name, prefer (1) the one in the caller's own parent
-/// scope (same class/impl/namespace — covers `self.x()` / `this.x()`), then
-/// (2) the one in the caller's file, then (3) the one in the caller's own
-/// directory (module-local proximity), then (4) the one whose declared arity
-/// matches the number of arguments at the call site. Only narrows when EXACTLY
-/// one candidate survives a rule — never silently picks among equals, so
-/// remaining multi-def results still surface as ambiguous.
+/// resolution), shared by `Graph::prefer_scope` and `context`. Among same-named
+/// defs prefer (1) the caller's parent scope (`self.x()` / `this.x()`), then
+/// (2) the caller's file, (3) the caller's directory, (4) a declared arity
+/// matching the call's arg count. Narrows only when EXACTLY one candidate
+/// survives a rule — never picks among equals, so the rest stay ambiguous.
 pub fn narrow_by_scope<T>(
     my_scope: Option<&str>,
     my_file: &str,
@@ -42,18 +37,15 @@ pub fn narrow_by_scope<T>(
         return cands;
     }
     let my_dir = dir_of(my_file);
-    // derive each candidate's signals ONCE (the `key` closure may re-parse a
-    // signature — see cmd_context), then test the precomputed values per rule
+    // derive signals ONCE — `key` may re-parse a signature (see cmd_context)
     let derived: Vec<Candidate> = cands.iter().map(&key).collect();
     let survives = |cand: &Candidate, rule: usize| -> bool {
         match rule {
             0 => my_scope.is_some() && cand.scope.as_deref() == my_scope,
             1 => cand.file == my_file,
-            // proximity: same directory as the caller — a weak but
-            // false-positive-light signal for module-local resolution
+            // same directory: weak but false-positive-light
             2 => dir_of(&cand.file) == my_dir,
-            // arity: the def's declared params (minus an implicit receiver for
-            // methods) equal the arguments passed at the call site
+            // arity: declared params (minus a method's receiver) == call args
             _ => match (cand.params, argc) {
                 (Some(p), Some(a)) => {
                     let effective = if cand.is_method {
@@ -93,38 +85,32 @@ pub struct SymNode {
     pub file: String,
     pub start: i64,
     pub end: i64,
-    /// declared parameter count parsed from the signature (arity signal);
-    /// `None` when the signature has no parameter list to compare against
+    /// declared parameter count from the signature; `None` without a param list
     pub params: Option<usize>,
-    /// first param is an implicit receiver (`self`/`this`) not written at the
-    /// call site — so effective arity is `params - 1`
+    /// first param is an implicit receiver (`self`/`this`), so effective
+    /// arity is `params - 1`
     pub recv: bool,
 }
 
-/// Name-based call graph over the whole index, built in ONE pass so
-/// depth-limited traversals never rescan files. Same resolution policy as
-/// `context`: identifier names, no type/scope resolution — multiple
-/// definitions of a name are all kept and callers mark them ambiguous.
+/// Name-based call graph over the whole index, built in ONE pass so traversals
+/// never rescan files. Same policy as `context`: no type resolution — all defs
+/// of a name are kept and callers mark them ambiguous.
 pub struct Graph {
     pub syms: Vec<SymNode>,
     by_name: HashMap<String, Vec<usize>>,
     /// ident name → occurrences as (innermost enclosing sym, line) — ALL
     /// occurrences, so callers-of works for types and callback references too
     uses: HashMap<String, Vec<(usize, i64)>>,
-    /// per sym: ordered-unique (name, arg_count) in CALL POSITION in its
-    /// range — callee edges only follow actual calls, so a local variable
-    /// named like a method elsewhere doesn't fabricate an edge. `arg_count`
-    /// is the arity signal at the call site (`None` when unknown).
-    // per symbol: the calls it makes — (callee name, arg count, first call-site
-    // line). The line lets the semantic tier resolve an ambiguous callee at its
-    // actual call position.
+    /// per sym: ordered-unique (callee name, arg count, first call-site line)
+    /// in CALL POSITION only, so a local variable named like a method doesn't
+    /// fabricate an edge. The line lets the semantic tier resolve an ambiguous
+    /// callee at its call position.
     calls: Vec<Vec<(String, Option<usize>, i64)>>,
 }
 
 impl Graph {
-    /// `files`: (path, lang, source, symbols-of-that-file). Symbol vectors
-    /// come from the (fresh) index; occurrences are re-derived from source
-    /// with the usual fail-open policy (semantic when parseable).
+    /// `files`: (path, lang, source, symbols). Symbols come from the (fresh)
+    /// index; occurrences are re-derived from source, fail-open.
     pub fn build(files: &[(String, Option<&str>, String, Vec<SymNode>)]) -> Graph {
         let mut syms: Vec<SymNode> = Vec::new();
         let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
@@ -145,10 +131,9 @@ impl Graph {
             let mut occ = lang::ident_occurrences_failopen(*flang, src);
             occ.sort_by_key(|(_, line, _, _)| *line);
             let mut seen_call: Vec<HashSet<String>> = vec![HashSet::new(); fsyms.len()];
-            // one sweep instead of a per-occurrence scan over all symbols:
-            // ranges nest, so a stack of open ranges keeps the latest-started
-            // containing symbol on top — the same "innermost" tiebreak
-            // ENCLOSING_SYMBOL_SQL uses (greatest start_line)
+            // one sweep: ranges nest, so a stack of open ranges keeps the
+            // innermost symbol on top — the same tiebreak as
+            // ENCLOSING_SYMBOL_SQL (greatest start_line)
             let mut order: Vec<usize> = (0..fsyms.len()).collect();
             order.sort_by_key(|&i| fsyms[i].start);
             let mut next_sym = 0usize;
@@ -203,8 +188,7 @@ impl Graph {
     }
 
     /// Direct callers of `name`: (enclosing sym, line), deduped per sym,
-    /// excluding occurrences inside any definition of `name` itself
-    /// (a recursive call still counts as self→self and is kept out here).
+    /// excluding occurrences inside any def of `name` (recursion is kept out).
     pub fn callers_of(&self, name: &str, exclude: &HashSet<usize>) -> Vec<(usize, i64)> {
         let mut out: Vec<(usize, i64)> = Vec::new();
         let mut seen: HashSet<usize> = HashSet::new();
@@ -219,9 +203,8 @@ impl Graph {
         out
     }
 
-    /// Direct callees of sym `idx`: names in its body that resolve to indexed
-    /// definitions. Returns (name, defs) — several defs = ambiguous (after
-    /// scope-preference narrowing).
+    /// Direct callees of sym `idx` that resolve to indexed defs: (name, defs,
+    /// line). Several defs after scope narrowing = ambiguous.
     pub fn callees_of(&self, idx: usize) -> Vec<(String, Vec<usize>, i64)> {
         let me = &self.syms[idx];
         let mut out = Vec::new();
@@ -246,12 +229,10 @@ impl Graph {
     }
 
     /// `narrow_by_scope` applied to def indexes relative to a caller sym.
-    /// `argc` is the arg count at the call site (arity signal), if known.
-    /// NOTE: this whole-index call-graph path deliberately stops at the cheap
-    /// tiers (scope/file/dir/arity). The out-of-process semantic-resolve tier
-    /// (see `crate::resolve`) is applied ONLY in `cmd_context`, which has the
-    /// single-file source + line to hand the helper; running a subprocess per
-    /// ambiguous edge across the entire index would be far too costly here.
+    /// `argc` is the call-site arg count, if known.
+    /// NOTE: deliberately stops at the cheap tiers. The out-of-process semantic
+    /// tier (`crate::resolve`) runs ONLY in `cmd_context` — a subprocess per
+    /// ambiguous edge across the whole index would be far too costly.
     pub fn prefer_scope(&self, caller: usize, defs: Vec<usize>, argc: Option<usize>) -> Vec<usize> {
         let me = &self.syms[caller];
         narrow_by_scope(scope_parent(&me.qualified), &me.file, argc, defs, |d| {
@@ -371,8 +352,7 @@ mod tests {
 
     #[test]
     fn scope_preference_narrows_same_class_and_same_file() {
-        // two `helper` defs: one method beside the caller in class A, one free
-        // function in another file — the same-scope one must win, unambiguous
+        // a method beside the caller in class A beats a free fn elsewhere
         let a = "class A {\n  helper() {}\n  run() { this.helper(); }\n}\n";
         let b = "function helper() {}\n";
         let g = Graph::build(&[
@@ -415,9 +395,8 @@ mod tests {
 
     #[test]
     fn scope_preference_falls_back_to_same_directory() {
-        // caller and one `util` live in dir `m/`, the other `util` in `other/`.
-        // scope + same-file both fail to reduce to one; directory proximity
-        // (rule 3) picks the sibling in m/.
+        // scope + same-file fail; directory proximity (rule 3) picks the
+        // `util` beside the caller in m/ over the one in other/.
         let caller = "function go() { util(); }\n";
         let near = "function util() {}\n";
         let far = "function util() {}\n";
@@ -449,8 +428,7 @@ mod tests {
 
     #[test]
     fn arity_narrows_when_scope_and_dir_fail() {
-        // two `emit` defs in two OTHER directories (scope/file/dir all fail to
-        // reduce to one); the call passes two args → the 2-param def wins.
+        // scope/file/dir all fail; the call passes two args → 2-param def wins
         let caller = "function go() { emit(1, 2); }\n";
         let one = "function emit(a) {}\n";
         let two = "function emit(a, b) {}\n";
@@ -486,9 +464,8 @@ mod tests {
 
     #[test]
     fn arity_accounts_for_method_receiver_offset() {
-        // a free `finish(a, b, c)` and a method `.finish(self, trailer)`:
-        // the method's declared params = 2 but a call `.finish(x)` passes ONE
-        // arg (self is the receiver). The offset must let the method win.
+        // `.finish(self, trailer)` declares 2 params but `.finish(x)` passes
+        // ONE arg; the receiver offset must let the method win.
         let caller = "fn go() { obj.finish(x); }\n";
         let free = "fn finish(a: i32, b: i32, c: i32) {}\n";
         let method = "struct B;\nimpl B {\n    fn finish(self, trailer: i32) {}\n}\n";

@@ -9,9 +9,6 @@ use std::path::{Path, PathBuf};
 pub fn project_db_size(root: &Path) -> i64 {
     db_family_size(&project_db_path(root))
 }
-// ---------------------------------------------------------------------------
-// storage introspection + automatic maintenance
-// ---------------------------------------------------------------------------
 
 /// Path to the global registry/stats database.
 pub fn global_db_path() -> Option<PathBuf> {
@@ -63,9 +60,8 @@ pub fn usage_row_count(g: &Connection) -> i64 {
         .unwrap_or(0)
 }
 
-/// Everything the storage report shows, computed once. The single source for
-/// both `stats` (append_storage) and `doctor` — the two renderers format this
-/// struct, never re-query on their own.
+/// Everything the storage report shows, computed once — THE source for both
+/// `stats` (append_storage) and `doctor`; renderers never re-query.
 pub struct StorageSummary {
     pub data_dir: PathBuf,
     pub total: i64,
@@ -109,13 +105,10 @@ pub fn is_home_or_fs_root(p: &Path) -> bool {
     if p.parent().is_none() {
         return true;
     }
-    // Compared through `canonicalize` because the two paths reach us by
-    // different routes: the home dir from the environment, the root from the
-    // cwd the process was started in. One side resolving a symlink the other
-    // spells literally (macOS `/tmp` → `/private/tmp` is the everyday case)
-    // would make the guard silently miss and walk the whole tree. Falls back to
-    // the literal path when canonicalize fails — a comparison is better than
-    // none.
+    // Canonicalized because home comes from the env and the root from the
+    // cwd: if one side resolves a symlink the other spells literally (macOS
+    // `/tmp` → `/private/tmp`), the guard silently misses and walks the whole
+    // tree. Falls back to the literal path if canonicalize fails.
     let real = |q: &Path| q.canonicalize().unwrap_or_else(|_| q.to_path_buf());
     dirs::home_dir().is_some_and(|h| real(&h) == real(p))
 }
@@ -200,9 +193,8 @@ pub fn tidy(purge_orphans: bool, vacuum: bool) -> Result<TidyReport> {
         )? as i64;
     }
 
-    // 3) orphaned project indexes (path gone from disk). Without
-    // purge_orphans only ephemeral paths (temp roots) are dropped — a project
-    // on an unmounted volume must survive the daily auto_tidy.
+    // 3) orphaned project indexes (path gone). Without purge_orphans only
+    // ephemeral (temp-root) paths go — an unmounted volume must survive auto_tidy.
     let mut orphans = 0i64;
     {
         let base = data_dir()?.join("projects");
@@ -244,8 +236,8 @@ pub fn tidy(purge_orphans: bool, vacuum: bool) -> Result<TidyReport> {
     })
 }
 
-/// Called on normal commands: runs a light tidy at most once per day so the
-/// usage log never grows without bound. Cheap and silent; never fails loudly.
+/// Light tidy at most once a day from normal commands, so the usage log stays
+/// bounded. Cheap, silent, never fails loudly.
 pub fn auto_tidy() {
     let last = meta_get("last_tidy")
         .ok()

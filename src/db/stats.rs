@@ -37,9 +37,8 @@ fn scope_clause(project: Option<&str>) -> (String, Vec<String>) {
     }
 }
 
-/// `SUM(tokens_saved)` with the orientation cap applied to rows logged
-/// before `ORIENT_BASELINE_CAP` existed, so old uncapped `tree` rows stop
-/// dominating every total (one 500-file tree once claimed 700k).
+/// `SUM(tokens_saved)` with `ORIENT_BASELINE_CAP` applied to older rows, so
+/// uncapped `tree` rows (one claimed 700k) stop dominating every total.
 pub(crate) const SAVED_SUM: &str = "COALESCE(SUM(CASE WHEN cmd IN ('tree','mcp:tree') \
      THEN MIN(tokens_saved, 20000) ELSE tokens_saved END),0)";
 
@@ -113,9 +112,8 @@ pub fn top_targets(
 /// Recent-query row: (ts, cmd, detail, tokens_saved, ms).
 pub type RecentRow = (i64, String, String, i64, i64);
 
-/// Recent queries, newest first. With `queries_only`, maintenance commands
-/// (index/edit/rename/note/hook:* — see `is_maintenance_cmd`) are dropped;
-/// they carry no savings and are just noise in an activity feed.
+/// Recent queries, newest first. `queries_only` drops maintenance commands
+/// (`is_maintenance_cmd`) — no savings, just feed noise.
 pub fn recent(
     g: &Connection,
     project: Option<&str>,
@@ -211,10 +209,10 @@ pub const CONVERSION_WINDOW_SECS: i64 = 120;
 pub type ConversionRow = (String, i64, i64);
 
 /// How often each hook outcome was followed by a cona query in the same
-/// project within `CONVERSION_WINDOW_SECS`. Hooks log with a session id the
-/// CLI never sees, so this is time-correlated, not session-exact: two
-/// sessions in one repo can credit each other. It is a trend metric — a hint
-/// that converts 5% of the time is noise the agent pays tokens to read.
+/// project within `CONVERSION_WINDOW_SECS`. Time-correlated, not
+/// session-exact (the CLI never sees the hook's session id), so two sessions
+/// in one repo can credit each other. A trend metric: a hint converting 5% of
+/// the time is noise the agent pays tokens to read.
 pub fn hook_conversion(g: &Connection, project: Option<&str>) -> Result<Vec<ConversionRow>> {
     let (where_, params) = scope_clause(project);
     let where_ = where_.replace("project", "h.project");

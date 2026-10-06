@@ -27,11 +27,10 @@ pub fn cmd_find(
          ORDER BY rank, length(s.qualified), f.path LIMIT ?3"
     );
     let like = format!("%{name}%");
-    // `--path` is applied in Rust (below), so the SQL LIMIT must not clip
-    // in-scope rows before that filter runs — over-fetch when scoped, then
-    // truncate to `limit` afterwards.
-    // Clamped both ways: a floor so a small --limit still sees enough rows to
-    // filter, a ceiling so a large one can't scale the fetch without bound.
+    // `--path` is applied in Rust below, so the SQL LIMIT must not clip
+    // in-scope rows first: over-fetch when scoped, truncate afterwards. Clamped
+    // both ways — a floor so a small --limit sees enough rows, a ceiling so a
+    // large one can't grow the fetch without bound.
     let sql_limit = if pf.is_scoped() {
         limit.saturating_mul(20).clamp(1000, 5000)
     } else {
@@ -79,8 +78,7 @@ pub fn cmd_find(
         return cmd_find_fuzzy(conn, name, kind, json);
     }
     let truncated = clip(&mut rows, limit);
-    // Baseline: sum each hit file's size once (rows are rank-ordered, not
-    // path-ordered, so dedup with a set).
+    // Baseline: each hit file's size once (rank-ordered, so dedup via a set).
     let mut seen: HashSet<&str> = HashSet::new();
     let mut bytes: i64 = 0;
     for (p, .., size) in &rows {

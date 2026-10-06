@@ -1,8 +1,7 @@
 //! Drive the real binary against real temp repos (CLI contract tests).
 
-// Drive the real binary against a real temp repo — matches the recovery-bug
-// test philosophy (real IO). Covers edit --range, insert --after, and the
-// syntax-verify rollback shared by both.
+// Real IO, like the recovery-bug tests: edit --range, insert --after, and
+// the syntax-verify rollback they share.
 #[test]
 fn edit_range_and_insert_roundtrip() {
     use std::process::Command;
@@ -68,12 +67,10 @@ fn edit_range_and_insert_roundtrip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// `show --all` renders every candidate of an ambiguous name — including the
-// same-file enum + impl pair, where the `file:Name` escape hatch cannot
-// disambiguate. Pins the guide/skill/MCP promise ("--all prints every
-// definition instead of erroring") and the honest ambiguity message: hatches
-// that cannot separate the pool (file/Parent.Name for a same-file pair) are
-// not suggested.
+// `show --all` renders every candidate of an ambiguous name, including a
+// same-file enum + impl pair that `file:Name` cannot separate. Pins the
+// guide/skill/MCP promise and an honest ambiguity message: hatches that cannot
+// separate the pool (file/Parent.Name for a same-file pair) are not suggested.
 #[test]
 fn show_all_renders_same_file_enum_impl_pair() {
     use std::process::Command;
@@ -107,10 +104,8 @@ fn show_all_renders_same_file_enum_impl_pair() {
     assert!(out.contains("enum Thing"), "{out}");
     assert!(out.contains("impl Thing"), "{out}");
     assert!(!out.contains("ambiguous"), "{out}");
-    // without --all a SMALL ambiguity (≤3 candidates, ≤400 lines total)
-    // auto-renders every definition instead of erroring — a dead-end error
-    // that --all immediately fixes was pure friction. The banner still names
-    // the narrowing hatches.
+    // without --all a SMALL ambiguity (≤3 candidates, ≤400 lines) still
+    // auto-renders every definition; the banner names the narrowing hatches.
     let (ok, msg) = run(&["show", "Thing"]);
     assert!(ok, "expected auto-all render, got error: {msg}");
     assert!(msg.contains("ambiguous — showing all 2"), "{msg}");
@@ -122,9 +117,8 @@ fn show_all_renders_same_file_enum_impl_pair() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// Grouped subcommands (`nav show`) and their flat aliases (`show`) dispatch to
-// the same operation and produce identical output. Pins the CLI grouping
-// contract: flat forms stay backward-compatible forever.
+// Grouped subcommands (`nav show`) and flat aliases (`show`) produce identical
+// output: flat forms stay backward-compatible forever.
 #[test]
 fn grouped_and_flat_are_equivalent() {
     use std::process::Command;
@@ -213,11 +207,10 @@ fn check_no_arg_walks_git_changes() {
 }
 
 /// `--read-only` cannot refresh the index, so it must never serve stale line
-/// numbers as if they were current (invariant 2). `show` fails with a message
-/// naming the file and the fix — NOT rusqlite's "attempt to write a readonly
-/// database" — and `outline`, which still prints its indexed ranges, labels
-/// them stale. The writable run afterwards proves the refusal is scoped to
-/// read-only mode and normal use still self-heals.
+/// numbers as current (invariant 2). `show` fails naming the file and the fix
+/// (not rusqlite's "attempt to write a readonly database"); `outline` labels
+/// its indexed ranges stale. The writable run proves normal use still
+/// self-heals.
 #[test]
 fn read_only_never_serves_stale_ranges_as_fresh() {
     use std::process::Command;
@@ -252,8 +245,7 @@ fn read_only_never_serves_stale_ranges_as_fresh() {
     )
     .unwrap();
 
-    // `show` reports per-symbol failures on stdout so one bad name cannot abort
-    // a multi-symbol batch — the message is what matters, not the stream.
+    // per-symbol failures go to stdout so one bad name cannot abort a batch
     let out = cona(&["--read-only", "show", "target"]);
     let err = format!(
         "{}{}",
@@ -290,18 +282,14 @@ fn read_only_never_serves_stale_ranges_as_fresh() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The SessionStart hook fires unattended in whatever directory the harness
-/// happens to be in. When that is $HOME, walking the tree is never what anyone
-/// asked for — several agent sessions launched from the home directory each
-/// started a multi-hundred-MB walk of the whole home tree. `--session-start`
-/// must bail out there, and quietly: the hook is fail-open, so it exits 0 and
-/// emits no context rather than failing a session over a missing index.
+/// The SessionStart hook fires unattended in whatever directory the harness is
+/// in. In $HOME a walk is never wanted (sessions launched there each walked
+/// hundreds of MB). `--session-start` must bail out quietly: fail-open, exit 0,
+/// no context.
 ///
-/// Unix-only because of the harness, not the behaviour: faking a home directory
-/// means overriding `dirs::home_dir`, which reads `$HOME` on unix but calls the
-/// Win32 known-folder API on Windows — no environment variable can redirect it,
-/// so the child would compare the temp dir against the runner's real profile
-/// and index happily. The guard itself is platform-neutral.
+/// Unix-only because of the harness, not the behaviour: `dirs::home_dir` reads
+/// `$HOME` on unix but the Win32 known-folder API on Windows, which no env var
+/// can redirect. The guard itself is platform-neutral.
 #[cfg(unix)]
 #[test]
 fn session_start_refuses_to_index_the_home_dir() {
@@ -328,8 +316,7 @@ fn session_start_refuses_to_index_the_home_dir() {
         String::from_utf8_lossy(&out.stdout)
     );
 
-    // A typed `cona index` in $HOME stays allowed — that is a deliberate act,
-    // and it warns rather than refusing.
+    // A typed `cona index` in $HOME is deliberate: it warns, never refuses.
     let out = run(&["index"]);
     assert!(out.status.success());
     assert!(

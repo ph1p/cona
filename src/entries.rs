@@ -18,8 +18,7 @@ pub fn is_test_path(path: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// True when a symbol (by its qualified name / name) is a test by naming
-/// convention — e.g. inside a `tests` module or named `test_*`.
+/// True when a symbol's (qualified) name marks it a test, e.g. `tests::…`/`test_*`.
 pub fn is_test_symbol(qualified: &str) -> bool {
     qualified.split('.').any(|seg| {
         seg == "tests" || seg == "test" || seg.starts_with("test_") || seg.ends_with("_test")

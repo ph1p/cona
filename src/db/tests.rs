@@ -22,17 +22,16 @@ fn index_lock_excludes_a_second_holder() {
 
 #[test]
 fn index_lock_reclaims_a_stale_marker() {
-    // A marker from a killed process must not wedge indexing forever, and a
-    // fresh one must still exclude. Age is judged by `marker_is_stale`, so
-    // the policy is checked without having to backdate a real file.
+    // A killed process's marker must not wedge indexing; a fresh one must
+    // still exclude. Checked via `marker_is_stale`, no backdated file needed.
     assert!(!IndexLock::marker_is_stale(Some(
         std::time::Duration::from_secs(1)
     )));
     assert!(IndexLock::marker_is_stale(Some(
         std::time::Duration::from_secs(IndexLock::STALE_SECS + 1)
     )));
-    // An unreadable/absurd mtime (clock skew makes `elapsed` fail) counts as
-    // stale: better one duplicate walk than indexing wedged for good.
+    // Unreadable/absurd mtime (clock skew) counts as stale: one duplicate
+    // walk beats indexing wedged for good.
     assert!(IndexLock::marker_is_stale(None));
 }
 

@@ -1,6 +1,5 @@
-//! MCP server glue: tool schemas + dispatch to the cmd_* functions.
-//! Framing lives in mcp.rs (tested); this side only defines the tool
-//! schemas and routes tools/call to the command implementations.
+//! MCP server glue: tool schemas + dispatch of tools/call to the cmd_*
+//! functions. Framing lives in mcp.rs (tested).
 
 use super::*;
 use crate::mcp::{
@@ -13,12 +12,10 @@ use std::path::Path;
 /// Wrap a text result with the structured form parsed from the same command's
 /// `--json` render, under `field`.
 ///
-/// `json_out` is what the cmd_* function produced with `json = true`: a JSON
-/// array (or object) as a string. It is parsed rather than re-queried so the
-/// structured payload and the text can never describe different index states.
-/// A parse failure degrades to text-only instead of failing the call — a
-/// missing `structuredContent` is a lost optimisation, a failed tool call is a
-/// lost answer.
+/// `json_out` is the cmd_* output with `json = true`. It is parsed rather than
+/// re-queried so payload and text can never describe different index states.
+/// A parse failure degrades to text-only: a missing `structuredContent` is a
+/// lost optimisation, a failed tool call is a lost answer.
 fn structured(text: String, json_out: &str, field: &str) -> ToolOut {
     match serde_json::from_str::<serde_json::Value>(json_out) {
         Ok(v) => ToolOut::structured(text, serde_json::json!({field: v})),
@@ -32,9 +29,8 @@ pub const CORE_TOOLS: &[&str] = &[
     "find", "show", "refs", "outline", "tree", "grep", "context", "edit",
 ];
 
-/// Every tool schema cona defines, core and extended alike. `mcp_tools`
-/// filters this for tools/list; `more` renders the extended tail from it, so
-/// the two can never disagree about a schema.
+/// Every tool schema, core and extended. `mcp_tools` and `more` both filter
+/// this, so the two can never disagree about a schema.
 fn all_tools() -> Vec<serde_json::Value> {
     use serde_json::json;
     let s = |d: &str| json!({"type": "string", "description": d});
@@ -219,21 +215,17 @@ fn is_core(t: &serde_json::Value) -> bool {
 
 /// The tools/list payload: the core tier plus one `more` gate.
 ///
-/// Progressive disclosure. The full set is 21 tools ≈ 2.6k tokens of schema
-/// re-sent on EVERY request, spent whether or not the agent calls a single one
-/// — a real cost for a tool whose whole purpose is spending fewer tokens. The
-/// core eight answer the overwhelming majority of navigation (locate, read,
-/// search, orient, edit); the other thirteen are deliberate follow-ups an agent
-/// reaches for only once it knows what it wants, which is exactly when it can
-/// afford one extra call to `more` to fetch their schemas.
+/// Progressive disclosure. The full 21 tools cost ≈ 2.6k tokens of schema on
+/// EVERY request, called or not. The core eight cover most navigation (locate,
+/// read, search, orient, edit); the other thirteen are deliberate follow-ups,
+/// reached for once the agent knows what it wants and can afford one `more`.
 ///
-/// Disclosure must go through tools/list, not through prose. A client may only
-/// call what tools/list returned, so describing a gated tool in some other
-/// tool's output leaves it UNREACHABLE — Claude Code answers such a call with
-/// "No such tool available". Hence `more` flips the connection to expanded and
-/// `serve` emits notifications/tools/list_changed, after which this returns the
-/// full set. `mcp_call` still dispatches on name alone, so a client that never
-/// re-lists is not broken, merely unable to discover the tail.
+/// Disclosure must go through tools/list, not prose: a client may only call
+/// what tools/list returned, so a gated tool named elsewhere is UNREACHABLE
+/// ("No such tool available"). Hence `more` flips the connection to expanded
+/// and `serve` emits notifications/tools/list_changed, after which this returns
+/// the full set. `mcp_call` still dispatches on name alone, so a client that
+/// never re-lists is not broken, merely unable to discover the tail.
 pub fn mcp_tools(expanded: bool) -> Vec<serde_json::Value> {
     use serde_json::json;
     let all = all_tools();
@@ -256,9 +248,8 @@ pub fn mcp_tools(expanded: bool) -> Vec<serde_json::Value> {
             extended.len(),
             extended.join(", ")
         ),
-        // `props` is the properties MAP, which tool_annotated nests under
-        // "properties" — a schema fragment here yields bogus property defs and
-        // clients drop the whole tools/list as invalid.
+        // `props` is the properties MAP (tool_annotated nests it); a schema
+        // fragment here makes clients drop the whole tools/list as invalid.
         json!({}),
         &[],
         read_only("More tools"),
@@ -266,9 +257,8 @@ pub fn mcp_tools(expanded: bool) -> Vec<serde_json::Value> {
     out
 }
 
-/// Names of every tool annotated `readOnlyHint: true`, `more` included — the
-/// source the installer's MCP allow rules are built from, so flipping a tool
-/// between `read_only` and `writes` moves it in or out of them.
+/// Every tool annotated `readOnlyHint: true`, `more` included — the source of
+/// the installer's MCP allow rules.
 pub fn read_only_tool_names() -> Vec<String> {
     all_tools()
         .iter()
@@ -278,15 +268,13 @@ pub fn read_only_tool_names() -> Vec<String> {
         .collect()
 }
 
-/// `more`'s body: the extended tools' schemas as JSON. Returned as text
-/// because MCP tool results are content blocks; the agent reads them the same
-/// way it reads tools/list.
+/// `more`'s body: the extended tools' schemas as JSON text (tool results are
+/// content blocks).
 fn mcp_more() -> Result<String> {
     let extended: Vec<serde_json::Value> =
         all_tools().into_iter().filter(|t| !is_core(t)).collect();
-    // Name the CLI fallback: the schemas only become callable after the
-    // harness refreshes tools/list, and not every client honours
-    // list_changed. The shell spelling works either way.
+    // Name the CLI fallback: not every client honours list_changed, and the
+    // shell spelling works either way.
     Ok(format!(
         "{} advanced cona tools are now available — call any of them by name. \
          If one is rejected as unknown (your client did not refresh its tool list), \
@@ -571,24 +559,19 @@ fn mcp_call(
             let words: Vec<String> = text.split_whitespace().map(String::from).collect();
             (cmd_note(conn, Some(sym), &words, None)?, 0, sym.to_string())
         }
-        // Schema disclosure, not a query: no index needed, nothing to bill a
-        // baseline against.
+        // Schema disclosure, not a query: no index, no baseline to bill.
         "more" => (mcp_more()?, 0, String::new()),
         other => bail!("unknown tool '{other}'"),
     };
     finish(root, &format!("mcp:{name}"), t0, &out, baseline, &detail);
 
     // Tools that declare an outputSchema must return matching
-    // structuredContent. The JSON render is produced by re-running the same
-    // query with json = true: the cmd_* functions return ONE string, either
-    // text or JSON, so there is no single call that yields both. The repeat is
-    // an indexed SQLite read against a connection already open and warm — far
-    // cheaper than the tokens the agent saves by not re-parsing a text render —
-    // and it is skipped entirely for tools without a schema.
+    // structuredContent. cmd_* returns ONE string (text or JSON), so the JSON
+    // comes from re-running the query with json = true — a cheap indexed read
+    // on a warm connection, skipped for tools without a schema.
     //
-    // Errors here are swallowed into text-only: structuredContent is an
-    // optimisation, so a hiccup on the second pass must not fail a call whose
-    // answer is already in hand.
+    // Errors degrade to text-only: structuredContent is an optimisation, and a
+    // second-pass hiccup must not fail a call whose answer is already in hand.
     let structured_out = |field: &str, r: Result<(String, i64)>| match r {
         Ok((j, _)) => structured(out.clone(), &j, field),
         Err(_) => ToolOut::text(out.clone()),
@@ -663,12 +646,10 @@ fn each_csv(
     Ok((format!("{}\n", parts.join("\n\n")), baseline))
 }
 
-/// Server preamble echoed in the initialize result. Clients that lack
-/// cona's global guidance (i.e. anything other than Claude Code, which
-/// gets CONA.md + the SessionStart hook) see only 21 flat tools with no
-/// strategy; this teaches the coarse→fine workflow and the reach-for-cona
-/// rule so the token savings actually materialise. Kept compact — it is
-/// injected into the model's context on every session.
+/// Server preamble echoed in the initialize result. Clients without cona's
+/// global guidance (anything but Claude Code, which gets CONA.md + the
+/// SessionStart hook) would see only flat tools with no strategy; this teaches
+/// the coarse→fine workflow. Kept compact — it is injected every session.
 const MCP_INSTRUCTIONS: &str = "\
 This project is indexed by cona, a symbol-level code-navigation server. \
 Use these tools as your DEFAULT way to read and search code. Do NOT read whole \
@@ -701,14 +682,12 @@ when it is not indexed or you truly need every line.";
 /// for the whole session (WAL keeps external reindexes visible; per-command
 /// freshness is locate_fresh's job as everywhere else).
 pub fn cmd_mcp(root: &Path) -> Result<()> {
-    // The DB is opened LAZILY, on the first tools/call — never before serve()
-    // enters its loop. A stdio MCP client (e.g. Devin) expects `initialize` to
-    // be answered immediately; doing the fallible/slow index work up front
-    // (open_indexed may bail on a home/fs-root cwd, or block auto-indexing a
-    // large tree) made the process exit or stall inside the initialize window,
-    // which the client reports as "connection closed: initialize response".
-    // Deferring it means initialize/tools/list always succeed; an index error
-    // surfaces as an isError tool result instead of a dead connection.
+    // The DB is opened LAZILY, on the first tools/call. Stdio clients (e.g.
+    // Devin) expect `initialize` answered immediately; fallible/slow index work
+    // up front (open_indexed may bail on a home/fs-root cwd, or auto-index a
+    // large tree) made the process exit or stall inside that window ("connection
+    // closed: initialize response"). Deferred, initialize/tools/list always
+    // succeed and an index error becomes an isError tool result.
     let conn: std::cell::OnceCell<Connection> = std::cell::OnceCell::new();
     crate::mcp::serve(
         std::io::stdin().lock(),
@@ -716,9 +695,8 @@ pub fn cmd_mcp(root: &Path) -> Result<()> {
         mcp_tools,
         Some(MCP_INSTRUCTIONS),
         |name, args| {
-            // `more` only reflects over static schemas — opening (and possibly
-            // building) the index for it would make schema discovery as
-            // expensive as a query, and fail in an unindexed tree.
+            // `more` only reflects over static schemas — opening the index for
+            // it would be as costly as a query, and fail in an unindexed tree.
             if name == "more" {
                 return Ok(ToolOut::text(mcp_more()?).expanding());
             }

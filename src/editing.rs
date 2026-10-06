@@ -1,6 +1,5 @@
 /// Replace lines [start, end] (1-based, inclusive) of `src` with `replacement`.
-/// Pure function so it can be unit-tested independently of the CLI.
-/// A CRLF source stays CRLF throughout (replacement is normalized to match).
+/// A CRLF source stays CRLF (the replacement is normalized to match).
 pub fn splice_lines(src: &str, start: usize, end: usize, replacement: &str) -> String {
     let crlf = src.contains("\r\n");
     // A source with no final newline keeps that state after the edit — avoids a
@@ -31,9 +30,8 @@ fn join_lines(lines: Vec<&str>, trailing_nl: bool, crlf: bool) -> String {
     }
 }
 
-/// Insert `code` after the first `at` lines of `src` (0 = prepend). `at` is
-/// clamped to the line count, so an out-of-range value appends. Works on an
-/// empty source (produces just the inserted code). CRLF is preserved.
+/// Insert `code` after the first `at` lines of `src` (0 = prepend; out of range
+/// appends). Works on an empty source. CRLF is preserved.
 pub fn splice_insert(src: &str, at: usize, code: &str) -> String {
     let crlf = src.contains("\r\n");
     let had_trailing_nl = src.is_empty() || src.ends_with('\n');
@@ -47,10 +45,9 @@ pub fn splice_insert(src: &str, at: usize, code: &str) -> String {
     join_lines(pieces, had_trailing_nl, crlf)
 }
 
-/// Replace `old` (of known byte length) with `new` at the given identifier
-/// positions ((1-based line, byte col within the line), any order). Pure —
-/// the splice logic for `rename`. CRLF sources stay CRLF; a trailing newline
-/// is preserved exactly as in the input.
+/// The splice logic for `rename`: replace `old` with `new` at the given
+/// identifier positions ((1-based line, byte col), any order). CRLF and the
+/// trailing newline are preserved exactly.
 pub fn apply_renames(src: &str, positions: &[(usize, usize)], old_len: usize, new: &str) -> String {
     let crlf = src.contains("\r\n");
     let had_trailing_nl = src.ends_with('\n');
@@ -74,15 +71,11 @@ pub fn apply_renames(src: &str, positions: &[(usize, usize)], old_len: usize, ne
     out
 }
 
-/// `splice_insert` for a SYMBOL-anchored insert: separate the new code from a
-/// neighbouring item by one blank line, the way hand-written code is spaced —
-/// otherwise `insert --after f` glues the new function onto `f`'s closing
-/// brace. No blank is added against an already-blank line, an opening line
-/// (`{`/`(`/`[`/`:` — first item in a block) or a closing one (`}`/`)`/`]` —
-/// last item in a block). Leading/trailing blank lines in `code` are dropped
-/// so the spacing comes out the same however the caller piped it.
-/// `--at <file> <line>` does NOT go through here: there the caller chose the
-/// exact line and gets exactly what it sent.
+/// `splice_insert` for a SYMBOL-anchored insert: one blank line separates the
+/// new code from each neighbour, else `insert --after f` glues onto `f`'s `}`.
+/// No blank against a blank line, an opener (`{`/`(`/`[`/`:`) or a closer
+/// (`}`/`)`/`]`). Blank edges of `code` are dropped so spacing is stable.
+/// `--at <file> <line>` bypasses this: the caller gets exactly what it sent.
 pub fn splice_insert_spaced(src: &str, at: usize, code: &str) -> String {
     let lines: Vec<&str> = src.lines().collect();
     let at = at.min(lines.len());

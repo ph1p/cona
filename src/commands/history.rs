@@ -15,8 +15,7 @@ pub fn cmd_blame(
     json: bool,
 ) -> Result<(String, i64)> {
     let (path, s, e, q) = locate_fresh(root, conn, symbol, None)?;
-    // Ask git for one past the limit so a clipped list is distinguishable
-    // from one that happens to be exactly `limit` long.
+    // one past the limit, so a clipped list differs from one exactly `limit` long
     let (mut commits, raw_len) = gitmap::log_symbol_range(root, &path, s, e, limit + 1)?;
     let truncated = clip(&mut commits, limit);
     let baseline = db::est_tokens(raw_len);
@@ -53,8 +52,8 @@ pub fn cmd_hot(
     let mut stmt = conn.prepare("SELECT path FROM files")?;
     let indexed: HashSet<String> = stmt.query_map([], |r| r.get(0))?.flatten().collect();
     let commits = gitmap::log_numstat(root, since)?;
-    // churn() returns rank-sorted rows — keep one past the limit so clip()
-    // can tell a full page from a clipped one, drop the rest unmaterialized
+    // rows are rank-sorted — keep one past the limit so clip() can detect
+    // clipping, drop the rest unmaterialized
     let mut churn: Vec<_> = gitmap::churn(&commits)
         .into_iter()
         .filter(|(p, ..)| indexed.contains(p))

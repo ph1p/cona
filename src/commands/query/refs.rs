@@ -15,15 +15,13 @@ pub fn cmd_refs(
     json: bool,
 ) -> Result<(String, i64)> {
     let mut hits: Vec<(String, usize, String)> = Vec::new();
-    // Honest baseline: per hit file, a grep pass + a Read window around each
-    // ref line (not the whole file) — what the same lookup costs without cona.
+    // Honest baseline: per hit file, a grep pass + a Read window per ref line.
     let mut baseline: i64 = 0;
     let mut truncated = false;
     let mut cur_file = String::new();
     let mut cur_lens: Vec<usize> = Vec::new();
-    // line-start byte offsets — O(1) hit-text access instead of re-scanning
-    // the file prefix per hit (offsets don't borrow fsrc, so they can live
-    // across visit calls, unlike a Vec<&str> of the lines)
+    // Line-start byte offsets for O(1) hit-text access; unlike a Vec<&str>
+    // they don't borrow fsrc, so they outlive each visit call.
     let mut cur_offsets: Vec<usize> = Vec::new();
     let mut cur_lns: Vec<usize> = Vec::new();
     scan_ref_sites(

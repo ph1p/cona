@@ -75,10 +75,8 @@ impl IntegrationAction {
 }
 
 // ── Per-command argument structs ──────────────────────────────────────────
-// Args live here ONCE and are reused by both the flat aliases (`Cmd`) and the
-// grouped, canonical subcommands (`Nav`/`Inspect`/`Edit`/…). Dispatch in
-// `run()` reads them through these structs, so there is a single source of
-// truth for every flag.
+// Args live here ONCE, shared by the flat aliases (`Cmd`) and the grouped
+// subcommands (`Nav`/`Inspect`/`Edit`/…): one source of truth per flag.
 
 #[derive(clap::Args)]
 pub struct IndexArgs {
@@ -89,8 +87,7 @@ pub struct IndexArgs {
     #[arg(long)]
     pub watch: bool,
     /// Emit a SessionStart context block (repo orientation) as JSON on
-    /// stdout after indexing. Wired to the SessionStart hook so a fresh
-    /// session gets repo-specific orientation, not just a static guide.
+    /// stdout after indexing — wired to the SessionStart hook.
     #[arg(long)]
     pub session_start: bool,
 }
@@ -514,9 +511,8 @@ pub struct UninstallArgs {
     pub yes: bool,
 }
 
-/// What `cona agents` should do. `add`/`remove` are friendly aliases for
-/// `install`/`uninstall`; `status` lists what's configured; omitting the action
-/// on a terminal opens an interactive checklist.
+/// What `cona agents` should do. `add`/`remove` alias `install`/`uninstall`;
+/// no action on a terminal opens an interactive checklist.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum AgentAction {
     /// Configure the given (or detected) agents
@@ -562,9 +558,9 @@ pub struct AgentsArgs {
 }
 
 // ── Grouped, canonical subcommands ─────────────────────────────────────────
-// These render in `--help` as six themed groups. Each variant carries a shared
-// *Args struct. The flat top-level names (`cona show …`) remain as hidden
-// aliases in `Cmd` for backward compatibility and shorter agent calls.
+// Six themed `--help` groups, each variant carrying a shared *Args struct. The
+// flat names (`cona show …`) stay as hidden aliases in `Cmd` for backward
+// compatibility and shorter agent calls.
 
 /// Navigate the code: locate and read symbols.
 #[derive(Subcommand)]
@@ -658,11 +654,9 @@ pub enum Project {
     Discover(DiscoverArgs),
 }
 
-/// Long help for `doctor`. A const rather than an inline attribute because
-/// `doctor` takes no arguments: commands with an `*Args` struct carry their
-/// `long_about` on that struct, so the grouped and flat spellings inherit one
-/// copy, but a bare variant has no such shared home and would otherwise need
-/// the prose written out on both `Maint::Doctor` and `Cmd::DoctorFlat`.
+/// Long help for `doctor`. A const because `doctor` has no `*Args` struct to
+/// carry a shared `long_about`, so `Maint::Doctor` and `Cmd::DoctorFlat` would
+/// otherwise each need their own copy.
 pub const DOCTOR_ABOUT: &str = "\
 Health check for the whole installation. Reports the binary and whether it is on\n\
 your PATH, git hooks, the guide/skill in each scope, this project's index, config\n\

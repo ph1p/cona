@@ -1,6 +1,5 @@
 //! Tiny ANSI styling layer — zero deps, honors NO_COLOR / CLICOLOR_FORCE /
-//! TERM=dumb and only colors real terminals. All user-facing CLI polish goes
-//! through here so output stays plain when piped (agents read us!).
+//! TERM=dumb, colors only real terminals, so piped output (agents!) stays plain.
 
 use std::io::IsTerminal;
 use std::sync::OnceLock;
@@ -55,19 +54,14 @@ pub fn cyan(s: &str) -> String {
 pub fn heading(s: &str) -> String {
     format!("{} {}", cyan("▸"), bold(s))
 }
-/// Top-level command banner, e.g. `cona install`. One per command, printed
-/// once at the very top — gives every setup/install/upgrade/uninstall run the
-/// same unmistakable start-of-output marker. Deliberately plainer than
-/// `heading` (no `▸`) so the very first line of output reads as a title, not
-/// a section.
+/// Top-level command banner, e.g. `cona install`, printed once at the very
+/// top. Plainer than `heading` (no `▸`) so it reads as a title, not a section.
 pub fn banner(s: &str) -> String {
     format!("{}\n", bold(&cyan(s)))
 }
 
 /// Closing status line for a command that tracked a `count` of
 /// warnings/issues: `✓ <ok_msg>` when zero, else `! <n> <noun>(s) <tail>`.
-/// Centralizes the ok/warn tone pick + singular/plural noun so
-/// install/upgrade/uninstall/setup/doctor don't each hand-roll it.
 pub fn summary(count: usize, noun: &str, tail: &str, ok_msg: &str) -> String {
     if count == 0 {
         ok(ok_msg)
@@ -97,10 +91,8 @@ pub fn item(s: &str) -> String {
     format!("{} {}", dim("·"), s)
 }
 
-/// THE two-column `command   description` table: every "what to run next"
-/// block (install's next-steps, setup's try-it, `agents status`'s manage list)
-/// renders through here, so the alignment and the dim/highlight choice are one
-/// decision instead of one per call site.
+/// THE two-column `command   description` table every "what to run next"
+/// block renders through (install, setup, `agents status`).
 /// Pad BEFORE coloring — ANSI escapes would break the column width.
 pub fn cmd_table(rows: &[(&str, &str)]) -> String {
     let width = rows.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
@@ -109,9 +101,8 @@ pub fn cmd_table(rows: &[(&str, &str)]) -> String {
         .collect()
 }
 
-/// Yes/no confirmation prompt (default No). Returns `false` — the safe
-/// answer — whenever stdin/stdout is not a terminal, so scripted/piped runs
-/// never block or accidentally destroy data.
+/// Yes/no confirmation prompt (default No). Returns `false` (safe) when
+/// stdin/stdout is not a terminal, so scripted runs never block or destroy.
 pub fn confirm(prompt: &str) -> bool {
     use std::io::{BufRead, IsTerminal, Write};
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -126,10 +117,9 @@ pub fn confirm(prompt: &str) -> bool {
     matches!(line.trim(), "y" | "Y" | "yes" | "YES")
 }
 
-/// Interactive arrow-key selector over `(name, description)` items — the one
-/// raw-mode primitive, so prompts never re-roll terminal handling. Returns the
-/// chosen index, or None on cancel (esc/q/ctrl-c). Caller must ensure
-/// stdin+stdout are terminals.
+/// Arrow-key selector over `(name, description)` items — the one raw-mode
+/// primitive. Returns the chosen index, or None on cancel (esc/q/ctrl-c).
+/// Caller must ensure stdin+stdout are terminals.
 pub fn select(title: &str, items: &[(&str, &str)]) -> anyhow::Result<Option<usize>> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use ratatui::crossterm::terminal;
@@ -196,18 +186,16 @@ pub enum Row<'a> {
     /// A group heading — skipped by the cursor, rendered bold. Blank name = a
     /// spacer line.
     Header(&'a str),
-    /// A toggleable choice: display name, dim description, initial checked
-    /// state. `Cow` so callers can pass static strs or built strings alike.
+    /// A toggleable choice: name, dim description, initially checked. `Cow`
+    /// takes static or built strings.
     Item(&'a str, std::borrow::Cow<'a, str>, bool),
 }
 
 /// Raw-mode multi-select checklist over mixed header/item `rows`. Returns the
-/// **item ordinals** (0-based over `Item` rows only, headers skipped) that ended
-/// up checked, or `None` on cancel (esc/ctrl-c). Callers keep a parallel vector
-/// of item payloads and index it by ordinal — no header offset to reconcile.
-/// Space toggles the cursor row, `a` toggles every item at once, enter confirms.
-/// Same drop-guard + redraw discipline as `select` — never re-roll the raw-mode
-/// handling.
+/// checked **item ordinals** (0-based over `Item` rows, headers skipped), or
+/// `None` on cancel (esc/ctrl-c) — callers index a parallel payload vector.
+/// Space toggles the row, `a` toggles all, enter confirms. Same drop-guard +
+/// redraw discipline as `select`.
 pub fn multiselect(title: &str, rows: &[Row<'_>]) -> anyhow::Result<Option<Vec<usize>>> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
     use ratatui::crossterm::terminal;
@@ -277,9 +265,8 @@ pub fn multiselect(title: &str, rows: &[Row<'_>]) -> anyhow::Result<Option<Vec<u
                 Row::Item(name, desc, _) => {
                     let box_ = if checked[i] { green("◉") } else { dim("○") };
                     let cursor = if i == sel { cyan("›") } else { " ".into() };
-                    // pad the RAW name to the column width first — styling it
-                    // before padding would make the fill count the ANSI escape
-                    // bytes and eat the gap, colliding name with description.
+                    // pad the RAW name first — styled, the fill would count the
+                    // ANSI bytes and collide name with description.
                     let name = format!("{name:<name_w$}");
                     let name = if i == sel { bold(&name) } else { name };
                     format!("  {cursor} {box_}  {name}  {}", dim(desc))
@@ -332,8 +319,8 @@ pub fn multiselect(title: &str, rows: &[Row<'_>]) -> anyhow::Result<Option<Vec<u
 
 #[cfg(test)]
 mod tests {
-    // paint() branches on the cached terminal detection — in tests stdout is
-    // piped, so styling is off and strings pass through unchanged.
+    // In tests stdout is piped, so paint() styling is off and strings pass
+    // through unchanged.
     #[test]
     fn plain_when_not_a_terminal() {
         assert_eq!(super::bold("x"), "x");

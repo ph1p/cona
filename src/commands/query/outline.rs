@@ -28,7 +28,7 @@ pub fn cmd_outline(
          WHERE f.path = ?1 OR f.path LIKE ?2 ESCAPE '\\'
          ORDER BY f.path, s.start_line",
     )?;
-    // One projection, used again after a refresh replaces the rows below.
+    // reused after a refresh replaces the rows below
     let like = format!("%/{escaped}");
     let mut fetch = || -> Result<Vec<OutlineRow>> {
         Ok(stmt
@@ -48,10 +48,8 @@ pub fn cmd_outline(
     };
     let rows = fetch()?;
     if rows.is_empty() {
-        // A directory is a natural thing to hand `outline`; answer it with the
-        // command that does cover directories instead of erroring out.
-        // On disk normally; the index probe still answers for a directory that
-        // was indexed but has since been removed from the working tree.
+        // A directory: point at the command that covers directories. The
+        // index probe also catches an indexed dir since removed from disk.
         let is_dir = root.join(file).is_dir()
             || conn
                 .query_row(
@@ -63,9 +61,8 @@ pub fn cmd_outline(
         if is_dir {
             bail!("'{file}' is a directory — try `cona tree --path {file}`");
         }
-        // Distinguish the three remaining causes — each has a different next
-        // step, and the hook may have redirected an agent here, so a dead-end
-        // error would strand it with no route back to the content.
+        // Distinguish the remaining causes — each has a different next step,
+        // and a hook-redirected agent must not be stranded by a dead end.
         let in_index = conn
             .query_row(
                 "SELECT 1 FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' LIMIT 1",
@@ -94,15 +91,12 @@ pub fn cmd_outline(
         }
     }
     let baseline = db::est_tokens(bytes as usize);
-    // Every line range below comes from the index, so the matched files must be
-    // refreshed before they are printed (invariant 2) — an outline is exactly the
-    // map an agent uses to pick its next `show`, and stale ranges send it to the
-    // wrong lines. In read-only mode the refresh cannot happen, so name the stale
-    // files instead of presenting their old ranges as current.
+    // Line ranges come from the index, so refresh the matched files first
+    // (invariant 2) — stale ranges send the next `show` to the wrong lines.
+    // Read-only mode can't refresh, so it flags the stale files instead.
     let refreshed = indexer::refresh_files(root, conn, rows.iter().map(|(p, ..)| p.as_str()));
     let stale = refreshed.stale;
-    // Re-read only when a refresh actually wrote — otherwise the rows above are
-    // still current and a second identical query is pure waste.
+    // re-read only when a refresh actually wrote
     let rows = if refreshed.any_refreshed {
         fetch()?
     } else {
@@ -135,9 +129,8 @@ pub fn cmd_outline(
             open.pop();
         }
         // A qualified parent that is not the enclosing span (a Go method
-        // declared beside, not inside, its receiver type) prints its full name
-        // at its lexical depth — the indent would otherwise claim the
-        // preceding symbol owns it.
+        // beside, not inside, its receiver type) prints its full name at its
+        // lexical depth, or the indent would claim the preceding symbol owns it.
         let nested = name
             .rsplit_once('.')
             .is_none_or(|(p, _)| open.last().is_some_and(|(q, _)| q == p));
@@ -148,11 +141,10 @@ pub fn cmd_outline(
         };
         let indent = "  ".repeat(depth + 1);
         open.push((name.clone(), e));
-        // The indent already encodes the ancestor chain, so repeating it in every
-        // name is redundant — and on deeply nested trees (XML/POM: 10+ levels)
-        // that redundancy is quadratic, which made `outline pom.xml` cost more
-        // than reading the file. Print the leaf; `--json` keeps the full
-        // qualified name, since that is what callers address symbols by.
+        // The indent already encodes the ancestors; repeating them per name is
+        // quadratic on deep trees (XML/POM: 10+ levels made `outline pom.xml`
+        // cost more than reading the file). Print the leaf; `--json` keeps the
+        // full qualified name callers address symbols by.
         let leaf = if nested {
             name.rsplit('.').next().unwrap_or(&name)
         } else {

@@ -77,26 +77,22 @@ pub fn detect_lang(path: &str) -> Option<&'static str> {
 
 /// Does this language have named code units worth reading one at a time?
 ///
-/// cona indexes prose, markup and data formats too — Markdown headings, CSS
-/// rules and JSON/YAML keys are useful `outline`/`grep` targets — but "read one
-/// function instead of the whole file" is meaningless advice for them: a README
-/// is read as prose, a stylesheet and a config are read whole. The read-advisory
-/// hook tier uses this to stay quiet on such files.
+/// Prose, markup and data (Markdown headings, CSS rules, JSON/YAML keys) are
+/// useful `outline`/`grep` targets, but "read one function, not the file" is
+/// meaningless for them. The read-advisory hook uses this to stay quiet there.
 ///
-/// Deny-list rather than allow-list so a newly added *code* language is
-/// advisable by default — the safe direction to be wrong in. Every entry must be
-/// a string `detect_lang` can actually return, and the set is exactly those
-/// reachable languages whose `classify` arms yield no function-like kind.
+/// Deny-list so a newly added *code* language is advisable by default — the
+/// safe direction to be wrong in. Every entry must be reachable from
+/// `detect_lang` and have no function-like `classify` kind.
 ///
-/// NOTE: adding a prose/markup/data language to `detect_lang` means adding it
-/// here too (see CLAUDE.md "Adding a new language").
+/// NOTE: a new prose/markup/data language in `detect_lang` goes here too (see
+/// CLAUDE.md "Adding a new language").
 pub fn has_callable_symbols(lang: &str) -> bool {
     !matches!(
         lang,
         "markdown" | "json" | "yaml" | "toml" | "css" | "graphql"
-            // parse-only code languages: reachable from detect_lang and
-            // parseable (refs/grep work), but with NO classify arms — they
-            // index zero symbols, so `show <Symbol>` advice is a dead end
+            // parse-only code languages: refs/grep work, but NO classify arms,
+            // so `show <Symbol>` advice is a dead end
             | "nix" | "svelte" | "vue" | "r"
     )
 }
@@ -144,9 +140,8 @@ pub fn language_for(lang: &str) -> Option<Language> {
         "sql" => Some(tree_sitter_sequel::LANGUAGE.into()),
         "hcl" => Some(tree_sitter_hcl::LANGUAGE.into()),
         "make" => Some(tree_sitter_make::LANGUAGE.into()),
-        // vue + dockerfile grammars are vendored + compiled in build.rs (their
-        // crates.io crates pin an incompatible tree-sitter runtime). The C entry
-        // points return an ABI-14 TSLanguage our 0.26 runtime accepts.
+        // vue + dockerfile are vendored + compiled in build.rs (their crates pin
+        // an incompatible runtime); the ABI-14 TSLanguage works with our 0.26.
         "vue" => Some(unsafe { Language::from_raw(tree_sitter_vue()) }),
         "dockerfile" => Some(unsafe { Language::from_raw(tree_sitter_dockerfile()) }),
         _ => None,
@@ -171,16 +166,13 @@ pub use idents::{
     idents_in_range, ref_lines,
 };
 
-/// Declared parameter count parsed from a signature's FIRST parenthesised
-/// group — the cheap arity signal for `narrow_by_scope`. Counts top-level
-/// commas inside the outermost `(…)`, ignoring commas nested in `<>`/`[]`/`{}`
-/// (generics, type args, defaults) and inside string/char literals. Empty
-/// parens → 0. `None` when no `(` is present (a param-less signature form we
-/// can't compare, e.g. a bare Python `def` slice or a non-callable) so callers
-/// treat it as "no arity signal" rather than "zero params".
+/// Declared parameter count from a signature's FIRST `(…)` group — the cheap
+/// arity signal for `narrow_by_scope`. Counts top-level commas, ignoring those
+/// nested in `<>`/`[]`/`{}` or string/char literals; `()` → 0. `None` without
+/// a `(` (e.g. a non-callable), meaning "no arity signal", not "zero params".
 ///
-/// Purely textual and language-agnostic on purpose: it feeds a single-survivor
-/// tiebreak, never a silent pick, so an occasional miscount only leaves a case
+/// Textual and language-agnostic on purpose: it feeds a single-survivor
+/// tiebreak, never a silent pick, so a miscount only leaves a case
 /// `·ambiguous` — it can't resolve to the wrong def.
 pub fn param_count(sig: &str) -> Option<usize> {
     let bytes = sig.as_bytes();
@@ -226,11 +218,10 @@ pub fn param_count(sig: &str) -> Option<usize> {
     }
 }
 
-/// Whether a signature's FIRST parameter is an implicit receiver (`self` /
-/// `&self` / `&mut self` in Rust, `self` in Python, `this` in some langs) that
-/// is NOT written at the call site. When true, a call's arg count is one less
-/// than `param_count`. Method-vs-free-fn can't be told from the symbol kind
-/// (Rust methods are kind `fn` too), so we read the signature directly.
+/// Whether the FIRST parameter is an implicit receiver (`self`/`&mut self`,
+/// `this`) not written at the call site, so a call passes one arg fewer than
+/// `param_count`. Read from the signature because the kind can't tell (Rust
+/// methods are kind `fn` too).
 pub fn first_param_is_receiver(sig: &str) -> bool {
     let Some(open) = sig.find('(') else {
         return false;
@@ -261,9 +252,8 @@ fn parse(lang: &str, src: &str) -> anyhow::Result<tree_sitter::Tree> {
         .ok_or_else(|| anyhow::anyhow!("parse failed"))
 }
 
-/// Kind taxonomy — the labels minted by `classify()`. Which kinds are types
-/// and which are callable is language knowledge and lives HERE; commands
-/// consume the predicates instead of hardcoding label lists.
+/// Kind taxonomy over `classify()` labels. Which kinds are types or callable
+/// lives HERE; commands use the predicates instead of hardcoding label lists.
 pub const TYPE_KINDS: &[&str] = &[
     "struct",
     "enum",

@@ -1,12 +1,10 @@
 //! Agent integration: inject the usage guide + skill + hooks + MCP entry into
 //! agent configs — idempotent, marker-based, uninstallable.
 //!
-//! `AgentName` is the roster; every per-agent fact (where its config lives,
-//! how to tell it is there, which MCP key it speaks) hangs off that enum rather
-//! than a list repeated per call site, so adding a harness is one variant plus
-//! its match arms. Deliberately NOT enumerated in prose here — a hand-kept list
-//! in a doc comment is the first thing to go stale. `cona agents --help` prints
-//! the live set.
+//! `AgentName` is the roster; every per-agent fact (config location, detection,
+//! MCP key) hangs off that enum, so adding a harness is one variant plus its
+//! match arms. Deliberately not listed in prose here (it would go stale);
+//! `cona agents --help` prints the live set.
 
 use crate::db;
 use std::path::Path;

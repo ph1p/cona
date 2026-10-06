@@ -1,18 +1,16 @@
-//! MCP server framing — hand-rolled stdio JSON-RPC 2.0, newline-delimited,
-//! no SDK dependency. Pure protocol logic over generic reader/writer so it is
-//! unit-testable; the binary wires stdin/stdout and the tool dispatch in.
+//! MCP server framing — hand-rolled newline-delimited stdio JSON-RPC 2.0, no
+//! SDK. Pure logic over a generic reader/writer so it is unit-testable.
 
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
-/// Protocol versions cona speaks, newest first. The newest is what we
-/// advertise when a client asks for something we don't know.
+/// Protocol versions cona speaks, newest first — the newest is the answer to
+/// an unknown request.
 pub const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// Negotiate the protocol version per spec: echo the client's request when we
-/// support it, otherwise answer with our latest supported version (the client
-/// then decides whether to proceed or disconnect).
+/// Negotiate per spec: echo the client's version if supported, else answer
+/// with our latest (the client decides whether to proceed).
 pub fn negotiate_protocol(requested: Option<&str>) -> &'static str {
     // one pass: return the &'static entry, else fall back to our latest
     requested
@@ -25,9 +23,8 @@ pub fn tool(name: &str, desc: &str, props: Value, req: &[&str]) -> Value {
     tool_annotated(name, desc, props, req, None)
 }
 
-/// Schema builder that also carries a MCP `annotations` object (behaviour
-/// hints: readOnlyHint / destructiveHint / idempotentHint). `None` omits the
-/// field.
+/// Schema builder with an MCP `annotations` object (readOnly/destructive/
+/// idempotent hints). `None` omits the field.
 pub fn tool_annotated(
     name: &str,
     desc: &str,
@@ -46,14 +43,12 @@ pub fn tool_annotated(
     v
 }
 
-/// One tool's result: the human/agent-readable text plus, when the tool
-/// declares an `outputSchema`, the machine-readable form echoed as
-/// `structuredContent`.
+/// One tool's result: the text plus, when the tool declares an `outputSchema`,
+/// the machine-readable form as `structuredContent`.
 ///
-/// Text is never optional. The MCP spec keeps `content` authoritative and
-/// treats `structuredContent` as an addition for clients that want to skip
-/// re-parsing a render, so a structured tool must emit BOTH — dropping the text
-/// would break every client that only reads content blocks.
+/// Text is never optional: the spec keeps `content` authoritative and
+/// `structuredContent` is an addition, so a structured tool emits BOTH —
+/// dropping text breaks every client that only reads content blocks.
 pub struct ToolOut {
     pub text: String,
     pub structured: Option<Value>,
@@ -96,17 +91,15 @@ impl From<String> for ToolOut {
 
 /// Attach an `outputSchema` to a tool entry built by `tool`/`tool_annotated`.
 ///
-/// A declared schema is a CONTRACT: per spec the server must then return
-/// `structuredContent` conforming to it, so only wrap tools whose dispatch
-/// actually produces the matching payload.
+/// A declared schema is a CONTRACT: the server must then return conforming
+/// `structuredContent`, so only wrap tools whose dispatch produces it.
 pub fn with_output_schema(mut tool: Value, schema: Value) -> Value {
     tool["outputSchema"] = schema;
     tool
 }
 
-/// `outputSchema` for the tools that return a list of rows. MCP requires the
-/// top level of an output schema to be an object, so the array rides in a
-/// named field rather than being the root.
+/// `outputSchema` for list-of-rows tools. MCP requires an object at the top
+/// level, so the array rides in a named field.
 pub fn rows_schema(field: &str, item_props: Value, desc: &str) -> Value {
     json!({
         "type": "object",
@@ -133,19 +126,15 @@ pub fn writes(title: &str, destructive: bool) -> Option<Value> {
     )
 }
 
-/// Serve until the reader closes. `call(name, args)` runs one tool and returns
-/// its text. Tool failures become results with isError — never protocol errors.
-/// `instructions` is the optional MCP server preamble echoed in the initialize
-/// result (how to use the server); `None` omits the field.
+/// Serve until the reader closes. `call(name, args)` runs one tool; tool
+/// failures become isError results, never protocol errors. `instructions` is
+/// the optional preamble in the initialize result (`None` omits it).
 ///
-/// `tools(expanded)` builds the tools/list payload for the current disclosure
-/// tier: `false` = the core set, `true` = every tool. A tool whose text output
-/// sets [`ToolOut::expand`] flips the connection to expanded and triggers
-/// `notifications/tools/list_changed`, which is the ONLY way a client learns
-/// about the extra tools — clients may only call what tools/list returned, so
-/// merely describing a gated tool in some other tool's output leaves it
-/// unreachable. `listChanged` is declared for the same reason: a client that
-/// never gets the notification never re-lists.
+/// `tools(expanded)` builds tools/list for the disclosure tier (`false` = core,
+/// `true` = all). A result with [`ToolOut::expand`] flips the connection and
+/// emits `notifications/tools/list_changed` — the ONLY way a client learns of
+/// the extra tools, since it may only call what tools/list returned. Hence
+/// also `listChanged`: without the notification a client never re-lists.
 pub fn serve<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
@@ -406,8 +395,7 @@ mod tests {
         // after: the unlocked tool is listed, so a client may call it
         assert!(names(replies[2]).contains(&"extra".to_string()));
 
-        // and the client was TOLD to re-list — without this it would keep using
-        // the stale core-only list and never see `extra`
+        // and the client was TOLD to re-list, else it never sees `extra`
         let notes: Vec<&str> = msgs
             .iter()
             .filter(|m| m.get("id").is_none())
@@ -439,10 +427,9 @@ mod tests {
 
     #[test]
     fn tool_props_are_a_property_map_not_a_schema_fragment() {
-        // `props` is nested under "properties", so passing a schema fragment
-        // (e.g. {"type":"object"}) silently declares properties named "type" —
-        // an invalid inputSchema, which clients reject by dropping the ENTIRE
-        // tools/list. Every property value must itself be an object.
+        // `props` nests under "properties": a schema fragment like
+        // {"type":"object"} would declare a property named "type" — invalid,
+        // and clients then drop the ENTIRE tools/list. Each value must be an object.
         for t in [
             tool("a", "d", json!({}), &[]),
             tool("b", "d", json!({"x": {"type": "string"}}), &["x"]),

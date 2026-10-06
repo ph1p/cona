@@ -7,10 +7,9 @@ use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Changed SYMBOLS instead of changed lines: parses `git diff --unified=0`
-/// against a ref, maps new-side line ranges onto the (fresh) symbol index and
-/// reports the innermost symbols they touch. Untracked code files appear as
-/// whole new files. Review context for a fraction of the raw-diff tokens.
+/// Maps `git diff --unified=0` new-side ranges onto the (fresh) symbol index
+/// and reports the innermost symbols touched. Untracked code files appear as
+/// whole new files.
 pub fn cmd_diff(root: &Path, conn: &Connection, gitref: &str, json: bool) -> Result<(String, i64)> {
     let diff_out = gitmap::run_git(root, &["diff", "--unified=0", gitref])?;
     let mut changes = diffmap::parse_unified(&diff_out);
@@ -67,9 +66,8 @@ pub fn cmd_diff(root: &Path, conn: &Connection, gitref: &str, json: bool) -> Res
                     .filter(|(_, _, s, e)| diffmap::overlaps(*s, *e, ranges))
                     .cloned()
                     .collect();
-                // drop a container only when ALL of its changed lines lie
-                // inside nested hit symbols (else the container itself
-                // changed and must stay)
+                // drop a container only when ALL its changed lines lie inside
+                // nested hit symbols (else the container itself changed)
                 touched
                     .iter()
                     .filter(|(_, q, s, e)| {

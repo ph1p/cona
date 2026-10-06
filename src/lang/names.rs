@@ -1,6 +1,5 @@
-//! Symbol naming: resolves a classified node to its display name, covering
-//! every sentinel `name_field` (Elixir def calls, markdown headings, HTML/XML
-//! elements, HCL blocks, …) plus the shared signature line helper.
+//! Resolves a classified node to its display name for every sentinel
+//! `name_field`, plus the shared signature-line helper.
 
 use super::classify::{
     DEF_CALL, DOCKER_FROM, FIRST_CHILD, FIXED_NAME, HCL_BLOCK, HEADING, HTML_ELEMENT, NESTED,
@@ -8,11 +7,11 @@ use super::classify::{
 };
 use tree_sitter::Node;
 
-/// Resolves names for the NESTED sentinel: grammars where the identifier is a
-/// known child kind buried past keywords/wrappers. Returns None → symbol skipped.
+/// NESTED sentinel: the identifier is a known child kind buried past
+/// keywords/wrappers. None → symbol skipped.
 fn nested_name(lang: &str, node: Node, src: &str) -> Option<String> {
-    // first descendant (shallow-first per node) whose kind is in `kinds` —
-    // worklist, not recursion, so a pathological declaration can't blow the stack
+    // first descendant whose kind is in `kinds`; a worklist, so a pathological
+    // declaration can't blow the stack
     fn first_of<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
         let mut stack = vec![node];
         while let Some(n) = stack.pop() {
@@ -30,8 +29,8 @@ fn nested_name(lang: &str, node: Node, src: &str) -> Option<String> {
         }
         None
     }
-    // Julia: the name lives in the `signature`/`type_head` wrapper (always the
-    // first named child) — descend into it, else we'd grab a param/field ident.
+    // Julia: descend into the `signature`/`type_head` wrapper first, else we'd
+    // grab a param/field ident.
     if lang == "julia" {
         let mut cur = node.walk();
         let wrapper = node
@@ -66,8 +65,7 @@ fn nested_name(lang: &str, node: Node, src: &str) -> Option<String> {
     }
 }
 
-/// Elixir names live in the first argument of a `def`-family call.
-/// Returns None for calls that aren't definitions (so they're skipped).
+/// Elixir: the first argument of a `def`-family call; None (skipped) otherwise.
 fn elixir_def_name(node: Node, src: &str) -> Option<String> {
     // shape: (call (identifier "def") (arguments (call (identifier NAME) …)))
     //   or:  (call (identifier "defmodule") (arguments (alias NAME)))
@@ -107,23 +105,19 @@ fn elixir_def_name(node: Node, src: &str) -> Option<String> {
 }
 
 /// Attributes that identify an element, most specific first. Framework
-/// directives (Thymeleaf `th:*`, Vue `v-*`, Alpine `x-*`, Angular, htmx) are
-/// matched by prefix in `html_attr_identity`, not listed here.
-/// `href`/`src` are deliberately absent: a URL is long, unstable, and makes a
-/// worse symbol name than the bare tag.
+/// directives are matched by prefix in `html_attr_identity`. `href`/`src` are
+/// deliberately absent: a URL is a worse symbol name than the bare tag.
 const HTML_ID_ATTRS: &[&str] = &["id", "name", "data-testid", "data-test", "slot", "rel"];
 
-/// Tags that are structural landmarks: worth a symbol even with no attributes,
-/// because they are what an agent navigates a template by.
+/// Structural landmarks: worth a symbol even without attributes.
 const HTML_STRUCTURAL_TAGS: &[&str] = &[
     "html", "head", "body", "main", "header", "footer", "nav", "aside", "section", "article",
     "form", "table", "script", "style", "template", "dialog", "h1", "h2", "h3", "h4", "h5", "h6",
 ];
 
-/// HTML element name: `tag#identity` when the element carries an identifying
-/// attribute, bare `tag` when it is structural, and `None` otherwise — which
-/// makes the walk skip it (its children are still visited, so a nested
-/// `<button id=…>` inside plain `<div>`s is not lost).
+/// HTML element name: `tag#identity` if identified, bare `tag` if structural,
+/// else `None` — skipped, but its children are still visited, so a nested
+/// `<button id=…>` inside plain `<div>`s is not lost.
 /// shape: (element (start_tag (tag_name TAG) (attribute (attribute_name K)
 ///                            (quoted_attribute_value (attribute_value V)))*) …)
 fn html_element_name(node: Node, src: &str) -> Option<String> {
@@ -139,9 +133,8 @@ fn html_element_name(node: Node, src: &str) -> Option<String> {
 }
 
 /// The identifying attribute value of a start tag, if any. Explicit attributes
-/// win over directives: an `id` names the element better than the expression in
-/// a `th:each`, which is why the directive is reported as the attribute NAME
-/// (`li@th:each`) rather than its value — the value is code, not an identifier.
+/// win over directives; a directive is reported by its NAME (`li@th:each`),
+/// since its value is code, not an identifier.
 fn html_attr_identity(tag: Node, src: &str) -> Option<String> {
     let attr_value = |a: Node| -> Option<&str> {
         let v = child_of_kind(a, &["quoted_attribute_value", "attribute_value"])?;
@@ -158,9 +151,8 @@ fn html_attr_identity(tag: Node, src: &str) -> Option<String> {
             || n.starts_with('@')
             || (n.starts_with('[') && n.ends_with(']'))
     };
-    // One pass: keep the best HTML_ID_ATTRS rank and the first directive seen,
-    // rather than re-walking every attribute once per candidate name. Names are
-    // compared borrowed, so a plain <div> (the common case) allocates nothing.
+    // One pass keeping the best HTML_ID_ATTRS rank and first directive; names
+    // compare borrowed, so a plain <div> (the common case) allocates nothing.
     let mut cur = tag.walk();
     let mut best: Option<(usize, &str)> = None;
     let mut directive: Option<&str> = None;
@@ -190,13 +182,11 @@ fn html_attr_identity(tag: Node, src: &str) -> Option<String> {
     }
 }
 
-/// Child tags whose text identifies the element that contains them, most
-/// specific first. `artifactId` before `id` so a Maven `<plugin>` is named by
-/// its artifact rather than an `<id>` that may sit deeper in the subtree.
+/// Child tags whose text identifies their parent element, most specific first:
+/// `artifactId` before `id` so a Maven `<plugin>` is named by its artifact.
 const XML_ID_CHILDREN: &[&str] = &["artifactId", "id", "name", "key", "Include", "groupId"];
 
-/// First direct named child of one of `kinds`. The cursor-walk-and-find idiom
-/// is otherwise hand-rolled at every markup call site.
+/// First direct named child of one of `kinds`.
 fn child_of_kind<'t>(node: Node<'t>, kinds: &[&str]) -> Option<Node<'t>> {
     let mut cur = node.walk();
     let found = node
@@ -224,13 +214,10 @@ fn xml_element_name(node: Node, src: &str) -> Option<String> {
     if tag.is_empty() {
         return None;
     }
-    // Only DIRECT element children may identify this one — a grandchild's <id>
-    // belongs to that child, and borrowing it would give two elements one name.
-    // Children sit one level down, inside the `content` wrapper:
-    //   (element (STag …) (content (element …)*) (ETag …))
-    //
-    // One pass over the children, keeping the best XML_ID_CHILDREN rank seen,
-    // rather than re-walking every child once per candidate name.
+    // Only DIRECT element children may identify this one — borrowing a
+    // grandchild's <id> would give two elements one name. Children sit inside
+    // the `content` wrapper: (element (STag …) (content (element …)*) (ETag …)).
+    // One pass, keeping the best XML_ID_CHILDREN rank seen.
     let mut cur = node.walk();
     let mut best: Option<(usize, &str)> = None;
     for content in node
@@ -262,9 +249,8 @@ fn xml_element_name(node: Node, src: &str) -> Option<String> {
         }
     }
     Some(match best {
-        // `<tag>#<id>`: one symbol name, but the separator is not `.`, so
-        // qualification (which joins on `.`) still nests this under its parent
-        // instead of treating the id as another level.
+        // `#`, not `.`: qualification joins on `.`, so the id must not read
+        // as another nesting level.
         Some((_, text)) => format!("{tag}#{text}"),
         None => tag.to_string(),
     })
@@ -399,9 +385,8 @@ pub(crate) fn node_name(node: Node, src: &str, field: &str, lang: &str) -> Optio
 pub(crate) fn first_line_sig(node: Node, src: &str) -> String {
     let text = node.utf8_text(src.as_bytes()).unwrap_or("");
     let mut line = text.lines().next().unwrap_or("").trim();
-    // Drop a trailing block opener — ` {` / bare `{` carries no signature info,
-    // it just restates that a body follows. A dangling `(` (multi-line params)
-    // stays, since it signals the arg list continues.
+    // Drop a trailing `{` (no signature info). A dangling `(` stays: it signals
+    // multi-line params.
     line = line.strip_suffix('{').map(str::trim_end).unwrap_or(line);
     let mut s: String = line.chars().take(120).collect();
     if line.chars().count() > 120 {

@@ -1,6 +1,5 @@
-//! Node-kind classification: maps tree-sitter node kinds to symbol labels,
-//! plus the sentinel `name_field` values that tell `names::node_name` how to
-//! resolve a name when the grammar has no reusable `name` field.
+//! Maps tree-sitter node kinds to symbol labels, plus the sentinel `name_field`
+//! values telling `names::node_name` how to resolve names without a `name` field.
 
 use tree_sitter::Node;
 
@@ -25,9 +24,8 @@ pub(crate) fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, boo
             "class_definition" => Some(("class", true, "name")),
             _ => None,
         },
-        // NOTE: `const foo = () => …` (the dominant modern form) is handled
-        // structurally in walk() — the symbol is the declarator, not a node
-        // kind classify() can see.
+        // NOTE: `const foo = () => …` is handled in walk() — the symbol is the
+        // declarator, not a node kind classify() can see.
         "javascript" | "typescript" | "tsx" => match node_kind {
             "function_declaration" => Some(("fn", false, "name")),
             "generator_function_declaration" => Some(("fn*", false, "name")),
@@ -68,22 +66,19 @@ pub(crate) fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, boo
             "namespace_definition" if lang == "cpp" => Some(("namespace", true, "name")),
             _ => None,
         },
-        // XML/POM/csproj: every construct is an `element`; XML_ELEMENT builds the
-        // name from the tag plus an identifying child. is_container so nested
-        // elements (a <profile>'s <plugin>s) are walked too.
+        // XML/POM/csproj: name = tag + identifying child (XML_ELEMENT);
+        // is_container so nested elements (a <profile>'s <plugin>s) are walked.
         "xml" => match node_kind {
             "element" => Some(("element", true, XML_ELEMENT)),
             _ => None,
         },
-        // HTML: elements are symbols only when identified or structural (see
-        // HTML_ELEMENT). is_container is irrelevant — the walk descends into
-        // skipped elements anyway, so children of a plain <div> still surface.
+        // HTML: only identified/structural elements (HTML_ELEMENT). The walk
+        // descends into skipped elements anyway, so children of a <div> surface.
         "html" => match node_kind {
             "element" | "script_element" | "style_element" => Some(("element", true, HTML_ELEMENT)),
             _ => None,
         },
-        // CSS has no `name` fields — FIRST_CHILD tells node_name to use the
-        // first named child's text (the selector list / at-rule query)
+        // no `name` fields — FIRST_CHILD = selector list / at-rule query
         "css" => match node_kind {
             "rule_set" => Some(("rule", true, FIRST_CHILD)),
             "media_statement" => Some(("media", true, FIRST_CHILD)),
@@ -127,8 +122,8 @@ pub(crate) fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, boo
             "function_declaration" => Some(("fn", false, "name")),
             _ => None,
         },
-        // struct/enum/extension/actor all parse as class_declaration — walk()
-        // relabels from the declaration keyword so `cona find --kind struct` works
+        // struct/enum/extension/actor parse as class_declaration; walk() relabels
+        // from the keyword so `cona find --kind struct` works
         "swift" => match node_kind {
             "class_declaration" => Some(("class", true, "name")),
             "protocol_declaration" => Some(("protocol", true, "name")),
@@ -168,8 +163,8 @@ pub(crate) fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, boo
             "function_signature" => Some(("fn", false, "name")),
             _ => None,
         },
-        // every construct is a `call`; DEF_CALL tells node_name to read the
-        // def/defp/defmodule argument. is_container handled in walk via re-descent.
+        // every construct is a `call`; DEF_CALL reads the def/defmodule argument
+        // (container handling via re-descent in walk)
         "elixir" => match node_kind {
             "call" => Some(("def", true, DEF_CALL)),
             _ => None,
@@ -191,8 +186,7 @@ pub(crate) fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, boo
             "setext_heading" => Some(("heading", false, HEADING)),
             _ => None,
         },
-        // name is the `name` identifier child; struct/enum are variable_declaration
-        // with a struct/enum initializer — kept simple: only fns + top-level consts
+        // fns only: struct/enum are variable_declarations with an initializer
         "zig" => match node_kind {
             "function_declaration" => Some(("fn", false, "name")),
             _ => None,
@@ -214,8 +208,7 @@ pub(crate) fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, boo
             "class_definition" => Some(("class", true, NESTED)),
             _ => None,
         },
-        // module has `name` field; struct/abstract keep name in type_head (NESTED);
-        // function name lives inside the `signature` child (NESTED)
+        // NESTED: struct/abstract name in type_head, fn name in `signature`
         "julia" => match node_kind {
             "function_definition" => Some(("fn", false, NESTED)),
             "struct_definition" => Some(("struct", false, NESTED)),
@@ -267,8 +260,7 @@ pub(crate) fn classify(lang: &str, node_kind: &str) -> Option<(&'static str, boo
             "variable_assignment" => Some(("var", false, FIRST_CHILD)),
             _ => None,
         },
-        // build stages are the addressable units; name = `AS <alias>` or the
-        // image if unnamed (DOCKER_FROM). Vue (.vue) stays parse-only like svelte.
+        // build stages; name = `AS <alias>`, else the image (DOCKER_FROM)
         "dockerfile" => match node_kind {
             "from_instruction" => Some(("stage", true, DOCKER_FROM)),
             _ => None,
@@ -291,42 +283,37 @@ pub(crate) fn needs_body(node_kind: &str) -> bool {
     )
 }
 
-/// Sentinel name_field for grammars without name fields (CSS): the symbol
-/// name is the text of the node's first named child (selector list / query).
+/// Sentinel for grammars without name fields (CSS): the name is the first
+/// named child's text (selector list / query).
 pub(crate) const FIRST_CHILD: &str = "\0first";
-/// Elixir sentinel: every construct is a `call`; the name is the identifier
-/// being defined (first argument of a def/defp/defmodule/defmacro call).
+/// Elixir: every construct is a `call`; the name is the first argument of a
+/// def/defp/defmodule/defmacro call.
 pub(crate) const DEF_CALL: &str = "\0defcall";
-/// Markdown sentinel: heading text is the `inline` child (atx) or the paragraph
-/// text before the underline (setext).
+/// Markdown: heading text is the `inline` child (atx) or the paragraph text
+/// before the underline (setext).
 pub(crate) const HEADING: &str = "\0heading";
-/// Generic sentinel: the name is a specific descendant node kind that isn't the
-/// first child and has no reusable `name` field — resolved per-language by
-/// `nested_name` (OCaml bindings, Julia signatures, SQL object refs, …).
+/// Generic: the name is a specific descendant (not the first child, no `name`
+/// field), resolved per language by `nested_name` (OCaml, Julia, SQL, …).
 pub(crate) const NESTED: &str = "\0nested";
-/// Dockerfile sentinel: a `from_instruction`'s name is its stage alias
-/// (`FROM x AS build` → `build`), falling back to the image spec when unnamed.
+/// Dockerfile: a `from_instruction`'s name is its stage alias
+/// (`FROM x AS build` → `build`), else the image spec.
 pub(crate) const DOCKER_FROM: &str = "\0dockerfrom";
-/// HCL/Terraform sentinel: every construct is a `block`; the name is the block
-/// type identifier plus its string labels joined by `.`
-/// (`resource "aws_instance" "web"` → `resource.aws_instance.web`). Blocks
-/// without labels (`locals {}`, `terraform {}`) yield just the type.
+/// HCL/Terraform: block type plus string labels joined by `.`
+/// (`resource "aws_instance" "web"` → `resource.aws_instance.web`); unlabeled
+/// blocks (`locals {}`) yield just the type.
 pub(crate) const HCL_BLOCK: &str = "\0hclblock";
-/// Sentinel for anonymous declarations whose kind IS their name (Swift
-/// `init`/`deinit`/`subscript`): the name is the node kind minus
-/// `_declaration`, so `Foo.init` stays addressable without a name field.
+/// Anonymous declarations whose kind IS their name (Swift `init`/`deinit`/
+/// `subscript`): node kind minus `_declaration`, so `Foo.init` is addressable.
 pub(crate) const FIXED_NAME: &str = "\0fixedname";
 
-/// XML element sentinel: the tag name, qualified by an identifying child's text
-/// when the element has one (`<profile><id>x</id>` → `profile.x`). Build files
-/// repeat the same tag hundreds of times (`dependency`, `plugin`, `execution`),
+/// XML: the tag, qualified by an identifying child (`<profile><id>x</id>` →
+/// `profile.x`). Build files repeat tags like `dependency` hundreds of times,
 /// so the bare tag is not an addressable name.
 pub(crate) const XML_ELEMENT: &str = "\0xmlelement";
 
-/// HTML element sentinel: only elements that carry an identity (`id`, a framework
-/// directive, a `name`) or structural meaning (landmarks, `script`/`style`,
-/// `template`) become symbols. A template is mostly `<div>`/`<span>` scaffolding;
-/// indexing all of it would bury the handful of elements worth navigating to.
+/// HTML: only elements with an identity (`id`, framework directive, `name`) or
+/// structural meaning (landmarks, `script`/`style`, `template`) become symbols;
+/// indexing every `<div>` would bury the few elements worth navigating to.
 pub(crate) const HTML_ELEMENT: &str = "\0htmlelement";
 
 /// Swift folds struct/enum/extension/actor into `class_declaration`; the real

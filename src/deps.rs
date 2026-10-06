@@ -1,9 +1,8 @@
 use std::collections::HashSet;
 
-/// Extract raw import specifiers from source, line-based on purpose:
-/// imports are line-shaped in every supported language, and a textual scan
-/// stays fail-open for files tree-sitter can't parse. Returned specs are
-/// resolved (or dropped) by `resolve_import`.
+/// Extract raw import specifiers, line-based on purpose: imports are line-shaped
+/// in every supported language, and a textual scan stays fail-open for files
+/// tree-sitter can't parse. `resolve_import` resolves (or drops) the result.
 pub fn extract_imports(lang: &str, src: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut pending: Option<String> = None; // multi-line rust `use … ;`
@@ -106,13 +105,10 @@ fn expand_use_tree(spec: &str) -> Vec<String> {
     let spec = spec.trim();
     if let Some(open) = spec.find('{') {
         let base = spec[..open].trim().trim_end_matches("::").to_string();
-        // matching close brace (the tail after it is junk/whitespace).
-        // Scan the tail from `open` and add the offset back, so byte indices
-        // stay in one space: `find` returns a BYTE offset, and a
-        // `char_indices().skip(open)` would skip that many CHARS instead —
-        // any non-ASCII earlier in the line then overshot the `{`, leaving
-        // `close` at `spec.len()` so the `}` and `;` were parsed as part of
-        // the imported name (`use ä::{b};` yielded `b};`).
+        // Matching close brace (anything after it is junk/whitespace). Scan the
+        // tail from `open` and add the offset back so indices stay in BYTES:
+        // `char_indices().skip(open)` would skip CHARS, overshoot the `{` after
+        // any non-ASCII, and parse `}`/`;` into the name (`use ä::{b};` → `b};`).
         let mut depth = 0usize;
         let mut close = spec.len();
         for (i, c) in spec[open..].char_indices() {
@@ -179,10 +175,9 @@ fn expand_use_tree(spec: &str) -> Vec<String> {
     }
 }
 
-/// Resolve a raw specifier to an indexed file path. Returns None for external
-/// packages / std — the deps graph only maps files the index knows about.
-/// `self_crates`: this project's own crate names (a binary importing its lib
-/// writes `use mycrate::…`, which resolves like `crate::…`).
+/// Resolve a raw specifier to an indexed file path; None for external packages
+/// and std. `self_crates` = this project's own crate names (a binary importing
+/// its lib writes `use mycrate::…`, which resolves like `crate::…`).
 pub fn resolve_import(
     lang: &str,
     spec: &str,
@@ -197,10 +192,9 @@ pub fn resolve_import(
     }
 }
 
-/// Name of the external package an unresolved import pulls in, or `None` when
-/// the spec is relative/internal/language-builtin (std, own crate, `./`, `.`).
-/// Mirrors the skip logic of the `resolve_*` fns so an import is counted as
-/// external exactly when resolution would have returned `None` for that reason.
+/// External package an unresolved import pulls in, or `None` for relative/
+/// internal/builtin specs (std, own crate, `./`, `.`). Mirrors the `resolve_*`
+/// skip logic, so an import counts as external exactly when resolution skips it.
 pub fn external_name(lang: &str, spec: &str, self_crates: &HashSet<String>) -> Option<String> {
     match lang {
         "rust" => {
@@ -242,9 +236,8 @@ pub fn external_name(lang: &str, spec: &str, self_crates: &HashSet<String>) -> O
     }
 }
 
-/// Own crate names of the project at `root` — walks for ALL Cargo.tomls
-/// (workspace members import each other by crate name), pruning the same
-/// heavy directories the indexer prunes so vendored manifests don't leak in.
+/// Own crate names under `root`: ALL Cargo.tomls (workspace members import each
+/// other by name), pruning the indexer's heavy dirs so vendored ones stay out.
 pub fn self_crate_names(root: &std::path::Path) -> HashSet<String> {
     let manifests: Vec<String> = ignore::WalkBuilder::new(root)
         .max_depth(Some(4))
@@ -474,9 +467,8 @@ mod tests {
 
     #[test]
     fn use_tree_with_non_ascii_finds_the_closing_brace() {
-        // `find('{')` is a byte offset; scanning with `char_indices().skip(open)`
-        // skipped that many chars instead and overshot the brace, so `close`
-        // stayed at `spec.len()` and the `}`/`;` landed inside the last name.
+        // `find('{')` is a byte offset; `char_indices().skip(open)` skipped chars,
+        // overshot the brace, and left `}`/`;` inside the last name.
         assert_eq!(expand_use_tree("ä::{b}"), vec!["ä::b".to_string()]);
         assert_eq!(
             expand_use_tree("äö::{b, c}"),

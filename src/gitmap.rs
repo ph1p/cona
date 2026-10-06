@@ -45,8 +45,7 @@ pub fn log_numstat(root: &Path, since: &str) -> Result<Vec<Commit>> {
 pub type LogHeader = (String, String, i64, String);
 
 /// `git log -L` over one symbol's line range — the invocation half of the
-/// `parse_log_headers` contract. Also returns the raw output length for the
-/// caller's savings baseline.
+/// `parse_log_headers` contract. Also returns raw output length (savings baseline).
 pub fn log_symbol_range(
     root: &Path,
     path: &str,
@@ -60,8 +59,7 @@ pub fn log_symbol_range(
     Ok((parse_log_headers(&raw), raw.len()))
 }
 
-/// Decode one LOG_FORMAT header (after the \x01 marker) — the single place
-/// that knows the field order.
+/// Decode one LOG_FORMAT header (after \x01) — the only place that knows field order.
 fn parse_header(rest: &str) -> (String, String, i64, String) {
     let mut it = rest.splitn(4, '\t');
     (
@@ -72,8 +70,7 @@ fn parse_header(rest: &str) -> (String, String, i64, String) {
     )
 }
 
-/// Parse `git log --format=LOG_FORMAT --numstat` output into commits.
-/// Pure — tested against captured output shapes.
+/// Parse `git log --format=LOG_FORMAT --numstat` output into commits. Pure.
 pub fn parse_numstat(out: &str) -> Vec<Commit> {
     let mut commits: Vec<Commit> = Vec::new();
     for line in out.lines() {
@@ -140,9 +137,8 @@ pub fn churn(commits: &[Commit]) -> Vec<(String, i64, i64, String, i64)> {
     v
 }
 
-/// Co-change coupling: of the commits touching `target`, which other files
-/// ride along and how often? Returns (path, together, target_total) sorted
-/// by together desc. Files that co-change constantly are hidden dependencies.
+/// Co-change coupling: which files ride along with commits touching `target`,
+/// sorted by count desc — constant co-changers are hidden dependencies.
 pub fn co_change(commits: &[Commit], target: &str) -> (i64, Vec<(String, i64)>) {
     use std::collections::HashMap;
     let mut total = 0i64;
@@ -163,8 +159,7 @@ pub fn co_change(commits: &[Commit], target: &str) -> (i64, Vec<(String, i64)>) 
     (total, v)
 }
 
-/// Parse `git log -L …` output — only the \x01-marked header lines matter,
-/// the interleaved diff hunks are skipped. Pure.
+/// Parse `git log -L …` output: only \x01-marked headers; diff hunks skipped. Pure.
 pub fn parse_log_headers(out: &str) -> Vec<(String, String, i64, String)> {
     out.lines()
         .filter_map(|l| l.strip_prefix('\u{1}'))

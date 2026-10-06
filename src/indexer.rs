@@ -10,12 +10,10 @@ const MAX_FILE_BYTES: u64 = 512 * 1024;
 
 /// Submodule paths declared in a `.gitmodules` body, in declaration order.
 ///
-/// Pure so it can be tested without a git tree. Deliberately a line parser
-/// rather than a real INI/config reader: `.gitmodules` is git config syntax and
-/// only the `path =` entries matter here, so a `submodule.<name>.path` lookup
-/// would pull in a config-parsing dependency to answer a question three lines
-/// of string handling already answer. Values are taken verbatim except for
-/// surrounding whitespace — git does not quote or escape paths in this file.
+/// Pure, so it is testable without a git tree. A line parser rather than a
+/// config reader: only the `path =` entries matter, and a config-parsing
+/// dependency would be overkill. Values are taken verbatim minus surrounding
+/// whitespace — git does not quote or escape paths in this file.
 pub fn parse_gitmodules(body: &str) -> Vec<String> {
     body.lines()
         .filter_map(|l| {
@@ -28,17 +26,13 @@ pub fn parse_gitmodules(body: &str) -> Vec<String> {
             (k.trim() == "path").then(|| v.trim().to_string())
         })
         .filter(|p| {
-            // A submodule path must stay inside the superproject. An absolute
-            // path or one climbing out with `..` would make the walk index a
-            // tree outside the project root, whose files then can't be stored
-            // as project-relative paths.
+            // A submodule path must stay inside the superproject: an absolute or
+            // `..`-escaping path would index files that can't be stored as
+            // project-relative paths.
             //
-            // Judged LEXICALLY, not via `Path::is_absolute`: .gitmodules is git
-            // config, so its paths are `/`-separated and host-independent, while
-            // `is_absolute` follows the host's rules — on Windows it calls
-            // `/etc` relative (no drive prefix) and would let it through. Both
-            // separators are rejected because a Windows checkout can hold
-            // `C:\x`, which `/`-splitting alone would not catch.
+            // Judged LEXICALLY, not via `Path::is_absolute`, which follows host
+            // rules (on Windows it calls `/etc` relative). Both separators are
+            // rejected because a Windows checkout can hold `C:\x`.
             let abs = p.starts_with('/')
                 || p.starts_with('\\')
                 || p.as_bytes().get(1).is_some_and(|&c| c == b':');
@@ -94,12 +88,10 @@ pub fn is_excluded_dir(name: &str) -> bool {
     EXCLUDED_DIRS.contains(&name)
 }
 
-/// Dependency lock files. Machine-generated, and the data grammars (json/yaml)
-/// happily index every mapping key in them — a single pnpm-lock.yaml can
-/// contribute thousands of `key` symbols that bury a project's real symbols in
-/// `tree`/`find` output and inflate the DB. Nobody navigates to a lock entry by
-/// symbol name; when one is genuinely in question it is read or grepped
-/// directly, which still works — only symbol extraction is skipped.
+/// Dependency lock files. The json/yaml grammars would index every mapping key
+/// — one pnpm-lock.yaml can add thousands of `key` symbols that bury real ones
+/// in `tree`/`find` and inflate the DB. Nobody navigates a lock file by symbol;
+/// reading or grepping it still works, only symbol extraction is skipped.
 const EXCLUDED_FILES: &[&str] = &[
     "pnpm-lock.yaml",
     "package-lock.json",
@@ -137,10 +129,9 @@ pub struct IndexReport {
     pub total_symbols: i64,
 }
 
-/// The totals an index run would report, read straight from an existing index.
-/// For the caller that skipped its walk because another process holds the index
-/// lock: the walk counters stay zero (this process walked nothing), the totals
-/// describe the index as it stands.
+/// The totals an index run would report, read from the existing index — for a
+/// caller that skipped its walk because another process holds the index lock.
+/// Walk counters stay zero; the totals describe the index as it stands.
 pub fn counts(conn: &Connection) -> Result<IndexReport> {
     Ok(IndexReport {
         total_files: conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?,
@@ -158,10 +149,8 @@ struct Candidate {
 }
 
 fn file_mtime(meta: &std::fs::Metadata) -> i64 {
-    // nanosecond precision: whole-second mtimes made two same-size writes
-    // within one second invisible to is_stale (stale line ranges served as
-    // fresh). Existing DBs hold second values → everything reads stale once
-    // and reindexes — a one-time, self-healing cost.
+    // Nanosecond precision: with whole seconds, two same-size writes within
+    // one second were invisible to is_stale (stale ranges served as fresh).
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -185,12 +174,10 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
     // phase 1: walk, collect changed/new candidates
     let mut seen: HashSet<String> = HashSet::new();
     let mut candidates: Vec<Candidate> = Vec::new();
-    // Git submodules are real project source, but `ignore` treats a nested
-    // `.git` as a separate repository and skips its contents — so a submodule's
-    // code is invisible to find/refs/grep from the superproject root, silently
-    // (an empty result, not an error). Registered submodules are opted back in;
-    // an unregistered nested repo (vendored clone, a stray checkout) stays
-    // excluded, which is the reading that matches .gitmodules.
+    // `ignore` treats a nested `.git` as a separate repo and silently skips it,
+    // hiding submodule source from find/refs/grep. Registered submodules are
+    // opted back in; an unregistered nested repo (vendored clone, stray
+    // checkout) stays excluded, matching .gitmodules.
     let submodules = submodule_dirs(root);
     let mut builder = WalkBuilder::new(root);
     for sub in &submodules {
@@ -200,15 +187,11 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
         .hidden(true)
         .git_ignore(true)
         .git_exclude(true)
-        // Skip files bigger than MAX_FILE_BYTES (minified bundles, generated code).
         .max_filesize(Some(MAX_FILE_BYTES))
-        // Always prune heavy vendor/build/cache dirs by name — even in non-git
-        // trees where .gitignore doesn't apply (prevents indexing e.g. all of
-        // node_modules when run outside a repo).
-        // A submodule registered at e.g. `vendor/sdk` must survive the name
-        // prune that `vendor` would otherwise trigger: it was declared as
-        // project source, so an EXCLUDED_DIRS name along its path can't be
-        // read as "generated/vendored". Only the submodule's own path segments
+        // Always prune heavy vendor/build/cache dirs by name, even in non-git
+        // trees where .gitignore doesn't apply.
+        // A submodule registered at e.g. `vendor/sdk` survives the `vendor`
+        // prune: it was declared as project source. Only its own path segments
         // are spared — node_modules INSIDE it still prunes.
         .filter_entry({
             let subs: Vec<PathBuf> = submodules.iter().map(|s| root.join(s)).collect();
@@ -262,9 +245,8 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
         .map(|n| n.get())
         .unwrap_or(4)
         .min(candidates.len().max(1));
-    // Greedy longest-processing-time bin packing: hand each file (largest
-    // first) to the currently-lightest thread. Round-robin by index could pile
-    // every big file onto one thread when sizes vary widely.
+    // Greedy LPT bin packing: largest file first to the lightest thread.
+    // Round-robin could pile every big file onto one thread.
     candidates.sort_by_key(|c| std::cmp::Reverse(c.size));
     let mut chunks: Vec<Vec<Candidate>> = (0..n_threads).map(|_| Vec::new()).collect();
     let mut loads: Vec<i64> = vec![0; n_threads];
@@ -305,12 +287,10 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
     });
     let parsed = results.len();
 
-    // phase 3: single write transaction. The guard rolls back automatically
-    // if any upsert, symbol insert, or cleanup operation fails.
+    // phase 3: single write transaction; the guard rolls back on any failure.
     // IMMEDIATE takes the write lock at BEGIN, so a concurrent writer waits out
-    // busy_timeout instead of hitting the deferred-upgrade SQLITE_BUSY (which
-    // SQLite returns instantly, timeout ignored) — the watch+hook combination
-    // makes two simultaneous writers a normal occurrence, not an edge case.
+    // busy_timeout instead of hitting the deferred-upgrade SQLITE_BUSY (returned
+    // instantly, timeout ignored). Watch + hook make two writers normal.
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     {
         let mut upsert = tx.prepare(
@@ -365,11 +345,9 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
     })
 }
 
-/// True if the file on disk differs (mtime/size) from the indexed version.
-/// `cona index --watch`: block on fs events, debounce, then run the
-/// normal incremental index (mtime-based, so irrelevant events cost ~ms).
-/// The watcher never partially updates — every wake-up goes through
-/// `index_project`, the single write path.
+/// `cona index --watch`: block on fs events, debounce, then run the normal
+/// incremental index. Every wake-up goes through `index_project`, the single
+/// write path — the watcher never partially updates.
 pub fn watch_project(root: &Path, conn: &Connection) -> Result<()> {
     use notify::{RecursiveMode, Watcher};
     use std::sync::mpsc;
@@ -426,8 +404,7 @@ fn event_is_relevant(root: &Path, ev: &notify::Result<notify::Event>) -> bool {
         if excluded {
             return false;
         }
-        // Same exclusion the walk applies, so a lock-file write doesn't wake the
-        // indexer for a file index_project would then discard.
+        // Same exclusion as the walk: a lock-file write must not wake the indexer.
         if rel
             .file_name()
             .and_then(|n| n.to_str())
@@ -442,6 +419,7 @@ fn event_is_relevant(root: &Path, ev: &notify::Result<notify::Event>) -> bool {
     })
 }
 
+/// True if the file on disk differs (mtime/size) from the indexed version.
 pub fn is_stale(root: &Path, conn: &Connection, rel: &str) -> bool {
     let Ok(meta) = std::fs::metadata(root.join(rel)) else {
         return true;
@@ -463,38 +441,32 @@ pub fn meta_matches(meta: &std::fs::Metadata, mtime: i64, size: i64) -> bool {
     file_mtime(meta) == mtime && meta.len() as i64 == size
 }
 
-/// Refresh one file's index rows if its mtime/size changed — the single owner
-/// of the "never use index line numbers blindly" invariant for file-level
-/// refreshes (locate_fresh is the symbol-level sibling). Best-effort: a file
-/// that vanished mid-scan is simply skipped.
+/// Refresh one file's index rows if its mtime/size changed — the file-level
+/// owner of invariant 2 (locate_fresh is the symbol-level sibling).
+/// Best-effort: a file that vanished mid-scan is skipped.
 pub fn ensure_fresh(root: &Path, conn: &Connection, rel: &str) -> bool {
     if is_stale(root, conn, rel) {
-        // a failed reindex must not report "refreshed" — callers would then
-        // trust stale line ranges as if they matched the live file
+        // a failed reindex must not report "refreshed" (stale ranges trusted)
         return reindex_file(root, conn, rel).is_ok();
     }
     false
 }
 
-/// Outcome of refreshing a set of files: which ones could NOT be brought up to
-/// date (read-only mode, vanished mid-scan), and whether any refresh actually
-/// wrote — the second half tells a caller whether rows it already fetched are
-/// now invalid and must be re-read.
+/// Outcome of refreshing a set of files: which could NOT be updated (read-only,
+/// vanished), and whether any refresh wrote — i.e. whether rows the caller
+/// already fetched must be re-read.
 pub struct Refreshed {
     pub stale: Vec<String>,
     pub any_refreshed: bool,
 }
 
 /// Refresh every path in `paths` and report what stayed stale — THE shared
-/// "bring these files up to date before printing their line ranges" step
-/// (invariant 2) for commands that render index-derived ranges for a whole file
-/// set, rather than one symbol (`locate_fresh`) or one file (`ensure_fresh`).
+/// invariant-2 step for commands rendering ranges for a whole file set, rather
+/// than one symbol (`locate_fresh`) or one file (`ensure_fresh`).
 ///
-/// Stats each path once: `ensure_fresh` re-checks staleness internally, so
-/// pairing it with an outer `is_stale` guard would double the syscalls — and its
-/// `false` means both "was fresh" and "refresh failed", which callers must not
-/// conflate. Duplicate paths are skipped, so a path-ordered row set can be fed
-/// in directly.
+/// Stats each path once and avoids `ensure_fresh`, whose `false` conflates
+/// "was fresh" with "refresh failed". Consecutive duplicate paths are skipped,
+/// so a path-ordered row set can be fed in directly.
 pub fn refresh_files<'a>(
     root: &Path,
     conn: &Connection,
@@ -524,13 +496,11 @@ pub fn refresh_files<'a>(
 
 /// Re-index a single file after an edit.
 ///
-/// Read-only mode cannot refresh the index, and must not pretend otherwise: the
-/// connection is opened `SQLITE_OPEN_READ_ONLY`, so the write below would fail
-/// with rusqlite's opaque "attempt to write a readonly database". Refusing here
-/// — at the ONE write path both `ensure_fresh` and `locate_fresh` funnel
-/// through — keeps invariant 2 intact: a caller either gets line numbers that
-/// match the live file, or an error naming the stale file. It never gets stale
-/// ranges dressed up as fresh.
+/// Read-only mode cannot refresh the index (the write would fail with an opaque
+/// "attempt to write a readonly database"). Refusing here — the ONE write path
+/// `ensure_fresh` and `locate_fresh` funnel through — keeps invariant 2: a
+/// caller gets live line numbers or an error naming the stale file, never
+/// stale ranges dressed up as fresh.
 pub fn reindex_file(root: &Path, conn: &Connection, rel: &str) -> Result<usize> {
     if db::is_read_only() {
         bail!("{rel} changed since it was indexed; cannot refresh in read-only mode (run `cona index` from a writable environment)");
@@ -539,17 +509,14 @@ pub fn reindex_file(root: &Path, conn: &Connection, rel: &str) -> Result<usize> 
     let Some(language) = lang::detect_lang(rel) else {
         return Ok(0);
     };
-    // stat BEFORE reading: if the file is written between the two syscalls the
-    // recorded mtime is older than the content on disk, so the next is_stale
-    // check self-heals. The other order records a fresh mtime against stale
-    // content — permanently wrong until the next external edit.
+    // stat BEFORE reading: a write in between leaves an older mtime, so the
+    // next is_stale self-heals. The other order pairs a fresh mtime with stale
+    // content until the next external edit.
     let meta = std::fs::metadata(&abs)?;
     let src = std::fs::read_to_string(&abs)?;
     let symbols = lang::extract_symbols(language, &src)?;
-    // one transaction: a crash between the files upsert and the symbol inserts
-    // must not leave a "fresh" file with missing symbols. IMMEDIATE so a
-    // concurrent writer (watch vs. hook) waits instead of failing — see
-    // index_project's phase-3 note.
+    // One transaction, so a crash can't leave a "fresh" file with missing
+    // symbols. IMMEDIATE: see index_project's phase-3 note.
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     tx.execute(
         "INSERT INTO files(path, mtime, size, lang) VALUES(?1,?2,?3,?4)
@@ -626,10 +593,9 @@ mod tests {
 
     #[test]
     fn gitmodules_rejects_paths_escaping_the_root() {
-        // These would make the walk index a tree outside the project root,
-        // whose files cannot be stored as project-relative paths. Rejection is
-        // lexical, so it must hold on every host: `Path::is_absolute` would call
-        // `/etc` relative on Windows, and a drive path relative on unix.
+        // These would index a tree outside the project root. Rejection is
+        // lexical, so it holds on every host (`Path::is_absolute` would call
+        // `/etc` relative on Windows, and a drive path relative on unix).
         let body = "path = /etc\npath = ../outside\npath = a/../../b\npath =\npath = ok/here\n";
         assert_eq!(parse_gitmodules(body), vec!["ok/here"]);
         let win = "path = C:\\Windows\npath = \\\\server\\share\npath = a\\..\\..\\b\n";

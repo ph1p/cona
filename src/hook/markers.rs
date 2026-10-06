@@ -7,11 +7,9 @@ use crate::db;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Liveness stamp for `cona doctor`: the file's mtime says when a hook last
-/// actually fired, which separates "hooks configured but the harness never
-/// runs them" (stale settings snapshot, broken PATH) from a healthy install.
-/// Throttled — rewrite only when the stamp is missing or older than an hour —
-/// so the hot path normally costs one stat. Best-effort: never fails the hook.
+/// Liveness stamp for `cona doctor`: its mtime says when a hook last fired,
+/// separating "configured but never run" (stale settings, broken PATH) from a
+/// healthy install. Rewritten at most hourly, so the hot path costs one stat.
 pub(crate) fn touch_liveness() {
     let Ok(dir) = db::data_dir() else { return };
     let path = dir.join(LIVENESS_FILE);
@@ -39,10 +37,9 @@ pub fn file_age_secs(path: &Path) -> Option<u64> {
 }
 
 /// Session identity for the per-session markers, in preference order:
-/// `CLAUDE_SESSION_ID` (exported by some harnesses), then the `session_id`
-/// carried in the payload itself (Codex sends one and exports nothing), then a
-/// per-day key so a long-lived shell buckets by day rather than churning a new
-/// marker every call.
+/// `CLAUDE_SESSION_ID` (some harnesses), then the payload's `session_id`
+/// (Codex sends one, exports nothing), then a per-day key so a long-lived
+/// shell buckets by day instead of churning a marker every call.
 pub(crate) fn session_id(v: &serde_json::Value) -> String {
     std::env::var("CLAUDE_SESSION_ID")
         .ok()
@@ -57,11 +54,8 @@ pub(crate) fn session_id(v: &serde_json::Value) -> String {
 }
 
 /// Path of a per-(project, session) marker file under `data_dir/<kind>/`.
-///
-/// Both session-scoped hook mechanisms (`nudge_due`, `tick_toolcall`) share
-/// this so the identity rule stays in ONE place — they only differ in `<kind>`
-/// and what they store. `None` when the data dir is unavailable; each caller
-/// picks its own fallback.
+/// Every session-scoped marker goes through here so the identity rule lives in
+/// ONE place. `None` when the data dir is unavailable; callers pick a fallback.
 pub(crate) fn session_marker_path(root: &Path, kind: &str, session: &str) -> Option<PathBuf> {
     let dir = db::data_dir().ok()?;
     Some(
@@ -70,24 +64,20 @@ pub(crate) fn session_marker_path(root: &Path, kind: &str, session: &str) -> Opt
     )
 }
 
-/// Pure cadence policy shared by every periodic hook reminder: given a running
-/// count (this call included) and a cadence, fire on each multiple of `every` —
-/// never at 0, never when disabled (`every <= 0`). Used for both the PostToolUse
-/// re-nudge and the read-volume streak so the two behave predictably together.
+/// Pure cadence policy shared by every periodic reminder (re-nudge, read
+/// streak): fire on each multiple of `every` for a running count (this call
+/// included) — never at 0, never when disabled (`every <= 0`).
 pub fn fires_on_cadence(count: i64, every: i64) -> bool {
     every > 0 && count > 0 && count % every == 0
 }
 
 /// Look up this (project, session)'s read log WITHOUT writing: whether `rel`
-/// was already fully read, and how many *counted* reads it holds so far. One
-/// path per line under the `reads` marker kind; a line prefixed with a tab is
-/// a read that already carried an advisory — it marks the path as seen (the
-/// bytes DID land in context) but does not count toward the volume streak,
-/// otherwise every advised read would drag the next streak reminder closer
-/// and the agent would be nagged twice for one mistake.
+/// was already fully read, and how many *counted* reads it holds. One path per
+/// line; a tab-prefixed line is a read that already carried an advisory — it
+/// marks the path as seen (the bytes DID land in context) but does not count
+/// toward the streak, else one mistake would be nagged twice.
 ///
-/// Best-effort like every other hook side effect: if the data dir is
-/// unavailable we report "not a re-read" and stay silent rather than guessing.
+/// No data dir → "not a re-read", silent rather than guessing.
 pub(crate) fn peek_reads(root: &Path, rel: &str, session: &str) -> (bool, i64) {
     let Some(log) = session_marker_path(root, "reads", session) else {
         return (false, 0);
@@ -107,18 +97,14 @@ pub(crate) fn peek_reads(root: &Path, rel: &str, session: &str) -> (bool, i64) {
 /// Record one NARROW read of `rel` and report how many this session has now
 /// seen (including this one).
 ///
-/// A single bounded read is exactly what the per-call rules want and always
-/// passes — `Read` with an offset/limit, `sed -n '300,330p'`, `head -n 50`. But
-/// paging one file in four separate slices is a worse, more expensive `cona
-/// outline` + `show`: the agent is groping for symbol boundaries it could have
-/// had in one call, and it re-pays the surrounding context on every slice. No
-/// per-call policy can see that — the shape only exists across calls, in the
-/// same way the full-read streak does.
+/// A single bounded read (`Read` offset/limit, `sed -n '300,330p'`,
+/// `head -n 50`) always passes. But paging one file in four slices is a
+/// costlier `outline` + `show`: the agent gropes for symbol boundaries and
+/// re-pays context each slice — a shape that only exists across calls.
 ///
-/// Kept in its own marker kind rather than in `reads`: these never went through
-/// the full-read tiers, must not mark a path as "already fully in context" (a
-/// slice is not the file), and must not move the full-read volume counter.
-/// Best-effort; on any failure we report 0 and stay silent.
+/// Its own marker kind, not `reads`: a slice is not the file, so it must not
+/// mark a path "fully in context" nor move the full-read counter. Any failure
+/// → 0, silent.
 pub(crate) fn bump_partial_reads(root: &Path, rel: &str, session: &str) -> i64 {
     let Some(log) = session_marker_path(root, "partials", session) else {
         return 0;
@@ -147,12 +133,10 @@ pub(crate) fn record_read(root: &Path, rel: &str, session: &str, counted: bool) 
     append_marker_line(&log, &format!("{prefix}{rel}"));
 }
 
-/// Record that a full read of `rel` was redirected (denied) this session and
-/// report whether it already had been. A SECOND full-read attempt after a
-/// block means the agent weighed the pointers and still wants the file —
-/// denying again with the identical message is a loop, not guidance, so the
-/// caller lets that attempt through. Best-effort like every marker: no data
-/// dir → "not denied yet", which degrades to the pre-existing always-deny.
+/// Record that a full read of `rel` was denied this session and report whether
+/// it already had been. A SECOND attempt after a block means the agent still
+/// wants the file — denying again is a loop, not guidance, so the caller lets
+/// it through. No data dir → "not denied yet" (degrades to always-deny).
 pub(crate) fn note_denied(root: &Path, rel: &str, session: &str) -> bool {
     let Some(log) = session_marker_path(root, "denied", session) else {
         return false;
@@ -168,11 +152,8 @@ pub(crate) fn note_denied(root: &Path, rel: &str, session: &str) -> bool {
     seen
 }
 
-/// Increment and return the per-(project, session) tool-call counter. A tiny
-/// file under the data dir holds the running count (path via
-/// `session_marker_path`, so the session-identity rule is shared with
-/// `nudge_due`). Best-effort: any IO failure returns 0 so the caller simply
-/// doesn't re-nudge this call.
+/// Increment and return the per-(project, session) tool-call counter. Any IO
+/// failure returns 0, so the caller simply doesn't re-nudge this call.
 pub(crate) fn tick_toolcall(root: &Path, session: &str) -> i64 {
     let Some(counter) = session_marker_path(root, "toolcalls", session) else {
         return 0;
@@ -190,14 +171,9 @@ pub(crate) fn tick_toolcall(root: &Path, session: &str) -> i64 {
 }
 
 /// Whether the "this repo isn't indexed" hint is due. Fires on the FIRST
-/// nudge-eligible event of a (project, session), then again after every
-/// `CONA_NUDGE_EVERY` suppressed ones (default 10, 0 = never repeat) — a hint
-/// dropped once at the start of a long session is otherwise gone for good.
-/// The marker file holds the running event count.
-///
-/// Session identity comes from `CLAUDE_SESSION_ID` when the agent exports it;
-/// without it we fall back to a per-day key so a long-lived shell still only
-/// nags occasionally rather than on every read.
+/// nudge-eligible event of a (project, session), then after every
+/// `CONA_NUDGE_EVERY` suppressed ones (default 10, 0 = never repeat). The
+/// marker file holds the running event count.
 pub(crate) fn nudge_due(root: &Path, session: &str) -> bool {
     let Some(marker) = session_marker_path(root, "nudged", session) else {
         return true; // can't track → don't suppress the (useful) first hint
@@ -217,10 +193,8 @@ pub(crate) fn nudge_due(root: &Path, session: &str) -> bool {
         )
 }
 
-/// Delete session markers old enough that their session is certainly over
-/// (7 days — the per-day fallback key rolls daily, real session ids within a
-/// week are plausibly live). Called only when a NEW session touches the dir,
-/// so steady-state hook calls pay no directory scan. Best-effort throughout.
+/// Delete session markers older than `MARKER_MAX_AGE_SECS`. Called only when a
+/// NEW session touches the dir, so steady-state hook calls pay no scan.
 fn prune_marker_dir(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -233,8 +207,7 @@ fn prune_marker_dir(dir: &Path) {
 }
 
 /// First touch of a session's marker file: create its directory and prune
-/// markers whose sessions are over. Steady-state calls (the file exists) cost
-/// one stat, so hot hook paths never pay the directory scan.
+/// markers whose sessions are over. Steady-state calls cost one stat.
 fn prepare_marker(log: &Path) {
     if log.exists() {
         return;
@@ -245,8 +218,7 @@ fn prepare_marker(log: &Path) {
     }
 }
 
-/// Append one line to a marker log — every marker write is best-effort
-/// (a failed write only costs this call's bookkeeping, never the tool call).
+/// Append one line to a marker log (best-effort).
 fn append_marker_line(log: &Path, line: &str) {
     let _ = std::fs::OpenOptions::new()
         .create(true)

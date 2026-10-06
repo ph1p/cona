@@ -1,14 +1,12 @@
-//! Pure helpers for `cona diff`: parse `git diff --unified=0` output into
-//! per-file changed line ranges (new side), so changed lines can be mapped to
-//! the symbols that contain them. No git or IO in here — fully unit-tested.
+//! Pure helpers for `cona diff`: parse `git diff --unified=0` into per-file
+//! new-side line ranges to map onto symbols. No git or IO — fully unit-tested.
 
 /// One changed file from a unified diff, with new-side line ranges.
 #[derive(Debug, PartialEq)]
 pub struct FileChange {
     pub path: String,
-    /// Inclusive (start, end) line ranges on the NEW side of the diff.
-    /// A pure deletion (zero new lines) is represented as the single line
-    /// the deletion happened at, so it still maps to an enclosing symbol.
+    /// Inclusive (start, end) line ranges on the NEW side. A pure deletion is
+    /// the single line it happened at, so it still maps to an enclosing symbol.
     pub ranges: Vec<(i64, i64)>,
     pub deleted: bool,
 }
@@ -68,9 +66,8 @@ pub fn overlaps(s: i64, e: i64, ranges: &[(i64, i64)]) -> bool {
     ranges.iter().any(|(rs, re)| s <= *re && e >= *rs)
 }
 
-/// True if [s, e] contains at least one changed line (from `ranges`) that no
-/// interval in `covers` covers. Used to keep a container symbol whose own
-/// lines changed, while dropping one whose changes all lie in nested symbols.
+/// True if [s, e] holds a changed line no interval in `covers` covers: keeps a
+/// container whose own lines changed, drops one whose changes are all nested.
 pub fn has_uncovered(s: i64, e: i64, ranges: &[(i64, i64)], covers: &[(i64, i64)]) -> bool {
     let mut sorted: Vec<(i64, i64)> = covers.to_vec();
     sorted.sort_unstable();

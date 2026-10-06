@@ -27,7 +27,6 @@ fn mcp_stdio_handshake_and_tools_list() {
                 "\n",
                 r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"find","arguments":{"name":"hello"}}}"#,
                 "\n",
-                // after `more`, the extended tools must appear in tools/list —
                 // a client may only call what tools/list returned
                 r#"{"jsonrpc":"2.0","id":5,"method":"tools/list"}"#,
                 "\n",
@@ -56,8 +55,7 @@ fn mcp_stdio_handshake_and_tools_list() {
         .cloned()
         .collect();
     assert_eq!(lines.len(), 5); // our own notifications/initialized gets no reply
-                                // Unlocking the extended tier MUST announce itself: a client that is never
-                                // told to re-list can never call the tools `more` just revealed.
+                                // Unlocking MUST announce itself, or the client never re-lists.
     assert!(
         notes.contains(&"notifications/tools/list_changed"),
         "no list_changed after `more`: {notes:?}"
@@ -89,8 +87,7 @@ fn mcp_stdio_handshake_and_tools_list() {
         "{tools:?}"
     );
     // Progressive disclosure: tools/list carries the core tier plus the `more`
-    // gate, NOT the full set — the schemas are re-sent on every request, so the
-    // advanced tail is disclosed on demand instead.
+    // gate, not the full set (schemas are re-sent on every request).
     assert!(
         tools.contains(&"more"),
         "missing disclosure gate: {tools:?}"
@@ -151,9 +148,8 @@ fn mcp_stdio_handshake_and_tools_list() {
         }
     }
 
-    // behaviour annotations: read-only queries vs writing tools. Core tools come
-    // from tools/list, gated ones from the `more` payload — annotations must
-    // survive disclosure, since that is the only place a client ever sees them.
+    // read-only vs writing annotations must survive disclosure (core from
+    // tools/list, gated from `more`): that is the only place a client sees them.
     let ann = |name: &str| -> serde_json::Value {
         let from_list = lines[1]["result"]["tools"]
             .as_array()

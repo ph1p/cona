@@ -1,7 +1,6 @@
-//! CLI command implementations. `main.rs` only parses arguments and
-//! dispatches here; each submodule groups one concern. Shared plumbing
-//! (DB open, usage logging, symbol lookup, output budgeting) lives in
-//! this module root.
+//! CLI command implementations; `main.rs` only parses and dispatches here.
+//! Shared plumbing (DB open, usage logging, symbol lookup, output budgeting)
+//! lives in this module root.
 
 pub mod callgraph;
 mod discover;
@@ -30,8 +29,7 @@ use std::path::Path;
 use std::time::Instant;
 
 /// Innermost indexed symbol enclosing a (file, line) — the ONE definition of
-/// "which symbol is this line in", shared by context/grep/tests. Prepare once
-/// per command, query in the loop. Columns: qualified, kind.
+/// "which symbol is this line in" (context/grep/tests). Columns: qualified, kind.
 pub(crate) const ENCLOSING_SYMBOL_SQL: &str =
     "SELECT s.qualified, s.kind FROM symbols s JOIN files f ON f.id = s.file_id
      WHERE f.path = ?1 AND s.start_line <= ?2 AND s.end_line >= ?2
@@ -91,8 +89,8 @@ pub fn finish(root: &Path, cmd: &str, t0: Instant, out: &str, baseline_tokens: i
     }
     let ms = t0.elapsed().as_millis() as i64;
     let tokens_out = db::est_tokens(out.len());
-    // Baseline = reading only the files this query's results live in, so a
-    // query can never claim to have "saved" more than those files cost.
+    // Baseline = reading only the files the results live in, so a query can
+    // never claim to have "saved" more than those files cost.
     let saved = (baseline_tokens - tokens_out).max(0);
     let results = out.lines().count() as i64;
     let outcome = db::outcome_of_output(out);
@@ -110,28 +108,25 @@ pub fn finish_err(root: &Path, cmd: &str, t0: Instant, detail: &str, err: &anyho
     db::log_usage_outcome(root, cmd, ms, 0, 0, 0, detail, outcome);
 }
 
-/// The `--json` return shape every query command shares: one JSON line + the
-/// savings baseline.
+/// Shared `--json` return shape: one JSON line + the savings baseline.
 pub(crate) fn jout<T: serde::Serialize>(value: &T, baseline: i64) -> Result<(String, i64)> {
     Ok((format!("{}\n", serde_json::to_string(value)?), baseline))
 }
 
 /// Trailer for a list clipped by `--limit` — ONE string so every clipped list
-/// names the same escape hatch. Budget-clipped output has its own trailer in
-/// [`BudgetOut::finish`].
+/// names the same escape hatch (budget clipping: [`BudgetOut::finish`]).
 pub(crate) const LIMIT_TRAILER: &str = "… truncated (raise --limit)\n";
 
-/// Clip `v` to `limit`, reporting whether rows were dropped. Callers append
-/// [`LIMIT_TRAILER`] on `true`: an agent that sees exactly `limit` rows
-/// cannot otherwise tell "that is everything" from "there was more".
+/// Clip `v` to `limit`; on `true` callers append [`LIMIT_TRAILER`], since
+/// exactly `limit` rows can't otherwise be told apart from "there was more".
 pub(crate) fn clip<T>(v: &mut Vec<T>, limit: usize) -> bool {
     let clipped = v.len() > limit;
     v.truncate(limit);
     clipped
 }
 
-/// Token-budget accumulator shared by tree/context/shape: chunks are appended
-/// while they fit, `finish` adds the standard truncation trailer.
+/// Token-budget accumulator for tree/context/shape: appends chunks while they
+/// fit; `finish` adds the truncation trailer.
 pub(crate) struct BudgetOut {
     out: String,
     used: i64,
@@ -160,8 +155,8 @@ impl BudgetOut {
         self.out.push_str(chunk);
         true
     }
-    /// Append regardless of budget (counted, so later chunks still compete) —
-    /// for section headers/footers that must always show.
+    /// Append regardless of budget (still counted) — for headers/footers that
+    /// must always show.
     fn push_always(&mut self, chunk: &str) {
         self.used += db::est_tokens(chunk.len());
         self.out.push_str(chunk);
@@ -185,8 +180,7 @@ pub(crate) fn render_symbol_body(
     lines: &[&str],
     notes: &[(i64, String, i64)],
 ) {
-    // clamp start too: a stale index can point past the live file's EOF, and
-    // lines[start..end] with start > end panics
+    // clamp start too: a stale index can point past EOF, and start > end panics
     let end = (e as usize).min(lines.len());
     let start = (s as usize).saturating_sub(1).min(end);
     out.push_str(&format!("── {q}  {path}:{s}-{e} ──\n"));
@@ -196,9 +190,9 @@ pub(crate) fn render_symbol_body(
     push_numbered_lines(out, lines, start, end);
 }
 
-/// Numbered source lines with a gutter sized to the largest line number in
-/// range, not a fixed 5 — small files (the common case) get 2–4 fewer leading
-/// chars per line. THE one gutter policy (render_symbol_body AND cmd_show).
+/// Numbered source lines, gutter sized to the largest line number in range
+/// (not a fixed 5, saving chars on small files). THE one gutter policy
+/// (render_symbol_body AND cmd_show).
 pub(crate) fn push_numbered_lines(out: &mut String, lines: &[&str], start: usize, end: usize) {
     let w = end.to_string().len();
     for (i, line) in lines[start..end].iter().enumerate() {
@@ -206,16 +200,8 @@ pub(crate) fn push_numbered_lines(out: &mut String, lines: &[&str], start: usize
     }
 }
 
-/// Walk every indexed file, find semantic references to `name` and hand each
-/// site (with its innermost enclosing symbol) to `visit(rel, line, enclosing,
-/// kind, file_len)` — the one scanner behind context's callers and `tests`.
-/// Each file's index rows are refreshed before its lines are mapped
-/// (invariant 2). `preloaded` short-circuits the defining file, which the
-/// caller already holds in memory and has already refreshed. `visit` returns
-/// false to stop the whole scan.
-/// Per-command default limits/budgets — the single source for both the clap
-/// `default_value_t`s (main.rs) and the MCP dispatch fallbacks (mcp_server.rs),
-/// so the two surfaces can't drift.
+/// Per-command default limits/budgets — the single source for the clap
+/// `default_value_t`s AND the MCP dispatch fallbacks, so they can't drift.
 pub mod defaults {
     pub const TREE_BUDGET: i64 = 2000;
     pub const FIND_LIMIT: usize = 25;
@@ -230,21 +216,19 @@ pub mod defaults {
     pub const HOT_LIMIT: usize = 20;
     pub const COUPLING_LIMIT: usize = 15;
     pub const PATH_DEPTH: usize = 8;
-    /// `show` auto-expands an ambiguous name instead of erroring when the
-    /// pool is at most this many candidates …
+    /// `show` auto-expands an ambiguous name when the pool has at most this
+    /// many candidates …
     pub const AUTO_ALL_MAX_CANDIDATES: usize = 3;
-    /// … and their bodies sum to at most this many lines. Past either bound
-    /// the guided ambiguity error is the cheaper answer.
+    /// … and their bodies sum to at most this many lines; past either, the
+    /// guided ambiguity error is cheaper.
     pub const AUTO_ALL_MAX_LINES: i64 = 400;
 }
 
-/// How `show` renders a symbol, once the symbol itself is resolved.
+/// How `show` renders a resolved symbol.
 ///
-/// These four travel together through every `show` path (CLI dispatch, MCP
-/// dispatch, and `cmd_show` → `show_one` per candidate), so they move as one
-/// value: a new rendering knob is added here, not threaded through three
-/// signatures. `disclose_others` is deliberately NOT part of it — it is set by
-/// `cmd_show` per call, not chosen by the caller.
+/// One value through every `show` path (CLI, MCP, `cmd_show` → `show_one`), so
+/// a new knob is added here, not threaded through three signatures.
+/// `disclose_others` is deliberately NOT here — `cmd_show` sets it per call.
 #[derive(Clone, Copy)]
 pub struct ShowOpts<'a> {
     /// Extra lines above and below the symbol body.
@@ -257,11 +241,9 @@ pub struct ShowOpts<'a> {
     pub all: bool,
 }
 
-/// How `grep` matches lines — the flags `Matcher`/`grep_prefilter` both read.
-///
-/// Kept as one value so the in-process matcher and the rg/grep prefilter can
-/// never be handed a different reading of the same pattern (a disagreeing
-/// prefilter silently drops files holding real matches).
+/// How `grep` matches lines — read by both `Matcher` and `grep_prefilter`, so
+/// they never get different readings of one pattern (a disagreeing prefilter
+/// silently drops files holding real matches).
 #[derive(Clone, Copy)]
 pub struct GrepOpts<'a> {
     /// Case-insensitive match.
@@ -272,27 +254,23 @@ pub struct GrepOpts<'a> {
     pub limit: usize,
     /// Restrict the search to this path prefix or directory.
     pub path: Option<&'a str>,
-    /// Search dependency directories (`node_modules`, `vendor`, `target`, …)
-    /// too. Off by default: they are excluded from the index precisely because
-    /// they are not the agent's code, and including them buries repo hits.
+    /// Also search dependency dirs (`node_modules`, `vendor`, `target`, …).
+    /// Off by default: they aren't the agent's code and bury repo hits.
     pub include_deps: bool,
-    /// Lines of context printed before / after each hit (`-B`/`-A`; `-C` sets
-    /// both). 0 = the one-line-per-hit listing.
+    /// Context lines before / after each hit (`-B`/`-A`; `-C` sets both).
+    /// 0 = one line per hit.
     pub before: usize,
     pub after: usize,
 }
 
 /// THE `--path` policy for every query command (tree/find/refs/grep/…).
 ///
-/// A filter matches when it is the file itself, a parent directory of it, or a
-/// literal prefix. The directory and prefix readings genuinely conflict:
-/// `--path src/commands` must EXCLUDE `src/commands_old.rs`, while
-/// `--path src/comm` must INCLUDE `src/commands/query.rs` — same string shape,
-/// opposite answers. No string rule separates them, so `dir_filter` decides,
-/// and it is the caller's job to say whether the filter names a real directory.
-/// When it does, only the `/`-boundary reading applies (no leaking into a
-/// same-prefixed sibling); when it does not, the filter is a partial name and
-/// the prefix reading applies.
+/// A filter matches the file itself, a parent directory, or a literal prefix.
+/// Directory and prefix readings conflict: `--path src/commands` must EXCLUDE
+/// `src/commands_old.rs`, while `--path src/comm` must INCLUDE
+/// `src/commands/query.rs`. No string rule separates them, so the caller says
+/// via `dir_filter` whether the filter is a real directory: if so, only the
+/// `/`-boundary reading applies; otherwise the prefix reading does.
 pub(crate) fn path_matches_dir(rel: &str, filter: &str, dir_filter: bool) -> bool {
     let f = filter.trim_end_matches('/');
     if rel == f {
@@ -305,8 +283,7 @@ pub(crate) fn path_matches_dir(rel: &str, filter: &str, dir_filter: bool) -> boo
     {
         return true;
     }
-    // An explicit trailing slash, or a filter that really is a directory,
-    // means directory-only — never widen back to a prefix match.
+    // A trailing slash or a real directory means directory-only.
     if dir_filter || filter.ends_with('/') {
         return false;
     }
@@ -315,11 +292,9 @@ pub(crate) fn path_matches_dir(rel: &str, filter: &str, dir_filter: bool) -> boo
 
 /// A `--path` filter with the directory question answered ONCE.
 ///
-/// The dir-vs-prefix reading depends only on `(root, filter)` — both
-/// loop-invariant — while every consumer applies the filter per candidate row
-/// (up to thousands). Resolving it at construction keeps the hot path a pure
-/// string compare: no syscall, no allocation. A struct rather than a closure so
-/// it holds only these two fields instead of pinning a caller's scope alive.
+/// The dir-vs-prefix reading is loop-invariant, but the filter runs per row
+/// (up to thousands); resolving it up front keeps the hot path a pure string
+/// compare. A struct, not a closure, so it doesn't pin a caller's scope alive.
 pub(crate) struct PathFilter<'a> {
     filter: Option<&'a str>,
     dir_filter: bool,
@@ -344,9 +319,8 @@ impl<'a> PathFilter<'a> {
     pub(crate) fn as_str(&self) -> &'a str {
         self.filter.unwrap_or("")
     }
-    /// The scope to hand an external search tool (rg/grep) as its search root,
-    /// so a scoped query WALKS less instead of merely reporting less. Only a
-    /// real directory is safe here — a partial name is not a path.
+    /// Search root for rg/grep, so a scoped query WALKS less, not just reports
+    /// less. Only a real directory — a partial name is not a path.
     pub(crate) fn search_root(&self) -> Option<&'a str> {
         self.filter
             .filter(|_| self.dir_filter)
@@ -354,6 +328,12 @@ impl<'a> PathFilter<'a> {
     }
 }
 
+/// Walk every indexed file, find semantic references to `name` and hand each
+/// site (with its innermost enclosing symbol) to `visit(rel, line, enclosing,
+/// kind, file_src)` — the one scanner behind context's callers and `tests`.
+/// Each file is refreshed before its lines are mapped (invariant 2).
+/// `preloaded` is the defining file, already in memory and refreshed. `visit`
+/// returns false to stop the scan.
 pub(crate) fn scan_ref_sites(
     root: &Path,
     conn: &Connection,
@@ -365,23 +345,18 @@ pub(crate) fn scan_ref_sites(
     let pf = PathFilter::new(root, path_filter);
     let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let mut files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
-    // Prefilter to files that literally contain the name (fail-open); a name
-    // absent as a substring can't be a semantic ref. Always keep the preloaded
-    // file — it may hold the definition/refs the caller already read. A
-    // directory scope narrows the walk itself (see grep_prefilter); dropping an
-    // out-of-scope preloaded file there is consistent with the scope filter
-    // below, which would discard it anyway.
+    // Prefilter to files literally containing the name (fail-open), always
+    // keeping the preloaded file. A directory scope narrows the walk itself;
+    // the scope filter below would drop an out-of-scope preloaded file anyway.
     let matcher = query::Matcher::literal(name);
-    // include_deps=false: semantic refs are index-scoped by definition — a hit
-    // inside a dependency has no symbol row to resolve against.
+    // include_deps=false: a hit inside a dependency has no symbol row.
     if let Some(candidates) =
         query::grep_prefilter(root, name, &matcher, false, pf.search_root(), false)
     {
         files.retain(|f| candidates.contains(f) || preloaded.map(|(p, _)| p == f).unwrap_or(false));
     }
-    // `--path` scoping applies AFTER the content prefilter and overrides the
-    // preloaded exemption — an explicit scope means the caller does not want
-    // out-of-scope files, defining file included.
+    // `--path` applies AFTER the prefilter and overrides the preloaded
+    // exemption: an explicit scope excludes even the defining file.
     files.retain(|f| pf.ok(f));
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     'files: for rel in &files {
@@ -417,8 +392,8 @@ pub(crate) fn scan_ref_sites(
     Ok(())
 }
 
-/// A located symbol: `(path, start_line, end_line, qualified)`. The ONE shape
-/// every resolver in this module returns, so callers destructure it identically.
+/// A located symbol: `(path, start_line, end_line, qualified)` — the ONE shape
+/// every resolver here returns.
 pub(crate) type Located = (String, i64, i64, String);
 
 pub(crate) fn locate_symbol(conn: &Connection, symbol: &str) -> Result<Located> {
@@ -426,8 +401,8 @@ pub(crate) fn locate_symbol(conn: &Connection, symbol: &str) -> Result<Located> 
 }
 
 /// Locate + freshness in one step — the ONLY correct way to get line numbers
-/// you are about to read from disk (invariant 2). Reindexes the defining
-/// file when stale and re-locates, so the returned range matches the live file.
+/// you are about to read from disk (invariant 2): reindexes a stale defining
+/// file and re-locates.
 pub(crate) fn locate_fresh(
     root: &Path,
     conn: &Connection,
@@ -436,8 +411,8 @@ pub(crate) fn locate_fresh(
 ) -> Result<Located> {
     let located = match locate_symbol_kind(conn, symbol, kind) {
         Ok(l) => l,
-        // a deleted file can still hold a candidate until the next full
-        // index — drop those and resolve again before calling it ambiguous
+        // a deleted file can still hold a candidate until the next full index;
+        // drop those and retry before calling it ambiguous
         Err(_) if prune_vanished(root, conn, symbol, kind) => {
             locate_symbol_kind(conn, symbol, kind)?
         }
@@ -450,24 +425,17 @@ pub(crate) fn locate_fresh(
     Ok(located)
 }
 
-/// `locate_fresh` for WRITE paths (edit/insert): always re-index the defining
-/// file before the final locate, no staleness heuristic. A write splices by
-/// these line numbers, so "probably fresh" is not fresh enough — the extra
-/// reindex of one file is cheap next to a mis-spliced edit.
+/// `locate_fresh` for WRITE paths (edit/insert): always reindex the defining
+/// file, no staleness heuristic. A write splices by these lines, so "probably
+/// fresh" is not enough — one reindex is cheap next to a mis-spliced edit.
 pub(crate) fn locate_for_write(root: &Path, conn: &Connection, symbol: &str) -> Result<Located> {
     let (path0, ..) = locate_symbol(conn, symbol)?;
     indexer::reindex_file(root, conn, &path0)?;
     locate_symbol(conn, symbol)
 }
 
-/// Every candidate for `symbol`, in the same priority order the ambiguity
-/// error lists them. This does NOT pick a winner — callers that use it (`show
-/// --all`) render them all, so invariant 4 ("never silently picks") holds:
-/// nothing is chosen on the user's behalf, the ambiguity is simply answered
-/// in full instead of costing a round-trip.
-/// Forget indexed files that no longer exist on disk among `symbol`'s
-/// candidates. True when anything was dropped (the caller re-resolves).
-/// One stat per candidate — usually one.
+/// Forget indexed files among `symbol`'s candidates that no longer exist on
+/// disk. True when anything was dropped (the caller re-resolves).
 pub(crate) fn prune_vanished(
     root: &Path,
     conn: &Connection,
@@ -493,6 +461,9 @@ pub(crate) fn prune_vanished(
     !gone.is_empty()
 }
 
+/// Every candidate for `symbol`, in ambiguity-error order. Does NOT pick a
+/// winner — `show --all` renders them all, so invariant 4 holds: the ambiguity
+/// is answered in full instead of costing a round-trip.
 pub(crate) fn locate_all(
     conn: &Connection,
     symbol: &str,
@@ -511,23 +482,18 @@ pub(crate) fn locate_all(
     }
 }
 
-/// Like `locate_symbol`, optionally narrowed to a kind (`--kind struct`
-/// resolves the classic same-name struct/impl ambiguity). Still errors on
-/// ambiguity WITHIN the narrowed pool — invariant 4 stands.
 /// The candidate pool for `symbol` in priority order (exact-qualified first),
-/// after `path:Name` narrowing and `--kind`. Shared by the single-result
-/// resolver and `locate_all` so the two can never disagree about what the
-/// candidates are.
+/// after `path:Name` and `--kind` narrowing. Shared by the single-result
+/// resolver and `locate_all` so they can't disagree about the candidates.
 fn locate_candidates(conn: &Connection, symbol: &str, kind: Option<&str>) -> Result<Vec<Located>> {
     let (rows, symbol) = locate_rows(conn, symbol, kind)?;
     let exact: Vec<Located> = rows.iter().filter(|r| r.3 == symbol).cloned().collect();
     Ok(if exact.is_empty() { rows } else { exact })
 }
 
-/// THE `file.rs:Name` locator grammar — the ONE rule deciding whether an
-/// argument is a path-qualified symbol (`Some((path, name))`) or a plain symbol
-/// (`None`). Shared so the resolver and `show`'s path sniffing can't disagree
-/// about what a locator looks like.
+/// THE `file.rs:Name` locator grammar: `Some((path, name))` for a
+/// path-qualified symbol, `None` for a plain one. Shared so the resolver and
+/// `show`'s path sniffing can't disagree.
 pub(crate) fn split_locator(arg: &str) -> Option<(&str, &str)> {
     match arg.rsplit_once(':') {
         Some((f, n))
@@ -539,9 +505,8 @@ pub(crate) fn split_locator(arg: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// `show --path P Name` → the `P:Name` locator, so a scope reaches the one
-/// resolver instead of a parallel filter. A symbol that already carries its
-/// own locator keeps it — the narrower address wins.
+/// `show --path P Name` → `P:Name`, so a scope reaches the one resolver, not a
+/// parallel filter. An existing locator wins (it is the narrower address).
 pub fn scoped_locator(path: Option<&str>, symbol: &str) -> String {
     match path
         .map(|p| p.trim_end_matches('/'))
@@ -552,16 +517,14 @@ pub fn scoped_locator(path: Option<&str>, symbol: &str) -> String {
     }
 }
 
-/// Raw candidate rows plus the bare symbol name after stripping a `path:`
-/// prefix — the shared lookup behind `locate_candidates`/`locate_symbol_kind`.
+/// Raw candidate rows plus the bare name after stripping a `path:` prefix.
 fn locate_rows(
     conn: &Connection,
     symbol: &str,
     kind: Option<&str>,
 ) -> Result<(Vec<Located>, String)> {
-    // `path:Name` narrows to symbols in that file (exact path or `/`-guarded
-    // suffix) — the escape hatch for same-named top-level symbols, and exactly
-    // the shape the ambiguity listing below prints.
+    // `path:Name` narrows to that file (exact path or `/`-guarded suffix) —
+    // exactly the shape the ambiguity listing prints.
     let (file_filter, symbol) = match split_locator(symbol) {
         Some((f, n)) => (Some(f.to_string()), n),
         None => (None, symbol),
@@ -579,9 +542,8 @@ fn locate_rows(
         .flatten()
         .collect();
     if let Some(f) = &file_filter {
-        // An exact project-relative path wins outright — otherwise a filter like
-        // `src/main.rs` also suffix-matches `src/resolve-helper/src/main.rs` and
-        // stays ambiguous, defeating the escape hatch (invariant 4).
+        // An exact path wins outright — else `src/main.rs` also suffix-matches
+        // `src/resolve-helper/src/main.rs`, defeating the escape hatch (inv. 4).
         if rows.iter().any(|(p, ..)| p == f) {
             rows.retain(|(p, ..)| p == f);
         } else {
@@ -598,6 +560,9 @@ fn locate_rows(
     Ok((rows, symbol.to_string()))
 }
 
+/// Like `locate_symbol`, optionally narrowed to a kind (`--kind struct` splits
+/// the classic struct/impl pair). Still errors on ambiguity WITHIN the narrowed
+/// pool — invariant 4 stands.
 fn locate_symbol_kind(conn: &Connection, symbol: &str, kind: Option<&str>) -> Result<Located> {
     let pool = locate_candidates(conn, symbol, kind)?;
     let symbol = symbol.rsplit_once(':').map_or(symbol, |(_, n)| n);
@@ -609,10 +574,9 @@ fn locate_symbol_kind(conn: &Connection, symbol: &str, kind: Option<&str>) -> Re
         .take(8)
         .map(|(p, s, _, q)| format!("  {q}  {p}:{s}"))
         .collect();
-    // Suggest only escape hatches that can separate THIS pool: a same-file
-    // enum + impl pair shares one path and one qualified name, so `file:Name`
-    // and `Parent.Name` would re-raise the same error — recommending them
-    // sends an agent down two dead ends before it tries `--kind`.
+    // Suggest only hatches that can separate THIS pool: a same-file enum + impl
+    // pair shares path and qualified name, so `file:Name`/`Parent.Name` would
+    // be dead ends before `--kind`.
     let mut hatches = Vec::new();
     if pool.windows(2).any(|w| w[0].3 != w[1].3) {
         hatches.push("Parent.Name".to_string());
@@ -671,10 +635,9 @@ mod tests {
 
     #[test]
     fn path_filter_respects_directory_boundary() {
-        // THE bug this policy exists to prevent: a filter naming a real
-        // directory must not leak into a sibling whose name merely starts with
-        // it. This is the no-slash form — the trailing-slash form below can be
-        // rejected lexically, so only this case pins the `dir_filter` rule.
+        // THE bug this policy prevents: a real-directory filter must not leak
+        // into a same-prefixed sibling. Only this no-slash form pins the
+        // `dir_filter` rule (the trailing-slash form is rejected lexically).
         assert!(!path_matches_dir(
             "src/commands_old.rs",
             "src/commands",
@@ -690,8 +653,7 @@ mod tests {
             "src/commands",
             true
         ));
-        // …while the same string as a partial name (no such directory) does
-        // match it — the two readings genuinely disagree, hence `dir_filter`.
+        // …while as a partial name it matches — hence `dir_filter`.
         assert!(path_matches_dir(
             "src/commands_old.rs",
             "src/commands",

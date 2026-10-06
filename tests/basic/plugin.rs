@@ -2,9 +2,8 @@
 
 use std::path::Path;
 
-/// The plugin ships its own copy of the skill because Claude Code loads it from
-/// `plugin/skills/cona/SKILL.md`, while the installer bakes the root file in via
-/// `include_str!`. Two sources for one text drift silently — pin them equal.
+/// Claude Code loads the skill from `plugin/skills/cona/SKILL.md`, the
+/// installer bakes the root file in via `include_str!` — pin the two equal.
 #[test]
 fn plugin_skill_matches_the_canonical_one() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -18,11 +17,9 @@ fn plugin_skill_matches_the_canonical_one() {
     );
 }
 
-/// The redirect tier only runs on tool calls the matcher admits, and the matcher
-/// is written down twice: once derived from hook.rs (settings.json, via the
-/// installer) and once by hand in the plugin's hooks.json. A drift between them
-/// is invisible — the hook simply stops firing on that distribution path,
-/// silently, with no error anywhere.
+/// The PreToolUse matcher is written twice: derived from hook.rs (installer,
+/// settings.json) and by hand in the plugin's hooks.json. A drift silently
+/// stops the hook firing on that distribution path.
 /// Load a repo-relative JSON file for the plugin-consistency tests below.
 fn read_json(p: &str) -> serde_json::Value {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -47,11 +44,9 @@ fn plugin_hook_matcher_matches_the_installer() {
     );
 }
 
-/// One plugin directory serves both harnesses: Claude Code reads
-/// `.claude-plugin/plugin.json`, Codex reads `.codex-plugin/plugin.json`, and
-/// both point at the SAME skills/hooks/mcp payload. If the two manifests
-/// disagree about what they are describing, one harness ships something the
-/// other does not.
+/// One plugin directory serves both harnesses (`.claude-plugin/plugin.json`,
+/// `.codex-plugin/plugin.json`) over the SAME payload; if the manifests
+/// disagree, one harness ships something the other does not.
 #[test]
 fn both_plugin_manifests_describe_the_same_plugin() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -74,12 +69,10 @@ fn both_plugin_manifests_describe_the_same_plugin() {
     }
 }
 
-/// Codex snapshots an installed plugin into `~/.codex/plugins/cache/<mkt>/
-/// <plugin>/<version>/` — a manifest version frozen while the crate moves puts
-/// every payload change into the SAME cache dir, defeating the re-add story.
-/// release-plz bumps only Cargo.toml; `scripts/sync-plugin-version.sh` (run by
-/// release-plz.yml) carries the bump into the manifests, and this test pins
-/// the result so a missed sync fails CI instead of drifting silently.
+/// Codex caches a plugin under `~/.codex/plugins/cache/<mkt>/<plugin>/<version>/`,
+/// so a frozen manifest version puts every payload change in the SAME cache
+/// dir. release-plz bumps only Cargo.toml; `scripts/sync-plugin-version.sh`
+/// carries it into the manifests, and this test fails CI on a missed sync.
 #[test]
 fn plugin_versions_match_the_crate() {
     let crate_ver = env!("CARGO_PKG_VERSION");
@@ -96,11 +89,9 @@ fn plugin_versions_match_the_crate() {
     }
 }
 
-/// Beyond the PreToolUse matcher (pinned above), the installer and the plugin
-/// write the SAME hook set in two places: the PostToolUse reindex matcher, the
-/// SessionStart command shape, and the re-nudge shell gate. A drift means one
-/// distribution path silently stops firing that hook — pin the load-bearing
-/// pieces of each entry.
+/// Installer and plugin also both write the PostToolUse reindex matcher, the
+/// SessionStart command shape and the re-nudge shell gate. A drift silently
+/// stops that hook on one path — pin the load-bearing pieces.
 #[test]
 fn plugin_hooks_match_the_installer() {
     let hooks = read_json("plugin/hooks/hooks.json");

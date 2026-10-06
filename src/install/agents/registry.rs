@@ -9,12 +9,10 @@ use std::path::{Path, PathBuf};
 /// THE XDG config root for the harnesses that live under one (OpenCode, Zed,
 /// Crush): `$XDG_CONFIG_HOME` when set, else `~/.config`.
 ///
-/// The env var is honoured only when it is absolute AND sits under the `home`
-/// being asked about. A relative or empty value is spec-invalid and would
-/// otherwise resolve against the cwd, scattering config into whatever directory
-/// cona ran from; and `home` is not always the real one — tests and the
-/// per-scope probes pass a synthetic root, which an unfiltered env var would
-/// escape, making detection read the developer's actual `~/.config`.
+/// The env var is honoured only when absolute AND under the `home` asked about.
+/// A relative/empty value is spec-invalid and would resolve against the cwd;
+/// and tests/per-scope probes pass a synthetic `home`, which an unfiltered env
+/// var would escape into the developer's real `~/.config`.
 pub(super) fn xdg_config(home: &Path) -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -23,9 +21,8 @@ pub(super) fn xdg_config(home: &Path) -> PathBuf {
 }
 
 /// The agents `cmd_agents` knows how to configure. A `clap::ValueEnum`, so the
-/// CLI validates names at parse time (typo → clap error + possible-values in
-/// `--help`) and `--all` / `want()` derive from the SAME variant set — no
-/// hand-kept string list to drift against the per-agent blocks below.
+/// CLI validates names at parse time and `--all` / `want()` derive from the
+/// SAME variant set — no hand-kept string list to drift.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 pub enum AgentName {
     Claude,
@@ -78,10 +75,9 @@ impl AgentName {
     pub fn desc(self) -> &'static str {
         match self {
             AgentName::Claude => "Claude Code — skill + hooks + CLAUDE.md",
-            // The generic bucket owns the PROJECT AGENTS.md that most harnesses
-            // read, plus Codex's own global copy. Harnesses with a *distinct*
-            // global path (OpenCode, Zed, Crush) are their own entries below —
-            // ~/.codex/AGENTS.md is Codex's, not a shared global file.
+            // The generic bucket owns the PROJECT AGENTS.md most harnesses read,
+            // plus Codex's global copy (~/.codex/AGENTS.md is Codex's alone).
+            // Harnesses with a distinct global path have their own entries.
             AgentName::Agents => "AGENTS.md — Codex / Amp / Jules / Cline",
             AgentName::Cursor => "Cursor — .cursor/rules",
             AgentName::Gemini => "Gemini CLI — GEMINI.md",
@@ -109,8 +105,8 @@ impl AgentName {
     }
 
     /// Is this agent's config present on disk? Claude Code + (project) AGENTS.md
-    /// are always considered present — they are the unconditional core. THE one
-    /// detection source, shared by cmd_agents' gating and the setup picker.
+    /// always count as present. THE one detection source (cmd_agents' gating
+    /// and the setup picker).
     pub fn detected(self, project_root: &Path, home: &Path, global: bool) -> bool {
         match self {
             AgentName::Claude => true,
@@ -132,13 +128,11 @@ impl AgentName {
                     project_root.join("GEMINI.md").exists() || project_root.join(".gemini").exists()
                 }
             }
-            // project scope is a no-op (project AGENTS.md is already covered
-            // by the Agents bucket above) — never detected there, so it's
-            // never offered/selected for a project-scope install.
+            // Never detected at project scope: the Agents bucket already covers
+            // the project AGENTS.md.
             AgentName::Pi => global && home.join(".pi").exists(),
-            // The harnesses below read a project AGENTS.md the generic bucket
-            // already writes; what makes them their OWN entry is a distinct
-            // global path (and, for some, an MCP config shape of their own).
+            // These read the project AGENTS.md the generic bucket writes; a
+            // distinct global path (and sometimes MCP shape) makes them separate.
             AgentName::Opencode => {
                 if global {
                     xdg_config(home).join("opencode").exists()
@@ -175,8 +169,7 @@ impl AgentName {
                     project_root.join("CRUSH.md").exists() || project_root.join(".crush").exists()
                 }
             }
-            // Copilot's instructions file is checked in, so its presence IS the
-            // signal at project scope; globally it is the CLI's own dir.
+            // Project: the checked-in instructions file; global: the CLI's dir.
             AgentName::Copilot => {
                 if global {
                     home.join(".copilot").exists()
@@ -190,13 +183,11 @@ impl AgentName {
         }
     }
 
-    /// Every file this agent's cona install leaves a trace in for the given
-    /// scope — the guide targets PLUS the MCP entry — each tagged with HOW to
-    /// detect cona there (`Presence`). This is the "is cona installed here?"
-    /// question: a scope whose ONLY trace is the server entry must still count,
-    /// or uninstall (`project_has_cona`) and the status ✓ would both miss it.
-    ///
-    /// NOT the same question as `config_paths` — see there.
+    /// Every file a cona install leaves a trace in for this scope — guide
+    /// targets PLUS the MCP entry — each tagged with how to detect cona there.
+    /// Answers "is cona installed here?": a scope whose ONLY trace is the server
+    /// entry must still count for `project_has_cona` and the status ✓.
+    /// NOT the same question as `config_paths`.
     pub fn footprint_paths(
         self,
         project_root: &Path,
@@ -215,10 +206,9 @@ impl AgentName {
     }
 
     /// The guide/skill/hook targets this scope can act on — everything but the
-    /// MCP entry. This is the "can this scope configure the agent?" question
-    /// (`agents_in_scope`, the n/a status cells): an agent that only had an MCP
-    /// target here would be offered in the picker and then receive nothing, so
-    /// the two readings stay separate functions. Empty = no target in this scope
+    /// MCP entry. Answers "can this scope configure the agent?"
+    /// (`agents_in_scope`, the n/a status cells); an MCP-only agent would be
+    /// offered in the picker and then get nothing. Empty = no target here
     /// (e.g. Pi at project scope).
     pub fn config_paths(
         self,
@@ -226,7 +216,6 @@ impl AgentName {
         home: &Path,
         global: bool,
     ) -> Vec<(PathBuf, Presence)> {
-        // Where the scope's config lives: project root or home.
         let base = if global { home } else { project_root };
         match self {
             AgentName::Claude => {
@@ -264,10 +253,9 @@ impl AgentName {
             // Pi only has its own path at global scope.
             AgentName::Pi if global => vec![(home.join(".pi/agent/AGENTS.md"), Presence::Marker)],
             AgentName::Pi => vec![],
-            // OpenCode / Zed read the PROJECT AGENTS.md the generic bucket
-            // already owns — writing it twice would fight over one marker block
-            // — so at project scope they contribute their MCP entry only, and
-            // `config_paths` is empty (same shape as Pi).
+            // OpenCode / Zed read the PROJECT AGENTS.md the generic bucket owns
+            // (two writers would fight over one marker block), so at project
+            // scope they contribute only their MCP entry.
             AgentName::Opencode if global => vec![(
                 xdg_config(home).join("opencode/AGENTS.md"),
                 Presence::Marker,
@@ -276,9 +264,8 @@ impl AgentName {
                 vec![(xdg_config(home).join("zed/AGENTS.md"), Presence::Marker)]
             }
             AgentName::Opencode | AgentName::Zed => vec![],
-            // Windsurf: per-rule files at project scope, one global memories
-            // file. The project rule is a full-file write (ours alone), the
-            // global one a marker block in a file the user also writes.
+            // Windsurf: project rule file is ours alone; the global memories
+            // file is shared, so a marker block.
             AgentName::Windsurf if global => vec![(
                 home.join(".codeium/windsurf/memories/global_rules.md"),
                 Presence::Marker,
@@ -303,8 +290,6 @@ impl AgentName {
                 };
                 vec![(p, Presence::Marker)]
             }
-            // Copilot's project file is the checked-in repo instruction file;
-            // globally the CLI reads its own copy under ~/.copilot.
             AgentName::Copilot => {
                 let p = if global {
                     home.join(".copilot/copilot-instructions.md")
@@ -316,34 +301,27 @@ impl AgentName {
         }
     }
 
-    /// Where this agent reads MCP server definitions from, for the given scope.
-    /// `None` = the harness has no MCP config we own in that scope, so the
-    /// guide/skill integration is all it gets. THE single source of MCP
-    /// targets — install, uninstall and the status row all read it.
+    /// Where this agent reads MCP server definitions from in this scope; `None`
+    /// = no MCP config we own there. THE single source of MCP targets (install,
+    /// uninstall, status).
     ///
-    /// Claude Code deliberately has only a project target (`.mcp.json`, the
-    /// checked-in team scope): its user-scope servers live in `~/.claude.json`,
-    /// a file Claude Code owns as live session state — cona does not rewrite it.
+    /// Claude Code has only a project target (`.mcp.json`): its user-scope
+    /// servers live in `~/.claude.json`, live session state cona won't rewrite.
     pub fn mcp_path(self, project_root: &Path, home: &Path, global: bool) -> Option<PathBuf> {
-        // Same relative path in both scopes for everything but Claude — only
-        // the base moves.
         let base = if global { home } else { project_root };
         match self {
             AgentName::Claude if !global => Some(project_root.join(".mcp.json")),
             AgentName::Claude => None,
-            // Codex speaks TOML; project scope only applies to trusted projects,
-            // but writing it is harmless there and matches its documented path.
+            // Codex speaks TOML; project scope applies only to trusted projects
+            // but is harmless to write.
             AgentName::Agents => Some(base.join(".codex/config.toml")),
             AgentName::Cursor => Some(base.join(".cursor/mcp.json")),
             AgentName::Gemini => Some(base.join(".gemini/settings.json")),
             // pi.dev's MCP config shape isn't ours to guess — guide only.
             AgentName::Pi => None,
-            // OpenCode's project config sits at the repo root; globally it
-            // lives beside its AGENTS.md under XDG.
             AgentName::Opencode if global => Some(xdg_config(home).join("opencode/opencode.json")),
             AgentName::Opencode => Some(project_root.join("opencode.json")),
-            // Windsurf has no documented per-project MCP file — the one config
-            // is global, under its Codeium data dir.
+            // Windsurf has no documented per-project MCP file.
             AgentName::Windsurf if global => Some(home.join(".codeium/windsurf/mcp_config.json")),
             AgentName::Windsurf => None,
             AgentName::Zed if global => Some(xdg_config(home).join("zed/settings.json")),
@@ -351,19 +329,16 @@ impl AgentName {
             AgentName::Qwen => Some(base.join(".qwen/settings.json")),
             AgentName::Crush if global => Some(xdg_config(home).join("crush/crush.json")),
             AgentName::Crush => Some(project_root.join(".crush.json")),
-            // Copilot CLI keeps one MCP config in its own dir; the VS Code
-            // extension's project `.vscode/mcp.json` is IDE-managed, not ours.
+            // The VS Code extension's `.vscode/mcp.json` is IDE-managed, not ours.
             AgentName::Copilot if global => Some(home.join(".copilot/mcp-config.json")),
             AgentName::Copilot => None,
         }
     }
 
-    /// The top-level key + entry shape this harness expects its MCP servers
-    /// under. Split from `mcp_path` because the two answers vary independently:
-    /// most harnesses spell it `mcpServers`, but OpenCode/Crush use `mcp` with a
-    /// `"local"` transport and an argv array, and Zed calls them
-    /// `context_servers`. A wrong key does not error — the harness simply never
-    /// sees the server — so each agent names its own.
+    /// The top-level key + entry shape this harness expects MCP servers under:
+    /// mostly `mcpServers`, but OpenCode/Crush use `mcp` (`"local"` transport,
+    /// argv array) and Zed `context_servers`. A wrong key fails silently — the
+    /// harness never sees the server.
     pub fn mcp_key(self) -> mcp_config::ServerKey {
         match self {
             AgentName::Opencode | AgentName::Crush => mcp_config::ServerKey::Mcp,
@@ -373,12 +348,9 @@ impl AgentName {
     }
 
     /// The status-line label for this agent's guide target. Must fit
-    /// `Mark::render`'s `LABEL_COL` column — a longer one shifts that row's verb
-    /// and path out of line with every other row (`label_widths_fit_the_column`).
-    ///
-    /// Only the guide-file loop reads this; Claude's hand-written block labels
-    /// several targets ("claude skill" / "claude hooks" / …), which no single
-    /// per-agent string could express.
+    /// `Mark::render`'s `LABEL_COL` or the row misaligns
+    /// (`label_widths_fit_the_column`). Only the guide-file loop reads this;
+    /// Claude's block labels its several targets itself.
     pub fn mark_label(self) -> &'static str {
         match self {
             AgentName::Opencode => "opencode guide",
@@ -395,9 +367,8 @@ impl AgentName {
         }
     }
 
-    /// The content a `Presence::Exists` guide file carries. Everyone gets
-    /// GUIDE_MD verbatim; Cursor wraps it in `.mdc` frontmatter because its
-    /// rule loader needs `alwaysApply` to inject the guide unprompted.
+    /// Content of a `Presence::Exists` guide file: GUIDE_MD, wrapped in `.mdc`
+    /// frontmatter for Cursor (needs `alwaysApply` to inject it unprompted).
     pub fn guide_body(self) -> String {
         match self {
             AgentName::Cursor => format!(
@@ -407,9 +378,8 @@ impl AgentName {
         }
     }
 
-    /// Is cona currently wired into this agent for the given scope? Probes each
-    /// config path the way its `Presence` tag dictates — so it reflects an
-    /// actual install, not mere presence of the agent (`detected`).
+    /// Is cona wired into this agent for the given scope? Reflects an actual
+    /// install, not mere presence of the agent (`detected`).
     pub fn installed(self, project_root: &Path, home: &Path, global: bool) -> bool {
         self.footprint_paths(project_root, home, global)
             .iter()
@@ -430,8 +400,7 @@ pub enum Presence {
     /// `[mcp_servers.cona]` table in TOML) — probed by `mcp_config`.
     McpServer,
     /// A `.claude/agents` tree with at least one marked subagent definition —
-    /// per-def marker blocks are the only Claude footprint a fixed path list
-    /// can't name, so the probe scans the dir (recursive, bounded).
+    /// no fixed path names these, so the probe scans (recursive, bounded).
     SubagentDefs,
 }
 
@@ -457,18 +426,13 @@ pub(super) fn has_marker(p: &Path) -> bool {
 }
 
 /// Does the cona Claude Code plugin cover the sessions this SCOPE serves?
-/// The plugin ships hooks + skill + MCP in one payload, so where it is enabled
-/// the installer's settings.json hooks, skill file, and project `.mcp.json`
-/// entry are pure duplicates — every session would run each hook and inject
-/// the SessionStart context twice.
+/// Where it is enabled, the installer's hooks, skill file and `.mcp.json`
+/// entry are duplicates — every hook would fire twice.
 ///
-/// Scope matters: project settings are seen only by sessions in that project,
-/// global settings by every session. So the project scope is covered by a
-/// plugin enabled in either file, but the global scope only by the GLOBAL
-/// file — a plugin enabled in one repo must not strip (or skip) the home-level
-/// hooks every other repo still relies on. An unreadable or invalid settings
-/// file counts as "no plugin", so a broken file degrades to a normal install,
-/// never to a silently skipped one.
+/// Project scope is covered by a plugin enabled in either settings file, the
+/// global scope only by the GLOBAL file — a plugin enabled in one repo must not
+/// strip the home-level hooks other repos rely on. An unreadable/invalid file
+/// counts as "no plugin", degrading to a normal install.
 pub(crate) fn claude_plugin_enabled(project_root: &Path, home: &Path, global: bool) -> bool {
     let global_file = home.join(".claude/settings.json");
     let project_file = project_root.join(".claude/settings.json");
@@ -484,9 +448,8 @@ pub(crate) fn claude_plugin_enabled(project_root: &Path, home: &Path, global: bo
     })
 }
 
-/// The parse half of `claude_plugin_enabled`, split out for tests: does this
-/// settings.json enable a cona plugin (`enabledPlugins` key `cona` or
-/// `cona@<marketplace>` set to true)?
+/// Parse half of `claude_plugin_enabled`: is `enabledPlugins` key `cona` or
+/// `cona@<marketplace>` set to true?
 pub(super) fn plugin_enabled_in(settings_json: &str) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(settings_json) else {
         return false;
@@ -499,9 +462,8 @@ pub(super) fn plugin_enabled_in(settings_json: &str) -> bool {
 }
 
 /// Every MCP target cona owns, as `(agent, scope-is-global, path, registered)`.
-/// THE single traversal of `AgentName::ALL × scopes × mcp_path` — `agents
-/// status` folds it to one cell per agent, `doctor` prints the registered rows.
-/// Two surfaces, one enumeration, so a new agent shows up in both from its
+/// THE single traversal of `AgentName::ALL × scopes × mcp_path`, shared by
+/// `agents status` and `doctor`, so a new agent shows up in both from its
 /// `mcp_path` arm alone.
 pub fn mcp_registrations(
     project_root: &Path,
@@ -529,9 +491,8 @@ pub fn detected_agents(project_root: &Path, home: &Path, global: bool) -> Vec<Ag
 }
 
 /// The agents that already carry cona config in this scope — THE refresh
-/// target set. Upgrades re-sync what IS installed, never what merely COULD be
-/// (the rustup/brew model: updating refreshes installed components only) — a
-/// detected-but-never-selected agent must not gain config from an upgrade.
+/// target set. Upgrades re-sync what IS installed, never what merely COULD be:
+/// a detected-but-never-selected agent must not gain config from an upgrade.
 pub fn installed_agents(project_root: &Path, home: &Path, global: bool) -> Vec<AgentName> {
     AgentName::ALL
         .into_iter()
@@ -539,9 +500,8 @@ pub fn installed_agents(project_root: &Path, home: &Path, global: bool) -> Vec<A
         .collect()
 }
 
-/// Agents that have a config target in `global`/project scope — the ones a
-/// scope can actually act on. THE scope-eligibility rule (setup picker, the
-/// interactive command, status all read it), so a scope-less agent (e.g. Pi at
+/// Agents with a config target in this scope. THE scope-eligibility rule
+/// (setup picker, interactive command, status), so a scope-less agent (Pi at
 /// project scope) is filtered in ONE place.
 pub fn agents_in_scope(project_root: &Path, home: &Path, global: bool) -> Vec<AgentName> {
     AgentName::ALL

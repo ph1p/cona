@@ -8,11 +8,9 @@ use crate::ui;
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-/// Which agents a given invocation targets. Encodes the selection rule in ONE
-/// place: explicit names (or `--all`) override detection; with neither, an
-/// agent is configured only when its config is detected on disk. Uninstall
-/// runs every requested agent regardless of detection (so a leftover config
-/// is always removable).
+/// Which agents an invocation targets — THE selection rule: explicit names (or
+/// `--all`) override detection; with neither, install only detected agents.
+/// Uninstall ignores detection, so a leftover config is always removable.
 pub(super) struct AgentSel {
     pub(super) names: Vec<AgentName>,
     pub(super) all: bool,
@@ -34,17 +32,13 @@ impl AgentSel {
     }
 }
 
-/// `cona agents status` — one glance at what is wired where. Per agent, per
-/// scope: ✓ configured / – not configured / (n/a for scopes an agent lacks),
-/// plus the exact copy-paste command to add or remove it. THE self-explaining
-/// surface for managing single agents.
+/// `cona agents status` — what is wired where, per agent and scope (✓ / – /
+/// n/a), plus the copy-paste commands to add or remove one.
 pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
     println!("{}\n", ui::bold("cona agents"));
 
-    // One row per agent: name, the scope cells (guide + mcp), description. A table scans
-    // in one glance where a block-per-agent needs scrolling — and `▸` stays a
-    // section marker instead of doubling as a row bullet.
+    // One table row per agent: name, scope cells (guide + mcp), description.
     // Pad BEFORE coloring — ANSI escapes would break every column width.
     let name_w = AgentName::ALL
         .iter()
@@ -78,8 +72,7 @@ pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
         // does this agent even have a target in each scope?
         let proj_na = a.config_paths(project_root, &home, false).is_empty();
         let glob_na = a.config_paths(project_root, &home, true).is_empty();
-        // MCP is a second, optional surface: on when the server entry exists in
-        // EITHER scope, n/a for a harness cona has no MCP config for.
+        // MCP: on when registered in EITHER scope, n/a without an MCP config.
         let mut rows = mcp.iter().filter(|(n, ..)| *n == a).peekable();
         let mcp_na = rows.peek().is_none();
         let mcp_on = rows.any(|&(.., on)| on);
@@ -119,13 +112,11 @@ pub fn cmd_agents_status(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Interactive add/remove for single agents: a pre-checked checklist of every
-/// known agent (checked = currently configured). Confirming installs the newly
-/// checked ones and uninstalls the newly unchecked ones — the one-screen way to
-/// add or remove any single agent. TTY-only; callers gate on that.
+/// Interactive add/remove for single agents: a pre-checked checklist; newly
+/// checked agents are installed, newly unchecked ones removed. TTY-only;
+/// callers gate on that.
 pub fn cmd_agents_interactive(project_root: &Path, global: bool) -> Result<()> {
-    // One scope of the same checklist `cona setup` shows — same pre-checks
-    // (installed OR detected), same diff, same refresh-on-still-checked.
+    // One scope of the same checklist `cona setup` shows.
     let Some((proj, glob)) = pick_agents(project_root, !global, global)? else {
         println!("{}", ui::dim("cancelled — nothing changed"));
         return Ok(());
@@ -152,13 +143,10 @@ pub struct ScopePlan {
 }
 
 /// ONE agent checklist across the requested scopes, diffed into per-scope
-/// plans. THE interactive manage surface — `cona setup` (both scopes) and
-/// `cona agents` (one scope) share it, so the two can never drift in
-/// pre-check policy or diff semantics. A row starts checked when the agent is
-/// already installed in that scope, else when it is merely detected on disk
-/// (the first-run suggestion). Unchecking an installed agent is a REMOVAL —
-/// the picker doubles as the manage surface, so it must be able to take
-/// integrations away, not only add them. `None` = user cancelled.
+/// plans. THE interactive manage surface, shared by `cona setup` (both scopes)
+/// and `cona agents` (one scope) so pre-check policy and diff can't drift. A
+/// row starts checked when installed, else when detected (first-run
+/// suggestion). Unchecking an installed agent is a REMOVAL. `None` = cancelled.
 pub fn pick_agents(
     root: &Path,
     do_project: bool,
@@ -166,11 +154,9 @@ pub fn pick_agents(
 ) -> Result<Option<(ScopePlan, ScopePlan)>> {
     let home = dirs::home_dir().unwrap_or_default();
 
-    // `items[ordinal]` = the (agent, global, was_installed) that item row maps
-    // back to; the ordinal is exactly what `multiselect` hands back for
-    // checked rows. Descriptions carry the row's current state — a pre-checked
-    // box alone can't tell "already installed (uncheck = remove)" apart from
-    // "detected, suggested".
+    // `items[ordinal]` = (agent, global, was_installed) for the item row whose
+    // ordinal `multiselect` returns. Descriptions carry the row's state, since
+    // a checked box alone can't tell "installed" from "detected, suggested".
     let mut rows: Vec<ui::Row> = Vec::new();
     let mut items: Vec<(AgentName, bool, bool)> = Vec::new();
     for (global, header) in [
@@ -199,9 +185,8 @@ pub fn pick_agents(
     match ui::multiselect("configure cona agents", &rows)? {
         None => Ok(None),
         Some(picked) => {
-            // Diff checked-now against installed-before: newly on → add,
-            // newly off → remove. Still-on agents are re-installed too —
-            // idempotent, and it refreshes marker blocks after a version bump.
+            // Newly on → add, newly off → remove. Still-on agents are
+            // re-installed too (idempotent; refreshes stale marker blocks).
             let now_on: std::collections::HashSet<usize> = picked.into_iter().collect();
             let (mut proj, mut glob) = (ScopePlan::default(), ScopePlan::default());
             for (i, &(agent, global, was)) in items.iter().enumerate() {

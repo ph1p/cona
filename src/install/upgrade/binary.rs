@@ -46,9 +46,8 @@ pub(super) fn source_mtime(dir: &Path) -> i64 {
     newest
 }
 
-/// Whole-second mtime — deliberately coarser than `indexer::file_mtime`
-/// (nanoseconds, needed for sub-second staleness); comparing binary vs source
-/// checkout ages never needs that precision. Keep the two separate.
+/// Whole-second mtime — deliberately coarser than `indexer::file_mtime` (ns);
+/// binary-vs-source ages never need that precision. Keep the two separate.
 pub(super) fn mtime_secs(p: &Path) -> i64 {
     std::fs::metadata(p)
         .and_then(|m| m.modified())
@@ -68,9 +67,8 @@ pub(super) fn replace_binary(src: &Path, dst: &Path) -> Result<Change> {
     if let Some(dir) = dst.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    // per-process temp name: auto-update can run concurrently (background
-    // `upgrade --quiet` + git-hook upgrade); a shared name lets two copiers
-    // interleave into the same inode and rename a truncated binary into place
+    // per-process temp name: concurrent upgrades sharing one would interleave
+    // and rename a truncated binary into place
     let tmp = dst.with_extension(format!("tmp-update.{}", std::process::id()));
     std::fs::copy(src, &tmp)?;
     #[cfg(unix)]
@@ -78,9 +76,8 @@ pub(super) fn replace_binary(src: &Path, dst: &Path) -> Result<Change> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     }
-    // Windows refuses to rename over a running exe (self-upgrade replaces the
-    // very binary that spawned us): move the old file aside first — renaming a
-    // running exe TO a new name is allowed — then best-effort-delete the husk.
+    // Windows refuses to rename over a running exe, but allows renaming it
+    // away: move the old file aside, then best-effort-delete the husk.
     #[cfg(windows)]
     let aside = if existed {
         let aside = dst.with_extension(format!("old.{}", std::process::id()));
@@ -101,13 +98,10 @@ pub(super) fn replace_binary(src: &Path, dst: &Path) -> Result<Change> {
     })
 }
 
-/// Collect the previous upgrade's leavings next to `dst`. On Windows the
-/// rename-aside husk (`cona.old.<pid>`) cannot be deleted while it IS the
-/// running process — self-upgrade, the main caller — so each upgrade sweeps
-/// the stale ones the last upgrade had to leave behind. Best-effort: a husk
-/// that is still running stays locked and survives until the next sweep.
-/// Deliberately does NOT touch `tmp-update.*` — a concurrent upgrade may be
-/// mid-copy into its own tmp file.
+/// Sweep old `cona.old.<pid>` husks next to `dst`. On Windows a husk can't be
+/// deleted while it IS the running process, so each upgrade sweeps the ones
+/// the last left behind; a still-running one survives until the next sweep.
+/// Does NOT touch `tmp-update.*` — a concurrent upgrade may be mid-copy.
 pub(super) fn sweep_old_husks(dst: &Path) {
     let (Some(dir), Some(stem)) = (dst.parent(), dst.file_stem().and_then(|s| s.to_str())) else {
         return;
@@ -186,10 +180,9 @@ pub(super) fn cargo_build(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Build the standalone `resolve-helper` crate and install its binary beside
-/// cona. Returns the installed path, or `Ok(None)` if the crate isn't in the
-/// checkout. Errors (build failed, no cargo) are surfaced to the caller as
-/// non-fatal — the helper is optional. Only rebuilds when the binary is stale.
+/// Build the `resolve-helper` crate (only when stale) and install it beside
+/// cona. `Ok(None)` if the crate isn't in the checkout; errors are non-fatal
+/// to the caller — the helper is optional.
 pub(super) fn install_resolve_helper(src_root: &Path, bin_dir: &Path) -> Result<Option<PathBuf>> {
     let crate_dir = src_root.join("src/resolve-helper");
     if !crate_dir.join("Cargo.toml").is_file() {

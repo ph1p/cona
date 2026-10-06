@@ -23,8 +23,7 @@ fn xml_elements_are_named_by_tag_and_identifying_child() {
     // the identifying child qualifies the repeated tag
     assert!(names.contains(&"profile#with-frontend-build"), "{names:?}");
     assert!(names.contains(&"plugin#frontend-maven-plugin"), "{names:?}");
-    // a grandchild's id must not name an ancestor: <profiles> wraps the
-    // <profile> that owns the <id>, so it stays the bare tag
+    // a grandchild's id must not name an ancestor: <profiles> stays bare
     assert!(names.contains(&"profiles"), "{names:?}");
     // an element with no identifying child keeps the bare tag
     assert!(names.contains(&"build"), "{names:?}");
@@ -34,8 +33,7 @@ fn xml_elements_are_named_by_tag_and_identifying_child() {
 
 #[test]
 fn deeply_nested_source_does_not_overflow_the_stack() {
-    // Minified/generated files nest arbitrarily deep; a recursive walk
-    // overflowed the parse threads' stack and aborted the whole process.
+    // Minified files nest arbitrarily deep; a recursive walk aborted the process.
     let depth = 200_000;
     let src = format!(
         "let x = {}1{};\nfunction real() {{}}\n",
@@ -44,8 +42,7 @@ fn deeply_nested_source_does_not_overflow_the_stack() {
     );
     let syms = extract_symbols("javascript", &src).unwrap();
     assert!(syms.iter().any(|s| s.name == "real"));
-    // Every AST walker must survive the same depth, not just `walk`:
-    // refs/grep/rename/edit all traverse the full tree too.
+    // Every AST walker (refs/grep/rename/edit) must survive the same depth.
     let idents = super::ident_occurrences("javascript", &src).unwrap();
     assert!(idents.iter().any(|(n, _)| n == "real"));
     assert_eq!(
@@ -60,8 +57,7 @@ fn deeply_nested_source_does_not_overflow_the_stack() {
 
 #[test]
 fn nested_js_bindings_keep_preorder_and_qualified_names() {
-    // The worklist rewrite must emit the same symbols in the same order
-    // as the old recursion: parent before child, child qualified.
+    // Pre-order: parent before child, child qualified.
     let src = "const outer = () => {\n  const inner = () => {};\n};\nconst after = () => {};\n";
     let syms = extract_symbols("javascript", src).unwrap();
     let got: Vec<(&str, &str)> = syms
@@ -114,12 +110,11 @@ fn param_count_edge_cases() {
 
 /// Regression guard for a silent link-time hijack.
 ///
-/// `vendor/vue/scanner.cc` includes a bundled COPY of the html scanner. While
-/// that copy exported `tree_sitter_html_external_scanner_*`, those five symbols
-/// collided with the real `tree-sitter-html` crate's scanner; the linker kept
-/// one definition, so html parsed against the wrong scanner state layout and
-/// EVERY document came back as one ERROR node. No link error, no panic — just
-/// zero symbols. If someone re-exports those names, this fails.
+/// `vendor/vue/scanner.cc` bundles a COPY of the html scanner. When it exported
+/// `tree_sitter_html_external_scanner_*`, the linker silently kept one of the
+/// colliding definitions, html parsed with the wrong scanner state, and EVERY
+/// document became one ERROR node — zero symbols, no error. Re-exporting those
+/// names fails this test.
 #[test]
 fn html_scanner_exports_do_not_collide() {
     let src = "<html><head><meta charset=\"UTF-8\"></head><body><p>hi</p></body></html>";

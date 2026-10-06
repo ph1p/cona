@@ -156,9 +156,8 @@ pub fn cmd_tests(
         if counted_files.insert(rel.to_string()) {
             bytes += fsrc.len();
         }
-        // the definition itself is not a test reference — skip by LOCATION;
-        // matching the enclosing name would also swallow recursive calls and
-        // refs inside same-named symbols elsewhere
+        // skip the definition itself by LOCATION — matching the name would also
+        // swallow recursive calls and same-named symbols elsewhere
         if rel == def_path && ln >= def_s && ln <= def_e && db::name_tail(encl) == name {
             return true;
         }
@@ -354,8 +353,7 @@ pub fn cmd_deps(
         .flatten()
         .collect();
     let all: HashSet<String> = files.iter().map(|(p, ..)| p.clone()).collect();
-    // own crate names so `use mycrate::…` resolves like `crate::…` — only
-    // needed when the project has Rust files at all
+    // own crate names, so `use mycrate::…` resolves like `crate::…` (Rust only)
     let self_crates = if files.iter().any(|(_, l, _)| l == "rust") {
         deps::self_crate_names(root)
     } else {
@@ -459,11 +457,10 @@ pub fn cmd_deps(
     Ok((out, baseline))
 }
 
-/// `check` — tree-sitter parse diagnostics for a file (NOT a compiler; catches
-/// syntactic breakage only). This is the same gate `edit` runs internally,
-/// exposed as a standalone command so an agent can confirm a file still parses
-/// after a manual edit without shelling a full build. With no file, checks every
-/// file changed vs HEAD (uncommitted + untracked).
+/// `check` — tree-sitter parse diagnostics (NOT a compiler; syntax only). The
+/// same gate `edit` runs, standalone so an agent can confirm a manual edit
+/// still parses without a full build. With no file, checks every file changed
+/// vs HEAD (uncommitted + untracked).
 pub fn cmd_check(
     root: &Path,
     conn: &Connection,
@@ -494,9 +491,8 @@ pub fn cmd_check(
         checked += 1;
         if !json {
             if errors.is_empty() {
-                // Per-file "ok" lines only for an explicit single-file check;
-                // the changed-files sweep summarizes instead of printing one
-                // no-op line per clean file.
+                // "ok" lines only for an explicit single-file check; the sweep
+                // summarizes instead.
                 if file.is_some() {
                     out.push_str(&format!("{path}: ok\n"));
                 }
@@ -540,8 +536,8 @@ pub fn cmd_check(
     Ok((out, baseline))
 }
 
-/// Files changed vs HEAD (tracked-modified + untracked), used by `check` with no
-/// argument. Mirrors the `diff` command's "includes uncommitted + untracked" scope.
+/// Files changed vs HEAD (tracked-modified + untracked) — `check`'s default,
+/// same scope as `diff`.
 fn changed_files(root: &Path) -> Result<Vec<String>> {
     let run = |args: &[&str]| -> Option<String> {
         std::process::Command::new("git")
@@ -570,9 +566,8 @@ fn changed_files(root: &Path) -> Result<Vec<String>> {
     Ok(set)
 }
 
-/// `impact` — pre-edit blast radius for a symbol, fusing the pieces an agent
-/// would otherwise gather in four calls: references, immediate callers, tests
-/// that exercise it, and recent git history. Answers "is it safe to change?".
+/// `impact` — pre-edit blast radius: references, immediate callers, tests and
+/// recent git history in one call. Answers "is it safe to change?".
 pub fn cmd_impact(
     root: &Path,
     conn: &Connection,

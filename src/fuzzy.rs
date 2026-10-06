@@ -1,7 +1,6 @@
-/// Fuzzy matching fallback for `find`: exact/substring queries stay in SQL;
-/// this ranks candidates only when SQL found nothing. Higher score = better;
-/// None = no match. Case-insensitive. Substring beats subsequence, early and
-/// tight matches beat late and scattered ones.
+/// Fuzzy fallback for `find`, used only when SQL (exact/substring) found nothing.
+/// Higher = better, None = no match; case-insensitive. Substring beats
+/// subsequence; early, tight matches beat late, scattered ones.
 pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
     if query.is_empty() || candidate.is_empty() {
         return None;
@@ -32,10 +31,9 @@ pub fn fuzzy_score(query: &str, candidate: &str) -> Option<i64> {
     }
 }
 
-/// Rank candidates for the `find` fallback: each item is scored as the max of
-/// its bare name and qualified name (so `login` finds `UserService.login`),
-/// ties break toward the shorter qualified name, and only the top `limit`
-/// survive. Returns (score, index-into-input) pairs, best first.
+/// Rank `find` fallback candidates by the max of bare and qualified name score
+/// (`login` finds `UserService.login`), ties to the shorter qualified name; top
+/// `limit` as (score, input index) pairs, best first.
 pub fn rank<'a>(
     query: &str,
     candidates: impl Iterator<Item = (usize, &'a str, &'a str)>,

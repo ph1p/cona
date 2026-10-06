@@ -1,30 +1,25 @@
 //! Out-of-process stack-graphs name resolver for cona.
 //!
-//! Reads ONE JSON request from stdin, resolves the requested reference
-//! positions to their definition site(s) via stack-graphs, writes ONE JSON
-//! response to stdout. cona spawns this lazily only for the languages that
-//! ship published TSG rules (typescript/tsx/javascript/python) and only when a
-//! name stayed ambiguous after the cheap heuristics — so the per-call cost of
-//! building a stack graph is paid rarely, never in the index write path.
+//! Reads ONE JSON request from stdin, resolves reference positions to their
+//! definition site(s) via stack-graphs, writes ONE JSON response to stdout.
+//! cona spawns it lazily, only for languages with TSG rules
+//! (typescript/tsx/javascript/python/rust) and only when a name stayed
+//! ambiguous after the cheap heuristics — never in the index write path.
 //!
-//! Protocol (line-free; the whole stdin is one JSON object). References are
-//! identified by 1-based line + symbol name (NOT column) so the two sides never
-//! have to agree on byte-vs-utf8 column encoding. The primary file carries the
-//! refs to resolve; optional `deps` are extra files stitched into the SAME
-//! stack graph so a reference can resolve to a definition in another file
-//! (cross-file resolution). Each resolved def reports its `file` so the caller
-//! knows where it landed:
+//! Protocol (the whole stdin is one JSON object). Refs are identified by
+//! 1-based line + name (NOT column), so the sides never have to agree on a
+//! column encoding. Optional `deps` are stitched into the SAME stack graph for
+//! cross-file resolution; each def reports the `file` it landed in:
 //!   request : {"lang":"typescript","path":"a.ts","source":"…",
 //!              "refs":[{"line":4,"name":"finish"}],
 //!              "deps":[{"path":"b.ts","source":"…"}]}
 //!   response: {"resolved":[{"ref":{"line":4,"name":"finish"},
 //!              "defs":[{"file":"b.ts","line":1,"symbol":"finish"}]}]}
 //!
-//! A ref with no resolvable definition (or one that is ambiguous on its line —
-//! same name twice) comes back with empty `defs`; the caller keeps its
-//! name-based result. On any hard error the process prints `{"error":"…"}` and
-//! exits non-zero; cona treats that (and a missing binary) as "no semantic
-//! signal" and degrades gracefully.
+//! A ref with no resolvable definition (or ambiguous on its line — same name
+//! twice) gets empty `defs`. On a hard error the process prints
+//! `{"error":"…"}` and exits non-zero; cona treats that (and a missing binary)
+//! as "no semantic signal".
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -46,23 +41,21 @@ struct Request {
     path: String,
     source: String,
     refs: Vec<Ref>,
-    /// Extra files stitched into the same stack graph so refs can resolve to
-    /// definitions outside the primary file (cross-file resolution). Optional.
+    /// Optional extra files stitched into the same stack graph (cross-file).
     #[serde(default)]
     deps: Vec<DepFile>,
 }
 
-/// A dependency file fed alongside the primary one — same language, own path +
-/// source. Only its definitions matter (we never resolve refs INSIDE a dep).
+/// A dependency file (same language). Only its definitions matter — refs
+/// INSIDE a dep are never resolved.
 #[derive(Deserialize)]
 struct DepFile {
     path: String,
     source: String,
 }
 
-/// A reference to resolve: identified by 1-based line + symbol name. No column
-/// — matching is by (line, name), which avoids any byte-vs-utf8 column coupling
-/// between cona and this helper.
+/// A reference to resolve: 1-based line + symbol name (no column — avoids
+/// byte-vs-utf8 column coupling with cona).
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 struct Ref {
     line: usize,
@@ -84,14 +77,12 @@ struct Resolved {
 #[derive(Serialize)]
 struct Def {
     /// File the definition lives in (the primary file's path, or a dep's).
-    /// Lets the caller act on cross-file resolutions, not just same-file.
     file: String,
     line: usize,
     symbol: Option<String>,
 }
 
-/// The published TSG rule sets we bundle. Returns `None` for a language we
-/// don't carry rules for — the caller then simply gets no semantic signal.
+/// The TSG rule sets we bundle; `None` for any other language.
 fn language_config(lang: &str, cancel: &dyn CancellationFlag) -> Option<LanguageConfiguration> {
     match lang {
         "typescript" | "ts" => {
@@ -104,17 +95,15 @@ fn language_config(lang: &str, cancel: &dyn CancellationFlag) -> Option<Language
         "python" | "py" => Some(tree_sitter_stack_graphs_python::language_configuration(
             cancel,
         )),
-        // Rust has NO published TSG crate; rules are hand-authored in rust.tsg
-        // (bundled at compile time). Build the LanguageConfiguration at runtime
-        // from that source. Fail-open: a TSG parse error yields None, so the
-        // caller simply gets no semantic signal for Rust rather than a crash.
+        // Rust has NO published TSG crate: rules are hand-authored in rust.tsg
+        // and built at runtime. Fail-open: a TSG parse error yields None, not
+        // a crash.
         "rust" | "rs" => rust_language_config(cancel),
         _ => None,
     }
 }
 
-/// The hand-authored Rust name-binding rules (see rust.tsg). No published crate
-/// ships these, so they are compiled into the helper and loaded at runtime.
+/// The hand-authored Rust name-binding rules, compiled into the helper.
 const RUST_TSG_SOURCE: &str = include_str!("../rust.tsg");
 
 fn rust_language_config(cancel: &dyn CancellationFlag) -> Option<LanguageConfiguration> {
@@ -163,16 +152,15 @@ fn run() -> Result<Response> {
         req.path.as_str()
     };
 
-    // build ONE stack graph spanning the primary file plus any dep files, so a
-    // reference in the primary file can resolve to a definition in a dep.
+    // ONE stack graph spanning the primary file plus deps, so a primary ref
+    // can resolve to a definition in a dep.
     let mut graph = StackGraph::new();
     let globals = Variables::new();
     let primary = graph.get_or_create_file(primary_name);
     lc.sgl
         .build_stack_graph_into(&mut graph, primary, &req.source, &globals, &cancel)
         .context("build stack graph (primary)")?;
-    // dep files: a failed parse of one dep must not sink the whole request —
-    // best-effort, we just skip a dep we can't build.
+    // best-effort: a dep that fails to build is skipped, not fatal
     let mut files = vec![primary];
     for dep in &req.deps {
         if dep.path == primary_name {
@@ -214,20 +202,17 @@ fn run() -> Result<Response> {
         g[n].file().map(|f| g[f].name().to_string())
     };
 
-    // reference nodes grouped by (line, name). stack-graphs can emit MORE than
-    // one reference node for a single source occurrence (member-access
-    // scaffolding), so a key maps to all of them; we resolve each and union the
-    // definitions. A definition NODE also carries its own name as a "reference"
-    // in some grammars — those resolve to themselves and are filtered out by
-    // dropping defs that sit on the reference's own line.
+    // reference nodes grouped by (line, name). stack-graphs can emit several
+    // reference nodes per occurrence (member-access scaffolding), so we
+    // resolve each and union the defs. In some grammars a definition node is
+    // also its own "reference" — filtered by dropping defs on the ref's line.
     let mut ref_by_key: std::collections::HashMap<(usize, String), Vec<Handle<Node>>> =
         std::collections::HashMap::new();
     for n in graph.iter_nodes() {
         if !graph[n].is_reference() {
             continue;
         }
-        // refs are addressed by (line, name) within the PRIMARY file only — a
-        // dep file's own references are never something the caller asked about.
+        // refs are addressed within the PRIMARY file only
         if graph[n].file() != Some(primary) {
             continue;
         }
@@ -255,10 +240,9 @@ fn run() -> Result<Response> {
                     let end = p.end_node;
                     if g[end].is_definition() {
                         if let (Some(line), Some(file)) = (line_of(g, end), file_of(g, end)) {
-                            // a def on the ref's own line IN THE PRIMARY FILE is
-                            // the self-reference of a definition node — not a
-                            // real resolution. A same-line def in a DEP file is
-                            // a genuine cross-file hit and must be kept.
+                            // a same-line def IN THE PRIMARY FILE is a
+                            // definition node's self-reference; in a DEP file
+                            // it is a genuine cross-file hit and is kept.
                             if !(file == primary_name && line == want.line) {
                                 defs.push(Def {
                                     file,

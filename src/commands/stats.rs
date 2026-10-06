@@ -18,7 +18,6 @@ pub fn cmd_stats(root: &Path, project_only: bool) -> Result<String> {
     Ok(out)
 }
 
-/// Where config/data lives + database sizes + retention info.
 /// Machine-readable stats (`stats --json`): totals, per-command breakdown and
 /// top targets for the project scope (and globally unless --project).
 pub fn cmd_stats_json(root: &Path, project_only: bool) -> Result<String> {
@@ -159,8 +158,8 @@ fn stats_section(
         t.reads_blocked,
     ));
 
-    // per-command table — queries only; maintenance rows (index/edit/hook:*)
-    // never carry savings and are folded into one line below.
+    // per-command table — queries only; maintenance rows (no savings) are
+    // folded into one line below
     let rows = db::per_command(g, scope_ref)?;
     if rows.is_empty() {
         out.push_str("  (no queries recorded yet)\n");

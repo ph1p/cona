@@ -1,28 +1,23 @@
 //! Agent tool-call hooks.
 //!
-//! cona is a *navigation accelerator*, never a gatekeeper. The PreToolUse
-//! hook only ever redirects the agent toward a faster path and always fails
-//! open — any parse error, missing index, unknown/non-code file, small file or
-//! partial read passes straight through untouched. It never blocks anything the
-//! agent's own machinery (caching, batching, other tools) relies on.
+//! cona is a *navigation accelerator*, never a gatekeeper. The PreToolUse hook
+//! only redirects toward a faster path and always fails open — parse errors,
+//! missing index, non-code/small files and partial reads pass untouched.
 //!
-//! Two intercepts. A large full read / broad identifier grep in an INDEXED
-//! project is *redirected* (blocked, with the faster cona command in the
-//! reason). The same call in a git repo that simply hasn't been indexed yet is
-//! *nudged* (allowed, but with a one-time hint that indexing unlocks cona) —
-//! this is the cold-open case where orientation help matters most and the old
-//! "indexed only" rule stayed silent. Everything else passes.
+//! A large full read / broad identifier grep in an INDEXED project is
+//! *redirected* (blocked, with the cona command in the reason). The same call
+//! in an unindexed git repo is *nudged* (allowed, with a one-time hint that
+//! indexing unlocks cona) — the cold-open case where orientation matters most.
 //!
-//! Between "small enough to ignore" and "big enough to block" sits the case that
-//! actually drains context: a 150–300 line file read in full to understand ONE
-//! function. Three *advisory* outcomes cover it, all of which ALLOW the read and
-//! merely attach a hint — because the same read is correct when the agent is
-//! about to rewrite the file, and only the agent knows which it is:
+//! Between "ignore" and "block" sits what actually drains context: a 150–300
+//! line file read in full to understand ONE function. Three *advisory*
+//! outcomes ALLOW the read and attach a hint, since the read is correct when
+//! the agent is about to rewrite the file and only the agent knows which:
 //!   - mid-size indexed file (>= `CONA_ADVISE_MIN_LINES`) read in full
-//!   - re-read of a path already fully read this session (size-blind: those
-//!     bytes are already in context, so a repeat is redundant at any length)
-//!   - the N-th full read in one session (`CONA_READ_STREAK`) — individually
-//!     innocent reads are how context leaks; no single-call rule sees the run
+//!   - re-read of a path already fully read this session (size-blind: the
+//!     bytes are already in context)
+//!   - the N-th full read in one session (`CONA_READ_STREAK`) — no
+//!     single-call rule sees a run of individually innocent reads
 
 use anyhow::Result;
 use std::sync::LazyLock;
@@ -35,15 +30,13 @@ mod tests;
 
 pub use markers::{file_age_secs, fires_on_cadence, LIVENESS_FILE, MARKER_MAX_AGE_SECS};
 
-/// The one builder for a hint payload: `additionalContext` carries text to the
-/// agent and decides nothing. Every hint path in cona — advisory, streak, nudge,
-/// re-nudge, compaction — emits exactly this shape and differs only in the event
-/// name, so it lives here rather than being spelled out at each site. (The
+/// The one builder for a hint payload: `additionalContext` carries text and
+/// decides nothing. Every hint path (advisory, streak, nudge, re-nudge,
+/// compaction) emits this shape, differing only in the event name. The
 /// `permissionDecision` sibling is deliberately NOT here: the redirect is the
-/// only decision cona ever emits and its single call site should stay visible.)
+/// only decision cona emits and its single call site should stay visible.
 ///
-/// Serialization of a two-field object cannot realistically fail; if it somehow
-/// does, an empty string means "no hint", which is the fail-open answer.
+/// If serialization somehow fails, an empty string means "no hint" (fail-open).
 pub fn additional_context(event: &str, ctx: &str) -> String {
     let payload = serde_json::json!({
         "hookSpecificOutput": {
@@ -65,11 +58,10 @@ pub use shell::{
 const NATIVE_TOOLS: &[&str] = &["Read", "Grep"];
 
 /// Tool names that carry one as a shell command line instead. A harness whose
-/// ONLY file tool is a shell (Codex runs `cat f` / `rg Foo` as
-/// `tool_name: "Bash"`) never emits a Read or Grep call — `classify_shell`
-/// recovers the intent from the command line and anything it does not
-/// recognise passes. Listing a tool cona then ignores costs one no-op hook
-/// run, missing one costs the whole tier.
+/// only file tool is a shell (Codex runs `cat f` / `rg Foo` as `Bash`) never
+/// emits Read/Grep — `classify_shell` recovers the intent; anything
+/// unrecognised passes. An extra name costs a no-op hook run, a missing one
+/// costs the whole tier.
 const SHELL_TOOLS: &[&str] = &[
     "Bash",
     "Shell",
@@ -80,12 +72,9 @@ const SHELL_TOOLS: &[&str] = &[
 ];
 
 /// The `PreToolUse` matcher admitting exactly the tools `try_pretooluse`
-/// dispatches on. Derived from the two lists above so the matcher and the
-/// dispatcher cannot drift: a name added to one is a name added to both.
-///
-/// `plugin/hooks/hooks.json` declares the SAME matcher for the plugin
-/// distribution path; `plugin_hook_matcher_matches_the_installer` pins them
-/// equal.
+/// dispatches on. Derived from the two lists above so matcher and dispatcher
+/// cannot drift. `plugin/hooks/hooks.json` declares the SAME matcher;
+/// `plugin_hook_matcher_matches_the_installer` pins them equal.
 pub static PRETOOL_MATCHER: LazyLock<String> = LazyLock::new(|| {
     NATIVE_TOOLS
         .iter()
@@ -105,43 +94,35 @@ pub const POSTTOOL_MATCHER: &str = "Edit|Write|MultiEdit|NotebookEdit";
 /// redirected to `cona outline`/`show`. Override with `CONA_READ_MAX_LINES`.
 const DEFAULT_MAX_LINES: i64 = 300;
 
-/// Default line threshold above which a full read is *advised* against (allowed,
-/// with a hint attached) rather than redirected. Sits below `DEFAULT_MAX_LINES`:
-/// a 150-line source file is ~1.5k tokens, and reading all of it to understand
-/// ONE function is the single most common way an agent wastes context — but it
-/// is also sometimes correct (about to rewrite the file), so this tier never
+/// Default line threshold above which a full read is *advised* against
+/// (allowed, with a hint) rather than redirected. A 150-line file is ~1.5k
+/// tokens, and reading it all for ONE function is the most common context
+/// waste — but sometimes correct (about to rewrite), so this tier never
 /// blocks. Override with `CONA_ADVISE_MIN_LINES`; 0 disables the tier.
 const DEFAULT_ADVISE_MIN_LINES: i64 = 120;
 
-/// Default number of allowed full reads in one session+project before the hook
-/// points out the pattern. Individually-innocent sub-threshold reads are how
-/// context actually drains (four 200-line reads = ~7k tokens for what a few
-/// `show` calls deliver in a few hundred). Override with `CONA_READ_STREAK`;
-/// 0 disables.
+/// Default number of full reads in one session+project before the hook points
+/// out the pattern: four 200-line reads = ~7k tokens for what a few `show`
+/// calls deliver in a few hundred. Override with `CONA_READ_STREAK`; 0 disables.
 const DEFAULT_READ_STREAK: i64 = 4;
 
 /// Default number of suppressed nudge-eligible events (large reads / broad
-/// greps in an UNINDEXED repo) between repeats of the "this repo isn't
-/// indexed" hint. The first one fires immediately; without a repeat, a hint
-/// dropped early in a long session is gone for good even though `cona index`
-/// stays a one-second fix the whole time. Override with `CONA_NUDGE_EVERY`;
-/// 0 = fire once per session and never repeat.
+/// greps in an UNINDEXED repo) between repeats of the "not indexed" hint. The
+/// first fires immediately; without repeats, a hint dropped early in a long
+/// session is gone for good. Override with `CONA_NUDGE_EVERY`; 0 = once per
+/// session.
 const DEFAULT_NUDGE_EVERY: i64 = 10;
 
 /// Default number of NARROW reads of the SAME file in one session before the
-/// hook points out that an outline would have given every symbol boundary in one
-/// call. Each such read is individually correct and always passes — the waste
-/// only exists as a pattern (four slices of one file re-pay the surrounding
-/// context four times and usually mean the agent is hunting for boundaries).
+/// hook suggests an outline. Each slice is individually correct and passes;
+/// the waste is the pattern (re-paying context while hunting for boundaries).
 /// Override with `CONA_PARTIAL_STREAK`; 0 disables.
 const DEFAULT_PARTIAL_STREAK: i64 = 3;
 
-/// Default cadence for the periodic re-nudge: OFF. Repeating the same guidance
-/// across SessionStart, the agent guide and a timer is over-constraint for
-/// current models — they hold the habit from one statement, and the PreToolUse
-/// redirect still catches an actual wrong Read/Grep. Opt in with
-/// `CONA_RENUDGE_EVERY=<n>` (n tool calls between reminders) on a model that
-/// drifts; 0 keeps it disabled.
+/// Default cadence for the periodic re-nudge: OFF. Current models hold the
+/// habit from one statement, and the PreToolUse redirect still catches a wrong
+/// Read/Grep. Opt in with `CONA_RENUDGE_EVERY=<n>` (tool calls between
+/// reminders) on a model that drifts.
 const DEFAULT_RENUDGE_EVERY: i64 = 0;
 
 /// What the hook should do about a candidate tool call.
@@ -152,13 +133,11 @@ pub enum Decision {
     /// Block and point at the faster cona path (project is indexed, so the
     /// redirect is actionable right now).
     Redirect,
-    /// Allow, but surface a one-time hint that indexing would unlock cona.
-    /// Used when the file/project is a good cona fit but not yet indexed —
-    /// the moment orientation help matters most (agent cold-opening a repo).
+    /// Allow, but surface a one-time hint that indexing would unlock cona
+    /// (good cona fit, not yet indexed — the cold-open case).
     Nudge,
-    /// Allow, but attach a hint that a symbol-scoped read would be cheaper.
-    /// Unlike `Redirect` this never blocks: the read may well be justified
-    /// (the agent is about to rewrite the file), so we inform and step aside.
+    /// Allow, but hint that a symbol-scoped read would be cheaper. Never
+    /// blocks: the read may be justified (about to rewrite the file).
     Advise,
 }
 
@@ -180,14 +159,12 @@ pub struct ReadFacts {
     pub max_lines: i64,
     /// Lower threshold above which we merely advise. 0 disables the tier.
     pub advise_min_lines: i64,
-    /// The language has functions/methods worth reading one at a time. False for
-    /// prose/data (Markdown, JSON, YAML…), where "read one symbol" is not real
-    /// advice — those files are read as prose or whole. Gates the advisory tier
-    /// only; a genuinely huge file still redirects on size alone.
+    /// The language has functions/methods worth reading one at a time. False
+    /// for prose/data (Markdown, JSON, YAML…). Gates the advisory tier only; a
+    /// huge file still redirects on size alone.
     pub callable: bool,
-    /// This exact file was already fully read earlier this session. Size-blind:
-    /// a re-read is redundant at any length, and it is the highest-confidence
-    /// waste signal available (the content is already in context).
+    /// This exact file was already fully read this session. Size-blind: the
+    /// highest-confidence waste signal (the content is already in context).
     pub reread: bool,
 }
 
@@ -201,11 +178,9 @@ pub fn decide_read(f: &ReadFacts) -> Decision {
     if f.partial || !f.is_code {
         return Decision::Allow;
     }
-    // Under the redirect threshold: a repeat full read is wasteful regardless of
-    // size (the bytes are already in context), and a mid-size file is worth a
-    // hint. Both only apply when indexed and callable — otherwise there is
-    // nothing useful to point at — and `advise_min_lines == 0` turns the whole
-    // advisory tier off, re-reads included.
+    // Under the redirect threshold: a re-read (any size) or a mid-size file is
+    // worth a hint — only when indexed and callable, else there is nothing to
+    // point at. `advise_min_lines == 0` turns the whole tier off, re-reads too.
     if f.lines <= f.max_lines {
         let advisable = f.indexed && f.callable && f.advise_min_lines > 0;
         if advisable && (f.reread || f.lines >= f.advise_min_lines) {
@@ -227,13 +202,11 @@ pub fn decide_read(f: &ReadFacts) -> Decision {
 #[derive(Debug, Clone)]
 pub struct GrepFacts {
     /// The Grep is already narrowed by a glob/type filter or a head_limit —
-    /// the agent is being surgical, and cona has nothing better to offer.
+    /// surgical, cona has nothing better to offer.
     pub surgical: bool,
-    /// The search is scoped to ONE file. Narrow, so it never blocks — but
-    /// "find this identifier inside this one file" is the highest-confidence
-    /// "I want a symbol" signal there is, and it is `cona show`/`refs` spelled
-    /// the long way: grep hands back a line number the agent must then slice
-    /// around, where `show` hands back the symbol. Advisory tier.
+    /// The search is scoped to ONE file. Never blocks, but it is the strongest
+    /// "I want a symbol" signal: grep returns a line number to slice around,
+    /// where `show` returns the symbol. Advisory tier.
     pub single_file: bool,
     /// The pattern is a plain identifier cona can serve semantically.
     pub identifier: bool,
@@ -241,9 +214,8 @@ pub struct GrepFacts {
     pub indexed_project: bool,
     /// The search root is inside a git repo (indexable, if not yet indexed).
     pub in_repo: bool,
-    /// The search is still broad but its OUTPUT is bounded (file list, counts,
-    /// context windows) — the agent already reached for restraint, so it gets
-    /// a hint instead of a block.
+    /// Broad search with BOUNDED output (file list, counts, context windows) —
+    /// already restrained, so a hint instead of a block.
     pub soft: bool,
 }
 
@@ -259,9 +231,9 @@ pub fn decide_grep(f: &GrepFacts) -> Decision {
     if f.surgical {
         return Decision::Allow;
     }
-    // A literal or regex (`dmf-primary-[a-z]*`, `foo.bar`) has no symbol for
-    // `refs` to answer, but `cona grep` still searches it code-only — worth a
-    // hint in an indexed project, never a block or an index nudge.
+    // A literal/regex (`dmf-primary-[a-z]*`, `foo.bar`) has no symbol for
+    // `refs`, but `cona grep` searches it code-only — a hint in an indexed
+    // project, never a block or nudge.
     if !f.identifier {
         return if f.indexed_project && !f.single_file {
             Decision::Advise
@@ -270,10 +242,9 @@ pub fn decide_grep(f: &GrepFacts) -> Decision {
         };
     }
     if f.indexed_project {
-        // `soft` and `single_file` are both "already restrained" — inform, never
-        // block. A single-file search in an UNINDEXED repo stays Allow rather
-        // than falling through to Nudge: too narrow to justify a hint for a
-        // whole-project index the agent hasn't asked for.
+        // `soft` and `single_file` are "already restrained" — inform, never
+        // block. A single-file search in an UNINDEXED repo stays Allow: too
+        // narrow to justify a whole-project index nudge.
         if f.soft || f.single_file {
             Decision::Advise
         } else {
@@ -286,9 +257,8 @@ pub fn decide_grep(f: &GrepFacts) -> Decision {
     }
 }
 
-/// Read an i64 tuning knob from the environment, ignoring anything unparseable
-/// or below `min` so a typo falls back to the default instead of disabling a
-/// tier silently. Every `CONA_*` threshold goes through here.
+/// Read an i64 `CONA_*` knob from the environment; unparseable or below-`min`
+/// values fall back to the default instead of silently disabling a tier.
 fn env_i64(key: &str, default: i64, min: i64) -> i64 {
     std::env::var(key)
         .ok()
@@ -317,9 +287,8 @@ fn renudge_every() -> i64 {
     env_i64("CONA_RENUDGE_EVERY", DEFAULT_RENUDGE_EVERY, 0)
 }
 
-/// Entry point for `cona hook <event>`. Reads the Claude hook payload from
-/// stdin and prints a decision to stdout. ALWAYS exits 0 — this is a helper for
-/// the agent, so a failure here must never break a tool call.
+/// Entry point for `cona hook <event>`: payload on stdin, decision on stdout.
+/// ALWAYS exits 0 — a failure here must never break a tool call.
 pub fn run(event: &str) -> Result<()> {
     if std::env::var("CONA_HOOK_DISABLE").is_ok() {
         return Ok(());

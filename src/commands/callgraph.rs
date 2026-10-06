@@ -7,10 +7,9 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Semantic tier for callees: an ambiguous call `name` at `call_line` inside
-/// caller `cur`'s body. Build candidates from the ambiguous def indices, feed
-/// their files as deps (cross-file), and ask the resolver to pick one. Returns
-/// the single resolved def index, or `None` (fail-open → stay ambiguous).
+/// Semantic tier for callees: resolve an ambiguous call `name` at `call_line`
+/// in `cur`'s body, feeding the candidate defs' files as deps. Returns the one
+/// resolved def index, or `None` (fail-open → stay ambiguous).
 fn resolve_callee(
     root: &Path,
     g: &graph::Graph,
@@ -71,9 +70,8 @@ fn resolve_callee(
     Some(one)
 }
 
-/// Load every indexed file + its symbol rows and build the in-memory call
-/// graph. Stale files are reindexed first (invariant 2: line numbers are
-/// never used blindly).
+/// Build the in-memory call graph from every indexed file. Stale files are
+/// reindexed first (invariant 2).
 fn build_graph(root: &Path, conn: &Connection) -> Result<(graph::Graph, HashMap<String, i64>)> {
     let mut stmt = conn.prepare("SELECT path, size FROM files ORDER BY path")?;
     let files: Vec<(String, i64)> = stmt
@@ -168,7 +166,6 @@ pub fn cmd_calls(
                 .filter_map(|(name, defs, call_line)| {
                     let mut defs = defs;
                     // ambiguous callee → try the semantic tier at the call site
-                    // inside `cur`'s body, narrowing to a single def.
                     if defs.len() > 1 {
                         if let Some(one) = resolve_callee(root, &g, cur, &name, call_line, &defs) {
                             defs = vec![one];

@@ -1,14 +1,12 @@
-//! `discover`: what past agent sessions in this project spent on reading and
+//! `discover`: what past agent sessions in this project spent reading and
 //! searching code by hand, and what cona would have cost instead.
 //!
-//! The hooks only see sessions where cona was installed, and the usage log
-//! only sees cona's own queries. Transcripts see everything: every Read,
-//! Grep and shell `cat`/`sed`/`rg` the agent ran, with the size of what came
-//! back. Claude Code keeps them under `~/.claude/projects/<encoded cwd>/`.
+//! Hooks and the usage log only see cona-enabled sessions; Claude Code
+//! transcripts (`~/.claude/projects/<encoded cwd>/`) see every Read, Grep and
+//! shell `cat`/`sed`/`rg`, with result sizes.
 //!
-//! Estimates stay conservative. A whole-file read is credited with what
-//! `outline` + one median-sized `show` of that file costs today; partial
-//! reads and greps are counted, never claimed as savings.
+//! Conservative: a whole-file read is credited with `outline` + one
+//! median-sized `show`; partial reads and greps are counted, never claimed.
 
 use crate::hook::{classify_command, split_pipeline, ShellIntent};
 use crate::{db, lang};
@@ -30,9 +28,8 @@ pub enum Event {
     Grep,
 }
 
-/// Map one tool_use (`name` + `input`) to the events it stands for — a shell
-/// line like `sed -n 1,80p a.rs; cona show X` is two. `cwd` resolves
-/// relative shell paths. Empty for calls that read no code.
+/// Map one tool_use to its events (`sed -n 1,80p a.rs; cona show X` is two).
+/// `cwd` resolves relative shell paths. Empty for calls that read no code.
 pub fn classify_tool_use(name: &str, input: &serde_json::Value, cwd: &Path) -> Vec<Event> {
     let s = |k: &str| input.get(k).and_then(|v| v.as_str());
     if name.starts_with("mcp__") && name.contains("cona") {
@@ -131,8 +128,8 @@ pub fn scan_transcript(text: &str) -> Vec<(Event, i64)> {
                     if let Some(events) = pending.remove(id) {
                         // A denied/failed call returned an error, not the file.
                         let failed = it.get("is_error").and_then(|b| b.as_bool()) == Some(true);
-                        // A compound line returns ONE output; it is charged to its
-                        // heaviest event (cona's share is unknowable, reads dominate).
+                        // a compound line's ONE output is charged to its heaviest
+                        // event (cona's share is unknowable, reads dominate)
                         let toks = db::est_tokens(result_chars(&it["content"]));
                         let weight = |e: &Event| match e {
                             Event::FullRead(_) => 3,
@@ -202,9 +199,9 @@ fn transcripts(root: &Path, days: i64) -> Vec<PathBuf> {
     found
 }
 
-/// What cona would have spent on a whole-file read of `rel`: its outline
-/// plus one median-sized symbol. `None` when the file is not indexed code
-/// with symbols — then cona has no cheaper answer and nothing is claimed.
+/// What cona would have spent instead of a whole-file read of `rel`: outline
+/// plus one median-sized symbol. `None` (nothing claimed) when the file is
+/// not indexed code with symbols.
 fn cona_estimate(root: &Path, conn: &Connection, rel: &str) -> Option<i64> {
     let lang: String = conn
         .query_row("SELECT lang FROM files WHERE path = ?1", [rel], |r| {

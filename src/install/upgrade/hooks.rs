@@ -8,8 +8,8 @@ use std::path::Path;
 /// `cona hooks install|uninstall` — project git hooks that re-index after
 /// commit/merge/checkout (the self-upgrade variant is refresh_upgrade_hooks).
 pub fn cmd_hooks(root: &Path, action: &str) -> Result<()> {
-    // Every other user-facing command prints its own title; this one does too,
-    // so a caller can never forget it. `cona hooks` adds a banner above it.
+    // Prints its own title like every user-facing command, so no caller can
+    // forget it.
     println!("{}", ui::heading("git hooks"));
     let hooks_dir = root.join(".git").join("hooks");
     if !hooks_dir.exists() {
@@ -43,11 +43,9 @@ pub fn cmd_hooks(root: &Path, action: &str) -> Result<()> {
     Ok(())
 }
 
-/// Needles identifying cona's index git-hook lines in a project repo.
-/// `index --quiet`, not `cona index`: the install line shell-quotes the
-/// absolute exe (`'/…/cona' index --quiet`), which `cona index` never matched —
-/// so uninstall left every project's git hooks behind. Same marker
-/// `append_hook_line` dedupes on.
+/// Needles identifying cona's index git-hook lines. `index --quiet`, not
+/// `cona index`: the line shell-quotes the exe (`'/…/cona' index --quiet`),
+/// which `cona index` never matched. Same marker `append_hook_line` dedupes on.
 pub(super) const CONA_HOOK_NEEDLES: &[&str] = &["index --quiet", "installed by cona"];
 
 /// Read-only twin of `strip_git_hook_lines`: does any hook file contain one of

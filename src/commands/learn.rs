@@ -1,7 +1,6 @@
 //! `learn`: mine the usage log for lookups that keep failing and say what
-//! would have worked. Misses get the closest indexed name, ambiguities the
-//! qualified forms that resolve them. The same table feeds `learned_hints`,
-//! the few lines SessionStart adds so the next session skips the retry.
+//! would have worked (closest name for misses, qualified forms for
+//! ambiguities). Also feeds `learned_hints` for SessionStart.
 
 use super::{locate_candidates, Located};
 use crate::{db, fuzzy};
@@ -9,8 +8,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 
-/// Commands whose `detail` is a symbol locator — the only ones a suggestion
-/// can be computed for. grep/outline targets are patterns/paths.
+/// Commands whose `detail` is a symbol locator (grep/outline targets are
+/// patterns/paths, so no suggestion is possible for them).
 const SYMBOL_CMDS: &[&str] = &[
     "show", "find", "refs", "context", "impact", "callers", "callees", "tests", "shape", "edit",
     "insert", "rename", "path",
@@ -192,9 +191,8 @@ fn clip_str(s: &str, max: usize) -> String {
     }
 }
 
-/// At most `max` lines for SessionStart: names that failed ≥2× in the last
-/// 30 days and now have a concrete fix. Empty when there is nothing worth
-/// the tokens — this rides every session start.
+/// At most `max` SessionStart lines: names that failed ≥2× in 30 days and now
+/// have a concrete fix. Rides every session start, so empty unless worth it.
 pub fn learned_hints(root: &Path, conn: &Connection, max: usize) -> Vec<String> {
     let Ok(g) = db::open_global_db() else {
         return vec![];

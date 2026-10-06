@@ -6,18 +6,16 @@ use crate::{db, ui};
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-/// `cona uninstall [--purge]`
-/// Reverses `install`: removes upgrade git hooks from the source repo,
-/// global agent files, the installed binary and the recorded paths.
-/// `--purge` additionally deletes ~/.cona (all indexes + stats).
-/// Which parts of a cona install to tear down. Built either from the
-/// interactive checklist or (non-interactive) from flags + safe defaults.
+/// Which parts of a cona install to tear down: from the interactive checklist,
+/// or from flags + safe defaults.
 pub(super) struct UninstallPlan {
     agents: bool, // per-project + global agent configs & git hooks
     binary: bool, // the installed binary
     purge: bool,  // delete ~/.cona (indexes + stats)
 }
 
+/// `cona uninstall [--purge]` — reverses `install`: upgrade git hooks, agent
+/// files, binary, recorded paths. `--purge` also deletes ~/.cona.
 pub fn cmd_uninstall(purge: bool, yes: bool) -> Result<()> {
     use std::io::IsTerminal;
     let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
@@ -122,8 +120,8 @@ pub fn cmd_uninstall(purge: bool, yes: bool) -> Result<()> {
     Ok(())
 }
 
-/// Strip cona from every registered project (agent files + git hooks) and the
-/// global home configs. Returns what was actually cleaned, for the summary.
+/// Strip cona from every registered project and the home configs. Returns
+/// what was cleaned, for the summary.
 pub(super) fn remove_all_agents(home: &Path) -> Result<Vec<String>> {
     let mut removed = Vec::new();
 
@@ -146,8 +144,7 @@ pub(super) fn remove_all_agents(home: &Path) -> Result<Vec<String>> {
         if !root.is_dir() {
             continue;
         }
-        // Skip registered-but-clean projects entirely — otherwise every one
-        // floods the output with an empty heading + "nothing to do".
+        // Skip clean projects — each would print an empty heading.
         if !crate::install::agents::project_has_cona(root)
             && !git_hooks_have(&root.join(".git/hooks"), CONA_HOOK_NEEDLES)
         {
@@ -196,8 +193,7 @@ pub(super) fn remove_binary() -> Result<usize> {
                     "{}",
                     ui::ok(&format!("removed  {}", short_path(Path::new(&dst))))
                 );
-                // the resolve helper is installed beside the binary — take it
-                // along, or uninstall leaks it (uninstall.sh already does this)
+                // take the sibling resolve helper too (as uninstall.sh does)
                 if let Some(dir) = Path::new(&dst).parent() {
                     let helper = dir.join(HELPER_EXE);
                     if helper.exists() && std::fs::remove_file(&helper).is_ok() {

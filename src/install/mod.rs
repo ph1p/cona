@@ -1,16 +1,12 @@
 //! Installation, upgrade and agent integration.
 //!
-//! `install` — copy the binary into a bin dir, remember the source
-//!             checkout, wire git hooks in the source repo so the
-//!             installed binary rebuilds itself on code changes.
-//! `upgrade` — rebuild from the recorded source checkout when the
-//!             sources are newer than the installed binary; otherwise
-//!             check crates.io (≤1×/day in the background) and update
-//!             to the newest release (git pull + rebuild for source
-//!             installs, prebuilt release binary else, cargo fallback).
-//! `agents`  — inject the usage guide, skill, hooks and MCP entry into every
-//!             supported agent config (the roster is `agents::AgentName`) —
-//!             idempotent, marker-based, uninstallable.
+//! `install` — copy the binary into a bin dir, remember the source checkout,
+//!             wire git hooks there so the binary rebuilds on code changes.
+//! `upgrade` — rebuild from the source checkout when it is newer; otherwise
+//!             check crates.io (≤1×/day, background) and update (git pull +
+//!             rebuild, else prebuilt release binary, else cargo).
+//! `agents`  — inject guide, skill, hooks and MCP entry into every agent
+//!             config (`agents::AgentName`) — idempotent, marker-based.
 
 use crate::ui;
 use anyhow::{anyhow, bail, Result};
@@ -20,18 +16,16 @@ use std::path::{Component, Path, PathBuf};
 pub const BLOCK_BEGIN: &str = "<!-- cona:begin -->";
 pub const BLOCK_END: &str = "<!-- cona:end -->";
 
-/// The semantic-resolve helper binary name (`.exe`-suffixed on Windows). One
-/// source of truth for the release packaging, install/upgrade, and the resolve
-/// module's discovery + auto-fetch.
+/// The semantic-resolve helper binary name. One source of truth for release
+/// packaging, install/upgrade and the resolve module's discovery + auto-fetch.
 pub const HELPER_EXE: &str = if cfg!(windows) {
     "cona-resolve-helper.exe"
 } else {
     "cona-resolve-helper"
 };
 
-/// Release-artifact target triple for this platform, or `None` if there is no
-/// prebuilt for it. The single source used by both the self-upgrade download
-/// and the resolve helper auto-fetch — keep them from drifting.
+/// Release-artifact target triple for this platform, `None` without a prebuilt.
+/// Single source for self-upgrade and the resolve helper auto-fetch.
 pub fn release_target() -> Option<&'static str> {
     Some(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
@@ -43,9 +37,8 @@ pub fn release_target() -> Option<&'static str> {
     })
 }
 
-/// GitHub repo the release artifacts live under. The single source for both
-/// the self-upgrade download and the resolve helper auto-fetch — a rename
-/// here must not leave a second hardcoded copy behind.
+/// GitHub repo of the release artifacts. Single source for self-upgrade and
+/// the resolve helper auto-fetch — never hardcode a second copy.
 pub const GITHUB_REPO: &str = "ph1p/cona";
 pub const USER_AGENT: &str = concat!(
     "cona/",
@@ -63,9 +56,8 @@ pub fn release_ext() -> &'static str {
 }
 
 /// Download the `v{ver}` release archive for `target` and extract it into
-/// `tmp` (created if missing). The one download/extract path shared by
-/// self-upgrade and the resolve helper auto-fetch; callers pick files out of
-/// `tmp` and clean it up themselves.
+/// `tmp`. Shared by self-upgrade and the resolve helper auto-fetch; callers
+/// pick files out of `tmp` and clean it up.
 pub fn fetch_release_archive(ver: &str, target: &str, tmp: &Path) -> Result<()> {
     let ext = release_ext();
     let url = format!(
@@ -77,13 +69,10 @@ pub fn fetch_release_archive(ver: &str, target: &str, tmp: &Path) -> Result<()> 
     let checksum = tmp.join("cona.sha256");
     let result = (|| {
         download_to(&url, &archive)?;
-        // Verification is mandatory: this archive's `cona` is renamed over the
-        // user's own executable, so an unverified binary must never be
-        // installed. Every release publishes the sidecar (release.yml), and a
-        // hard error here is not a dead end — the caller falls back to
-        // `install_via_cargo`, which builds from source. Fetch quietly so a
-        // missing sidecar doesn't spew `curl: (56) … 404` before our own
-        // message.
+        // Verification is mandatory: this `cona` replaces the user's
+        // executable. Every release publishes the sidecar (release.yml), and
+        // the caller falls back to `install_via_cargo` on error. Fetch quietly
+        // so a missing sidecar doesn't print a curl 404 first.
         download_quiet(&checksum_url, &checksum)
             .map_err(|_| anyhow!("no release checksum for v{ver} ({target}) — refusing to install an unverified binary"))?;
         verify_sha256(&archive, &checksum)?;
@@ -168,11 +157,10 @@ fn verify_sha256(archive: &Path, checksum_file: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Opt-in SLSA provenance check, the same knob install.sh honours:
-/// `CONA_VERIFY_ATTESTATION=1` verifies (via the `gh` CLI) that the archive
-/// was built by this repo's release workflow. Off by default — it needs an
-/// authenticated `gh` — but once asked for, failure is fatal: the user opted
-/// into the stronger check, so silently downgrading would defeat it.
+/// Opt-in SLSA provenance check, same knob as install.sh:
+/// `CONA_VERIFY_ATTESTATION=1` verifies via `gh` that this repo's release
+/// workflow built the archive. Off by default (needs an authenticated `gh`),
+/// but once asked for, failure is fatal — a silent downgrade would defeat it.
 fn verify_attestation(archive: &Path) -> Result<()> {
     if std::env::var("CONA_VERIFY_ATTESTATION").as_deref() != Ok("1") {
         return Ok(());
@@ -330,16 +318,14 @@ impl Change {
     }
 }
 
-/// Single-quote a value for splicing into a shell command line (git hook
-/// lines, settings.json hook commands — both are executed through a shell):
-/// an install path with spaces or quotes would otherwise produce a broken
-/// line that fires on every commit / tool call.
+/// Single-quote a value for a shell command line (git hooks, settings.json
+/// hook commands): a path with spaces or quotes would otherwise break a line
+/// that fires on every commit / tool call.
 pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Write `content` to `path` only if it differs from what's already there.
-/// Creates parent directories as needed. Returns what actually happened.
+/// Write `content` to `path` only if it differs; creates parent dirs.
 pub(crate) fn write_if_changed(path: &Path, content: &str) -> Result<Change> {
     let existed = path.exists();
     if existed {
@@ -360,25 +346,21 @@ pub(crate) fn write_if_changed(path: &Path, content: &str) -> Result<Change> {
     })
 }
 
-/// One recorded status line, kept as DATA (never as pre-rendered text): what
-/// was touched, what happened to it, where. Every question a caller asks —
-/// "did anything move?", "group by label", "did a claude target move?" — reads
-/// a field, so no caller ever parses a colored/padded string back apart.
-/// Rendering happens once, in `render`, at print time; a quiet run that records
-/// 100+ marks and prints none pays nothing for display.
+/// One recorded status line, kept as DATA, not pre-rendered text: callers
+/// ask questions ("did anything move?", "group by label") by reading fields,
+/// never by parsing colored strings. `render` runs only at print time, so a
+/// quiet run pays nothing for display.
 pub(crate) struct Mark {
     pub label: &'static str,
     pub verb: &'static str,
-    /// Why this row went the way it did ("plugin has it") — rendered after the
-    /// path, and a row that carries one always gets its own line.
+    /// Why ("plugin has it") — rendered after the path; such a row always
+    /// gets its own line.
     pub why: Option<&'static str>,
     pub path: PathBuf,
 }
 
-/// Width of `render`'s label column. A label longer than this pushes its row's
-/// verb and path out of line with every other row, so it is a real constraint
-/// on what a caller may name a target — `agents::label_widths_fit_the_column`
-/// pins it.
+/// Width of `render`'s label column. A longer label breaks the row alignment,
+/// so it constrains target names — `agents::label_widths_fit_the_column` pins it.
 pub(crate) const LABEL_COL: usize = 14;
 
 impl Mark {
@@ -396,8 +378,7 @@ impl Mark {
             "removed" => ui::yellow(&padded),
             _ => ui::dim(&padded),
         };
-        // The reason trails the path, so a long one never shoves its row out
-        // of the columns.
+        // The reason trails the path so a long one keeps the columns aligned.
         let tail = self
             .why
             .map(|r| format!("  {}", ui::dim(&format!("· {r}"))))
@@ -411,23 +392,17 @@ impl Mark {
 }
 
 /// Shorten `path` for display: under the cwd → `./…`, under `$HOME` → `~/…`,
-/// else unchanged. A full absolute path per line is mostly noise — the
-/// interesting part is the tail, and long temp/checkout prefixes push it off
-/// the screen.
+/// else unchanged — long temp/checkout prefixes push the useful tail off screen.
 ///
-/// Matching is symlink-tolerant, in three attempts, cheapest first:
-/// 1. as spelled — the common case (the path was *built* by joining onto the
-///    anchor), and it costs zero syscalls;
-/// 2. both sides fully resolved — on macOS the cwd reports as `/private/tmp/x`
-///    while a path built from args is `/tmp/x` (or vice versa), which a plain
-///    `strip_prefix` misses;
-/// 3. as spelled under the resolved anchor — an anchor reached via symlink
-///    whose subtree contains a *further* symlink, so the resolved path leaves
-///    the subtree entirely and (2) fails.
+/// Symlink-tolerant, three attempts, cheapest first:
+/// 1. as spelled — the common case (path built by joining onto the anchor),
+///    zero syscalls;
+/// 2. both sides resolved — macOS reports cwd as `/private/tmp/x` while a
+///    path built from args is `/tmp/x` (or vice versa);
+/// 3. as spelled under the resolved anchor — the anchor is a symlink and its
+///    subtree holds a *further* symlink, so (2) leaves the subtree.
 ///
-/// Canonicalization is lazy: attempt 1 short-circuits before any of it. For a
-/// path that no longer exists (a just-removed file) `canonicalize` fails and
-/// the resolved value is the original, collapsing (2) and (3).
+/// A missing path (just removed) fails `canonicalize`, collapsing (2) and (3).
 /// Falls back to the absolute path — never to a wrong relative one.
 pub(crate) fn short_path(path: &Path) -> String {
     let rel_to = |base: &Path| -> Option<String> {
@@ -469,8 +444,7 @@ pub(crate) fn short_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Record what happened to one target. Pure — no formatting, no filesystem;
-/// display is `Mark::render`'s job, and a quiet caller never pays for it.
+/// Record what happened to one target. Pure; display is `Mark::render`'s job.
 pub(crate) fn mark(done: &mut Vec<Mark>, label: &'static str, verb: &'static str, path: &Path) {
     mark_why(done, label, verb, None, path);
 }
@@ -506,16 +480,14 @@ mod tests {
         // The anchors themselves render bare (`~`, `.`), never as "~/" / "./".
         assert_eq!(short_path(&home), "~");
         assert_eq!(short_path(&std::env::current_dir().unwrap()), ".");
-        // A path under neither anchor stays fully qualified: better a long line
-        // than a relative path pointing somewhere else.
+        // A path under neither anchor stays fully qualified.
         let foreign = Path::new("/definitely/not/here/x.md");
         assert_eq!(short_path(foreign), "/definitely/not/here/x.md");
     }
 
     #[test]
     fn short_path_prefers_cwd_over_home() {
-        // cona runs from inside the repo, so cwd is the more specific anchor;
-        // a file below it must read ./… even when it is also under $HOME.
+        // cwd is the more specific anchor: ./… wins even under $HOME.
         let cwd = std::env::current_dir().expect("cwd");
         let got = short_path(&cwd.join("Cargo.toml"));
         assert_eq!(got, "./Cargo.toml", "cwd-relative should win, got {got}");
