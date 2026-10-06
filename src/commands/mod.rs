@@ -6,6 +6,7 @@
 pub mod callgraph;
 pub mod history;
 pub mod insight;
+mod learn;
 pub mod mcp_server;
 pub mod mutate;
 pub mod query;
@@ -14,6 +15,7 @@ pub mod stats;
 pub use callgraph::*;
 pub use history::*;
 pub use insight::*;
+pub use learn::{cmd_learn, learned_hints};
 pub use mcp_server::*;
 pub use mutate::*;
 pub use query::*;
@@ -91,7 +93,19 @@ pub fn finish(root: &Path, cmd: &str, t0: Instant, out: &str, baseline_tokens: i
     // query can never claim to have "saved" more than those files cost.
     let saved = (baseline_tokens - tokens_out).max(0);
     let results = out.lines().count() as i64;
-    db::log_usage_detail(root, cmd, ms, results, tokens_out, saved, detail);
+    let outcome = db::outcome_of_output(out);
+    db::log_usage_outcome(root, cmd, ms, results, tokens_out, saved, detail, outcome);
+}
+
+/// Log a query that errored (unknown symbol, ambiguity, bad args). Without
+/// it a failed lookup leaves no trace and `cona learn` has nothing to mine.
+pub fn finish_err(root: &Path, cmd: &str, t0: Instant, detail: &str, err: &anyhow::Error) {
+    if db::is_read_only() {
+        return;
+    }
+    let ms = t0.elapsed().as_millis() as i64;
+    let outcome = db::outcome_of_error(&err.to_string());
+    db::log_usage_outcome(root, cmd, ms, 0, 0, 0, detail, outcome);
 }
 
 /// The `--json` return shape every query command shares: one JSON line + the

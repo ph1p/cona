@@ -365,6 +365,19 @@ pub struct StatsArgs {
 }
 
 #[derive(clap::Args)]
+pub struct LearnArgs {
+    /// Look back this many days
+    #[arg(long, default_value_t = 30)]
+    pub days: i64,
+    /// Every project (no suggestions — those need the project's index)
+    #[arg(long)]
+    pub all: bool,
+    /// Max rows
+    #[arg(long, default_value_t = 20)]
+    pub limit: i64,
+}
+
+#[derive(clap::Args)]
 pub struct TidyArgs {
     /// Also remove indexes for projects whose directory no longer exists
     #[arg(long)]
@@ -623,6 +636,8 @@ pub enum Project {
     Tidy(TidyArgs),
     /// Live TUI dashboard: index state + token savings in real time
     Ui,
+    /// Lookups that keep failing (unknown/ambiguous names) and what works instead
+    Learn(LearnArgs),
 }
 
 /// Long help for `doctor`. A const rather than an inline attribute because
@@ -752,6 +767,8 @@ pub enum Cmd {
     TidyFlat(TidyArgs),
     #[command(name = "ui", hide = true)]
     UiFlat,
+    #[command(name = "learn", hide = true)]
+    LearnFlat(LearnArgs),
     #[command(name = "doctor", hide = true, long_about = DOCTOR_ABOUT)]
     DoctorFlat,
     #[command(name = "setup", hide = true)]

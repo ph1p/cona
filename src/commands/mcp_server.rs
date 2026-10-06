@@ -729,7 +729,15 @@ pub fn cmd_mcp(root: &Path) -> Result<()> {
                     conn.get_or_init(|| c)
                 }
             };
-            mcp_call(root, conn, name, args)
+            let t0 = Instant::now();
+            mcp_call(root, conn, name, args).inspect_err(|e| {
+                // the first string argument naming a target — what stats key on
+                let detail = ["symbol", "name", "file", "pattern", "from"]
+                    .iter()
+                    .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                finish_err(root, &format!("mcp:{name}"), t0, detail, e);
+            })
         },
     )
 }

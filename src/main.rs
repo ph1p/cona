@@ -129,7 +129,7 @@ fn run() -> Result<()> {
         Cmd::Nav(Nav::Outline(a)) | Cmd::Outline(a) => {
             let OutlineArgs { files, sig } = a;
             queried(&root, t0, "outline", &files.join(" "), |conn| {
-                each(files, cli.json, |f| {
+                each(&root, "outline", files, cli.json, |f| {
                     cmd_outline(&root, conn, f, *sig, cli.json)
                 })
             })?;
@@ -142,7 +142,7 @@ fn run() -> Result<()> {
                 path,
             } = a;
             queried(&root, t0, "find", &names.join(" "), |conn| {
-                each(names, cli.json, |name| {
+                each(&root, "find", names, cli.json, |name| {
                     cmd_find(
                         &root,
                         conn,
@@ -191,7 +191,10 @@ fn run() -> Result<()> {
                         resolved.push(symbol);
                     }
                     // one bad name must not abort the batch — flag it and continue
-                    Err(e) => out.push_str(&format!("error: {symbol}: {e}\n")),
+                    Err(e) => {
+                        finish_err(&root, "show", t0, symbol, &e);
+                        out.push_str(&format!("error: {symbol}: {e}\n"))
+                    }
                 }
             }
             print!("{out}");
@@ -420,6 +423,18 @@ fn run() -> Result<()> {
             };
             print!("{out}");
         }
+        Cmd::Project(Project::Learn(a)) | Cmd::LearnFlat(a) => {
+            let LearnArgs { days, all, limit } = a;
+            let conn = if *all {
+                None
+            } else {
+                Some(open_indexed(&root)?)
+            };
+            print!(
+                "{}",
+                cmd_learn(&root, conn.as_ref(), *days, *limit, cli.json)?
+            );
+        }
         Cmd::Project(Project::Ui) | Cmd::UiFlat => {
             dashboard::run(&root)?;
         }
@@ -577,6 +592,8 @@ fn run() -> Result<()> {
 /// keeps its exact output; several are concatenated (text) or wrapped in a
 /// JSON array, and one bad target is flagged without aborting the rest.
 fn each(
+    root: &Path,
+    cmd: &str,
     targets: &[String],
     json: bool,
     mut one: impl FnMut(&str) -> Result<(String, i64)>,
@@ -585,8 +602,13 @@ fn each(
         return one(t);
     }
     let (mut parts, mut baseline) = (Vec::new(), 0i64);
+    let t0 = Instant::now();
     for t in targets {
-        match one(t) {
+        let r = one(t);
+        if let Err(e) = &r {
+            finish_err(root, cmd, t0, t, e);
+        }
+        match r {
             Ok((o, b)) => {
                 parts.push(o.trim_end().to_string());
                 baseline += b;
@@ -613,7 +635,7 @@ fn queried(
     body: impl FnOnce(&rusqlite::Connection) -> Result<(String, i64)>,
 ) -> Result<()> {
     let conn = open_indexed(root)?;
-    let (out, baseline) = body(&conn)?;
+    let (out, baseline) = body(&conn).inspect_err(|e| finish_err(root, cmd, t0, target, e))?;
     print!("{out}");
     finish(root, cmd, t0, &out, baseline, target);
     Ok(())
@@ -656,6 +678,8 @@ fn read_only_command(cmd: &Cmd) -> bool {
             | Cmd::Project(Project::Projects)
             | Cmd::StatsFlat(_)
             | Cmd::ProjectsFlat
+            | Cmd::Project(Project::Learn(_))
+            | Cmd::LearnFlat(_)
     )
 }
 
@@ -745,6 +769,15 @@ fn session_start_context(
             "So far cona has saved ~{} tokens on this project (`cona stats` for the breakdown).\n",
             fmt_count(saved)
         ));
+    }
+    // Names that kept failing here, with what resolves them — saves the
+    // retry the last sessions paid for. Usually empty.
+    let hints = learned_hints(root, conn, 3);
+    if !hints.is_empty() {
+        ctx.push_str("Lookups that failed here before:\n");
+        for h in hints {
+            ctx.push_str(&format!("- {h}\n"));
+        }
     }
     ctx.push_str("\nMost-referenced symbols (your orientation map):\n\n");
     ctx.push_str(&map);

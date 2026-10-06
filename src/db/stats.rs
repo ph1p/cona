@@ -118,8 +118,7 @@ pub fn recent(
 ) -> Result<Vec<RecentRow>> {
     let (mut where_, params) = scope_clause(project);
     if queries_only {
-        // keep in lockstep with is_maintenance_cmd
-        let filter = "cmd NOT IN ('index','edit','rename','note') AND cmd NOT LIKE 'hook:%'";
+        let filter = QUERY_FILTER;
         where_ = if where_.is_empty() {
             format!(" WHERE {filter}")
         } else {
@@ -170,4 +169,60 @@ pub fn human_bytes(n: i64) -> String {
     } else {
         format!("{v:.1} {}", U[i])
     }
+}
+
+/// SQL twin of `is_maintenance_cmd` — keep the two in lockstep.
+const QUERY_FILTER: &str = "cmd NOT IN ('index','edit','rename','note') AND cmd NOT LIKE 'hook:%'";
+
+fn and_clause(project: Option<&str>, extra: &str) -> (String, Vec<String>) {
+    let (where_, params) = scope_clause(project);
+    let w = if where_.is_empty() {
+        format!(" WHERE {extra}")
+    } else {
+        format!("{where_} AND {extra}")
+    };
+    (w, params)
+}
+
+/// Failed queries per command: (cmd, failed calls), where failed = any
+/// non-empty `outcome` (miss/ambiguous/empty/error).
+pub fn failures_per_command(g: &Connection, project: Option<&str>) -> Result<Vec<(String, i64)>> {
+    let (where_, params) = and_clause(project, "outcome <> ''");
+    let sql = format!("SELECT cmd, COUNT(*) FROM usage{where_} GROUP BY cmd");
+    let mut stmt = g.prepare(&sql)?;
+    let p = rusqlite::params_from_iter(params.iter());
+    let rows = stmt
+        .query_map(p, |r| Ok((r.get(0)?, r.get(1)?)))?
+        .flatten()
+        .collect();
+    Ok(rows)
+}
+
+/// Failed-query row for `cona learn`: (cmd, detail, outcome, count, last ts).
+pub type FailureRow = (String, String, String, i64, i64);
+
+/// Recurring failed lookups, most frequent first — `cona learn`'s input.
+pub fn failed_queries(
+    g: &Connection,
+    project: Option<&str>,
+    since_ts: i64,
+    limit: i64,
+) -> Result<Vec<FailureRow>> {
+    let (where_, params) = and_clause(
+        project,
+        &format!("outcome <> '' AND detail <> '' AND ts >= {since_ts}"),
+    );
+    let sql = format!(
+        "SELECT REPLACE(cmd, 'mcp:', ''), detail, outcome, COUNT(*), MAX(ts)
+         FROM usage{where_} GROUP BY 1, 2, 3 ORDER BY 4 DESC, 5 DESC LIMIT {limit}"
+    );
+    let mut stmt = g.prepare(&sql)?;
+    let p = rusqlite::params_from_iter(params.iter());
+    let rows = stmt
+        .query_map(p, |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .flatten()
+        .collect();
+    Ok(rows)
 }

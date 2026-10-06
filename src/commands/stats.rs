@@ -172,14 +172,28 @@ fn stats_section(
     if queries.is_empty() {
         out.push_str("  (no queries recorded yet)\n");
     } else {
+        let failed: std::collections::HashMap<String, i64> =
+            db::failures_per_command(g, scope_ref)?
+                .into_iter()
+                .collect();
         out.push_str(&format!(
-            "  {:<16} {:>6} {:>8} {:>11} {:>12}\n",
-            "cmd", "calls", "avg ms", "tokens out", "tokens saved"
+            "  {:<16} {:>6} {:>6} {:>8} {:>11} {:>12}\n",
+            "cmd", "calls", "failed", "avg ms", "tokens out", "tokens saved"
         ));
         for (cmd, n, ms, tout, tsav) in &queries {
+            let f = failed.get(cmd).copied().unwrap_or(0);
             out.push_str(&format!(
-                "  {:<16} {:>6} {:>8.0} {:>11} {:>12}\n",
-                cmd, n, ms, tout, tsav
+                "  {:<16} {:>6} {:>6} {:>8.0} {:>11} {:>12}\n",
+                cmd,
+                n,
+                if f == 0 {
+                    "-".to_string()
+                } else {
+                    f.to_string()
+                },
+                ms,
+                tout,
+                tsav
             ));
         }
     }

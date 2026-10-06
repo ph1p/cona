@@ -26,10 +26,27 @@ pub fn log_usage_detail(
     tokens_saved: i64,
     detail: &str,
 ) {
+    log_usage_outcome(root, cmd, ms, results, tokens_out, tokens_saved, detail, "");
+}
+
+/// The one INSERT. `outcome` is `""` for a query that answered, else one of
+/// `outcome_of_output`/`outcome_of_error` — the failure signal `cona learn`
+/// and the per-command miss rate read back.
+#[allow(clippy::too_many_arguments)]
+pub fn log_usage_outcome(
+    root: &Path,
+    cmd: &str,
+    ms: i64,
+    results: i64,
+    tokens_out: i64,
+    tokens_saved: i64,
+    detail: &str,
+    outcome: &str,
+) {
     if let Ok(g) = open_global_db() {
         let _ = g.execute(
-            "INSERT INTO usage(ts, project, cmd, ms, results, tokens_out, tokens_saved, detail)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO usage(ts, project, cmd, ms, results, tokens_out, tokens_saved, detail, outcome)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 now(),
                 root.to_string_lossy(),
@@ -38,9 +55,34 @@ pub fn log_usage_detail(
                 results,
                 tokens_out,
                 tokens_saved.max(0),
-                detail
+                detail,
+                outcome
             ],
         );
+    }
+}
+
+/// Outcome of a query that returned Ok: the empty-result renders every query
+/// command prints instead of hits. `""` = it answered.
+pub fn outcome_of_output(out: &str) -> &'static str {
+    let first = out.trim_start();
+    let empty = ["no match", "no references to", "no symbols indexed"];
+    if empty.iter().any(|p| first.starts_with(p)) {
+        "empty"
+    } else {
+        ""
+    }
+}
+
+/// Outcome of a query that failed — keyed on the messages `locate_rows` /
+/// `locate_symbol_kind` raise, so a miss and an ambiguity stay separable.
+pub fn outcome_of_error(msg: &str) -> &'static str {
+    if msg.contains("ambiguous '") {
+        "ambiguous"
+    } else if msg.contains("not found") {
+        "miss"
+    } else {
+        "error"
     }
 }
 

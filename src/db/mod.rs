@@ -289,6 +289,13 @@ pub fn open_global_db() -> Result<Connection> {
     if !column_exists(&conn, "usage", "detail")? {
         conn.execute_batch("ALTER TABLE usage ADD COLUMN detail TEXT NOT NULL DEFAULT ''")?;
     }
+    // migration: `outcome` separates answered queries ('') from misses,
+    // ambiguities, empty results and errors — the input of `cona learn`.
+    if !column_exists(&conn, "usage", "outcome")? {
+        conn.execute_batch("ALTER TABLE usage ADD COLUMN outcome TEXT NOT NULL DEFAULT ''")?;
+    }
+    // hook-conversion stats probe "a query in this project shortly after ts"
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS usage_project_ts ON usage(project, ts)")?;
     Ok(conn)
 }
 

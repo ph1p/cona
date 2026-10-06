@@ -165,3 +165,55 @@ fn usage_row_cap_deletes_oldest() {
         .unwrap();
     assert_eq!(min_id, 7); // oldest ids 1..=6 gone, newest 7..=10 kept
 }
+
+#[test]
+fn outcomes_classified() {
+    assert_eq!(outcome_of_output("fn foo  a.rs:1-3\n"), "");
+    assert_eq!(outcome_of_output("no match for 'x'\n"), "empty");
+    assert_eq!(outcome_of_output("  no references to Foo\n"), "empty");
+    assert_eq!(outcome_of_error("symbol 'Foo' not found"), "miss");
+    assert_eq!(
+        outcome_of_error("ambiguous 'run' — 3 candidates"),
+        "ambiguous"
+    );
+    assert_eq!(outcome_of_error("permission denied"), "error");
+}
+
+/// A usage table with the full current schema, filled from
+/// (ts, project, cmd, tokens_saved, detail, outcome).
+fn usage_with(rows: &[(i64, &str, &str, i64, &str, &str)]) -> Connection {
+    let g = Connection::open_in_memory().unwrap();
+    g.execute_batch(
+        "CREATE TABLE usage(id INTEGER PRIMARY KEY, ts INTEGER, project TEXT, cmd TEXT,
+         ms INTEGER DEFAULT 0, results INTEGER DEFAULT 0, tokens_out INTEGER DEFAULT 0,
+         tokens_saved INTEGER, detail TEXT, outcome TEXT)",
+    )
+    .unwrap();
+    for (ts, p, cmd, saved, detail, outcome) in rows {
+        g.execute(
+            "INSERT INTO usage(ts, project, cmd, tokens_saved, detail, outcome)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![ts, p, cmd, saved, detail, outcome],
+        )
+        .unwrap();
+    }
+    g
+}
+#[test]
+fn failed_queries_group_and_respect_since() {
+    let g = usage_with(&[
+        (10, "/p", "show", 0, "Old", "miss"), // before `since`
+        (100, "/p", "show", 0, "Foo", "miss"),
+        (110, "/p", "mcp:show", 0, "Foo", "miss"), // same lookup via MCP
+        (120, "/p", "refs", 0, "run", "ambiguous"),
+        (130, "/p", "show", 5, "Bar", ""), // answered
+    ]);
+    let rows = failed_queries(&g, Some("/p"), 50, 10).unwrap();
+    assert_eq!(rows[0].0, "show");
+    assert_eq!(
+        (rows[0].1.as_str(), rows[0].2.as_str(), rows[0].3),
+        ("Foo", "miss", 2)
+    );
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.1 != "Old" && r.1 != "Bar"));
+}
