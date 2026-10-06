@@ -62,7 +62,7 @@ struct Resolved {
     defs: Vec<Def>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Def {
     /// File the definition resolved to. With cross-file resolution this may be
     /// a dep file's path, not the primary file. Older helpers omit it → "".
@@ -225,44 +225,87 @@ pub fn resolve_refs(lang: &str, path: &str, source: &str, refs: &[Ref]) -> Optio
     resolve_refs_in(lang, path, source, refs, &[])
 }
 
-/// Process-lifetime cache of helper responses, keyed by a hash of
-/// (lang, primary path+mtime, dep paths+mtimes, refs). The helper is one-shot
-/// (a fresh process rebuilds the whole stack graph each spawn), so caching the
-/// RESPONSE here is what makes a repeated ambiguous query within one cona
-/// invocation free — the "mtime-keyed cache" roadmap item, kept fail-open and
-/// entirely cona-side so the helper stays a stateless subprocess.
+/// Cache of helper responses, keyed by a hash of everything the answer
+/// depends on: (lang, primary path+source, refs, dep paths+sources, helper
+/// binary). Two tiers. In memory for the process — what makes a repeated
+/// ambiguous query within one MCP session or one `rename` free. On disk under
+/// `<data_dir>/resolve-cache/` across processes: the TS/TSX helper spends
+/// ~0.7s compiling its TSG rules on EVERY spawn, so without it each CLI
+/// `context` on a TSX file paid 1–2s for an answer that only changes when the
+/// sources do. Content-keyed (not mtime), so a stale hit is impossible and
+/// the key does not depend on the cwd the paths are relative to.
 type CacheMap = std::collections::HashMap<u64, Option<Vec<Vec<Def>>>>;
 fn response_cache() -> &'static std::sync::Mutex<CacheMap> {
     static CACHE: OnceLock<std::sync::Mutex<CacheMap>> = OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(CacheMap::new()))
 }
 
-/// mtime of a file as nanos since epoch, or 0 if unknown (unknown → the key
-/// still differs from a known-mtime key, so we never serve a stale hit for a
-/// file we couldn't stat; worst case we just recompute).
-fn mtime_key(path: &str) -> u64 {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+/// Disk entries kept before the cache directory is cleared wholesale — a
+/// cheap bound; a cleared entry costs one helper spawn to rebuild.
+const DISK_CACHE_MAX: usize = 2000;
+
+fn disk_cache_dir() -> Option<PathBuf> {
+    crate::db::data_dir().ok().map(|d| d.join("resolve-cache"))
 }
 
-fn cache_key(lang: &str, path: &str, refs: &[Ref], deps: &[DepFile]) -> u64 {
+fn disk_get(key: u64) -> Option<Vec<Vec<Def>>> {
+    let f = disk_cache_dir()?.join(format!("{key:016x}.json"));
+    serde_json::from_slice(&std::fs::read(f).ok()?).ok()
+}
+
+/// Best effort: a failed write only means the next call spawns again.
+fn disk_put(key: u64, defs: &[Vec<Def>]) {
+    if crate::db::is_read_only() {
+        return;
+    }
+    let Some(dir) = disk_cache_dir() else {
+        return;
+    };
+    // every 64th write checks the bound, so the common path is one write
+    if key.is_multiple_of(64) && std::fs::read_dir(&dir).is_ok_and(|rd| rd.count() > DISK_CACHE_MAX)
+    {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(bytes) = serde_json::to_vec(defs) {
+        let _ = std::fs::write(dir.join(format!("{key:016x}.json")), bytes);
+    }
+}
+
+/// Identity of the helper binary (path, size, mtime): an upgraded helper may
+/// resolve differently, so its answers must not be served from the old one's.
+fn helper_identity() -> (String, u64, u64) {
+    let Some(p) = helper_path() else {
+        return Default::default();
+    };
+    let m = std::fs::metadata(p).ok();
+    let mtime = m
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    (
+        p.to_string_lossy().into_owned(),
+        m.map_or(0, |m| m.len()),
+        mtime,
+    )
+}
+
+fn cache_key(lang: &str, path: &str, source: &str, refs: &[Ref], deps: &[DepFile]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     lang.hash(&mut h);
     path.hash(&mut h);
-    mtime_key(path).hash(&mut h);
+    source.hash(&mut h);
     for r in refs {
         r.line.hash(&mut h);
         r.name.hash(&mut h);
     }
     for d in deps {
         d.path.hash(&mut h);
-        mtime_key(&d.path).hash(&mut h);
+        d.source.hash(&mut h);
     }
+    helper_identity().hash(&mut h);
     h.finish()
 }
 
@@ -333,13 +376,24 @@ pub fn resolve_refs_in(
     if refs.is_empty() || !lang_supported(lang) {
         return None;
     }
-    let key = cache_key(lang, path, refs, deps);
+    let key = cache_key(lang, path, source, refs, deps);
     if let Ok(cache) = response_cache().lock() {
         if let Some(hit) = cache.get(&key) {
             return hit.clone();
         }
     }
-    let result = resolve_refs_uncached(lang, path, source, refs, deps);
+    // Only answers are persisted: a `None` is a missing or failing helper,
+    // which may be fixed by the next call.
+    let result = match disk_get(key) {
+        Some(hit) => Some(hit),
+        None => {
+            let r = resolve_refs_uncached(lang, path, source, refs, deps);
+            if let Some(defs) = &r {
+                disk_put(key, defs);
+            }
+            r
+        }
+    };
     if let Ok(mut cache) = response_cache().lock() {
         cache.insert(key, result.clone());
     }
@@ -420,22 +474,35 @@ mod tests {
             line: 1,
             name: "foo".into(),
         }];
-        let base = cache_key("typescript", "a.ts", &r, &[]);
+        let key = |lang, path, src, refs: &[Ref], deps: &[DepFile]| {
+            cache_key(lang, path, src, refs, deps)
+        };
+        let base = key("typescript", "a.ts", "s", &r, &[]);
         // same inputs → same key (deterministic)
-        assert_eq!(base, cache_key("typescript", "a.ts", &r, &[]));
-        // language, path, ref, and dep-set each shift the key
-        assert_ne!(base, cache_key("javascript", "a.ts", &r, &[]));
-        assert_ne!(base, cache_key("typescript", "b.ts", &r, &[]));
+        assert_eq!(base, key("typescript", "a.ts", "s", &r, &[]));
+        // language, path, source, ref, and dep-set each shift the key
+        assert_ne!(base, key("javascript", "a.ts", "s", &r, &[]));
+        assert_ne!(base, key("typescript", "b.ts", "s", &r, &[]));
+        assert_ne!(base, key("typescript", "a.ts", "t", &r, &[]));
         let r2 = [Ref {
             line: 2,
             name: "foo".into(),
         }];
-        assert_ne!(base, cache_key("typescript", "a.ts", &r2, &[]));
+        assert_ne!(base, key("typescript", "a.ts", "s", &r2, &[]));
         let deps = [DepFile {
             path: "b.ts".into(),
             source: "x".into(),
         }];
-        assert_ne!(base, cache_key("typescript", "a.ts", &r, &deps));
+        assert_ne!(base, key("typescript", "a.ts", "s", &r, &deps));
+        // an edited dep is a different answer, not a stale hit
+        let edited = [DepFile {
+            path: "b.ts".into(),
+            source: "y".into(),
+        }];
+        assert_ne!(
+            key("typescript", "a.ts", "s", &r, &deps),
+            key("typescript", "a.ts", "s", &r, &edited)
+        );
     }
 
     #[test]
