@@ -446,6 +446,11 @@ fn run() -> Result<()> {
                 cmd_learn(&root, conn.as_ref(), *days, *limit, cli.json)?
             );
         }
+        Cmd::Project(Project::Discover(a)) | Cmd::DiscoverFlat(a) => {
+            let DiscoverArgs { days, limit } = a;
+            let conn = open_indexed(&root)?;
+            print!("{}", cmd_discover(&root, &conn, *days, *limit, cli.json)?);
+        }
         Cmd::Project(Project::Ui) | Cmd::UiFlat => {
             dashboard::run(&root)?;
         }
@@ -691,6 +696,8 @@ fn read_only_command(cmd: &Cmd) -> bool {
             | Cmd::ProjectsFlat
             | Cmd::Project(Project::Learn(_))
             | Cmd::LearnFlat(_)
+            | Cmd::Project(Project::Discover(_))
+            | Cmd::DiscoverFlat(_)
     )
 }
 

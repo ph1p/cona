@@ -53,7 +53,9 @@ cona edit open_project_db --file new.rs   # replace it, syntax-verified
 | `cona impact <Sym>`       | Before an edit: refs, callers, tests, history                  |
 | `cona insert <Sym> [--after]` | Add code before/after a symbol (stdin or `--file`), syntax-verified |
 | `cona rename <Sym> <new>` | Project-wide rename, collision-guarded, all-or-nothing         |
-| `cona stats` / `cona ui`  | Tokens saved (text / live TUI)                                 |
+| `cona stats` / `cona ui`  | Tokens saved (text / live TUI); `--daily`/`--weekly` trend     |
+| `cona learn`              | Lookups that keep failing, and what would have worked          |
+| `cona discover`           | Scan Claude transcripts for reads cona could have answered     |
 | `cona doctor`             | Check the installation                                         |
 
 Handy flags:

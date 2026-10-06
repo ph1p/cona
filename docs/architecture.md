@@ -66,6 +66,13 @@ src/commands/    cmd_* implementations, split by concern:
                  history.rs blame/hot/coupling
                  callgraph.rs callers/callees/path + build_graph
                  stats.rs, mcp_server.rs (mcp_tools/mcp_call/cmd_mcp)
+                 learn.rs `learn` (usage.outcome ≠ '' grouped → fix:
+                          resolves now / closest (fuzzy) / qualified forms) +
+                          learned_hints for SessionStart
+                 discover.rs `discover` (Claude transcripts: tool_use paired
+                          with tool_result; shell lines classified per segment
+                          via hook::classify_command; full reads of callable
+                          files priced against outline + median symbol span)
 src/lang/        Language detection + tree-sitter symbol extraction: mod.rs
                  (detect_lang/language_for/parse/extract_symbols), classify.rs
                  (node-kind table), names.rs (naming heuristics), walk.rs
@@ -168,9 +175,13 @@ src/resolve.rs   Optional semantic resolution tier (fail-open): spawns
                  JSON, refs addressed by (line, name). Request carries optional
                  `deps` (extra files stitched into the SAME stack graph →
                  cross-file resolution); resolved defs report their `file`.
-                 resolve_refs caches process-wide, keyed (lang, path+mtime,
-                 deps+mtimes, refs) — repeated ambiguity in one run is free;
-                 helper stays stateless. Binary discovery:
+                 resolve_refs caches in memory AND on disk
+                 (<data_dir>/resolve-cache/<key>.json, cleared past 2000
+                 entries), keyed by CONTENT (lang, path, source hash, dep
+                 source hashes, refs, helper path+size+mtime) — the TS helper
+                 pays ~0.7s TSG compile per spawn, so a repeat `context` across
+                 processes is free; only Some results persist, read-only mode
+                 never writes; helper stays stateless. Binary discovery:
                  CONA_RESOLVE_HELPER → sibling path → PATH; missing/crash/
                  unsupported → None (caller keeps name-based result).
                  resolve::disambiguate = THE shared policy (context AND

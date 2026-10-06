@@ -115,7 +115,7 @@ pub fn split_segments(cmd: &str) -> Option<Vec<String>> {
 /// previous one's output through a single `|`. A piped `sort`/`cut`/`grep -v`
 /// only filters what came before and reads no file of its own, so
 /// `classify_shell` can treat it as neutral instead of unrecognised.
-fn split_pipeline(cmd: &str) -> Option<Vec<(String, bool)>> {
+pub fn split_pipeline(cmd: &str) -> Option<Vec<(String, bool)>> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut piped = false;

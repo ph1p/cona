@@ -384,6 +384,16 @@ pub struct LearnArgs {
 }
 
 #[derive(clap::Args)]
+pub struct DiscoverArgs {
+    /// Look back this many days
+    #[arg(long, default_value_t = 30)]
+    pub days: i64,
+    /// Max files listed
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
+}
+
+#[derive(clap::Args)]
 pub struct TidyArgs {
     /// Also remove indexes for projects whose directory no longer exists
     #[arg(long)]
@@ -644,6 +654,8 @@ pub enum Project {
     Ui,
     /// Lookups that keep failing (unknown/ambiguous names) and what works instead
     Learn(LearnArgs),
+    /// Scan past agent sessions for whole-file reads/greps cona could have answered
+    Discover(DiscoverArgs),
 }
 
 /// Long help for `doctor`. A const rather than an inline attribute because
@@ -775,6 +787,8 @@ pub enum Cmd {
     UiFlat,
     #[command(name = "learn", hide = true)]
     LearnFlat(LearnArgs),
+    #[command(name = "discover", hide = true)]
+    DiscoverFlat(DiscoverArgs),
     #[command(name = "doctor", hide = true, long_about = DOCTOR_ABOUT)]
     DoctorFlat,
     #[command(name = "setup", hide = true)]

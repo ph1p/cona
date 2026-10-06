@@ -4,6 +4,7 @@
 //! this module root.
 
 pub mod callgraph;
+mod discover;
 pub mod history;
 pub mod insight;
 mod learn;
@@ -13,6 +14,7 @@ pub mod query;
 pub mod stats;
 
 pub use callgraph::*;
+pub use discover::cmd_discover;
 pub use history::*;
 pub use insight::*;
 pub use learn::{cmd_learn, learned_hints};

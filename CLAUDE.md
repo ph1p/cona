@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 248 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
+cargo test                   # 269 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -43,7 +43,9 @@ src/commands/    cmd_* impls: mod.rs (shared helpers + `defaults` = THE limits +
                  the `--path` policy), query/ (one file per read command:
                  tree/outline/find/show/refs/context/diff/grep), mutate.rs
                  (edit/insert/note/rename + write_verified), insight.rs,
-                 history.rs, callgraph.rs, stats.rs, mcp_server.rs
+                 history.rs, callgraph.rs, stats.rs, mcp_server.rs,
+                 learn.rs (failed lookups → fix; feeds SessionStart hints),
+                 discover.rs (Claude transcripts → missed cona chances)
 src/lang/        Language detection + tree-sitter symbol extraction. 30+ langs
                  with symbols, incl. markup (XML/HTML elements named
                  `tag#identity`); refs/grep-only for JSON/Svelte/Vue/…
@@ -276,7 +278,7 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
 
 ## Statistics schema (global.db)
 
-`usage(ts, project, cmd, ms, results, tokens_out, tokens_saved, detail)` —
+`usage(ts, project, cmd, ms, results, tokens_out, tokens_saved, detail, outcome)` —
 every query logs via `db::log_usage`/`log_usage_detail`. `tokens_saved` =
 baseline − actual output, clamped ≥0. Baseline = **grep-then-Read** model
 (`db::baseline_tokens`): grep pass (≈free) + targeted Read window
@@ -345,3 +347,16 @@ Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
 `insert` `rename` `note` `check` — is listed in `cona --help`, with details per
 group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).
 <!-- cona:end -->
+`outcome` ('' ok / `empty` / `miss` / `ambiguous` / `error`, guarded
+migration, index `usage_project_ts`) feeds `stats`' failed column and
+`cona learn` (recurring failures + closest name / qualified forms; ≥2× in
+30d with a concrete fix → ≤3 lines in the SessionStart context).
+`hook_conversion` = share of hook hints followed by a cona query in the same
+project within `CONVERSION_WINDOW_SECS` (time-correlated, not session-exact).
+Orientation baseline (`tree`) is capped at `ORIENT_BASELINE_CAP` (20k) via
+`db::orient_baseline`; `SAVED_SUM` applies the same cap retroactively to old
+rows in every aggregate. `stats --daily/--weekly` = `savings_series`.
+`cona discover` reads `~/.claude/projects/<dir>/**/*.jsonl` (read-only, never
+logged elsewhere) and reports full code reads cona could have answered.
+`scripts/bench/ab.sh` = honest A/B (claude -p, control vs cona arm, costs API
+money — never run in CI).

@@ -57,8 +57,8 @@ pub fn additional_context(event: &str, ctx: &str) -> String {
     }
 }
 pub use shell::{
-    classify_command, classify_shell, shell_words, split_segments, unwrap_shell_wrapper,
-    ShellIntent,
+    classify_command, classify_shell, shell_words, split_pipeline, split_segments,
+    unwrap_shell_wrapper, ShellIntent,
 };
 
 /// Tool names that carry a file read or search directly, as their own tool.
