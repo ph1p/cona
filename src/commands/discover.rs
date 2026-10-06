@@ -28,6 +28,15 @@ pub enum Event {
     Grep,
 }
 
+/// Native separators throughout, like the index stores them: a shell line's
+/// `src/a.rs` joined onto a Windows cwd would otherwise keep its `/`.
+fn native_path(p: &Path) -> String {
+    p.components()
+        .collect::<PathBuf>()
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Map one tool_use to its events (`sed -n 1,80p a.rs; cona show X` is two).
 /// `cwd` resolves relative shell paths. Empty for calls that read no code.
 pub fn classify_tool_use(name: &str, input: &serde_json::Value, cwd: &Path) -> Vec<Event> {
@@ -40,7 +49,7 @@ pub fn classify_tool_use(name: &str, input: &serde_json::Value, cwd: &Path) -> V
             Some(_) if input.get("offset").is_some() || input.get("limit").is_some() => {
                 vec![Event::PartialRead]
             }
-            Some(p) => vec![Event::FullRead(p.to_string())],
+            Some(p) => vec![Event::FullRead(native_path(Path::new(p)))],
             None => vec![],
         },
         "Grep" => vec![Event::Grep],
@@ -64,9 +73,9 @@ fn classify_line(cmd: &str, cwd: &Path) -> Vec<Event> {
                 return Some(Event::Cona);
             }
             match classify_command(seg) {
-                ShellIntent::Read { path, upto: None } => Some(Event::FullRead(
-                    cwd.join(path).to_string_lossy().into_owned(),
-                )),
+                ShellIntent::Read { path, upto: None } => {
+                    Some(Event::FullRead(native_path(&cwd.join(path))))
+                }
                 ShellIntent::Read { .. }
                 | ShellIntent::Slice { .. }
                 | ShellIntent::PartialRead { path: Some(_) } => Some(Event::PartialRead),
@@ -372,7 +381,7 @@ mod tests {
         let ev = |name: &str, input| classify_tool_use(name, &input, cwd);
         assert_eq!(
             ev("Read", json!({"file_path": "/p/a.rs"})),
-            [Event::FullRead("/p/a.rs".into())]
+            [Event::FullRead(native_path(Path::new("/p/a.rs")))]
         );
         assert_eq!(
             ev("Read", json!({"file_path": "/p/a.rs", "limit": 20})),
@@ -382,7 +391,7 @@ mod tests {
         assert_eq!(ev("mcp__plugin_cona_cona__show", json!({})), [Event::Cona]);
         assert_eq!(
             ev("Bash", json!({"command": "cat src/a.rs"})),
-            [Event::FullRead("/p/src/a.rs".into())]
+            [Event::FullRead(native_path(Path::new("/p/src/a.rs")))]
         );
         // compound line: each segment counts; a pipe filters, it reads no file
         assert_eq!(
@@ -408,7 +417,10 @@ mod tests {
         .map(|v| v.to_string())
         .join("\n");
         let ev = scan_transcript(&t);
-        assert_eq!(ev[0], (Event::FullRead("/p/a.rs".into()), 100));
+        assert_eq!(
+            ev[0],
+            (Event::FullRead(native_path(Path::new("/p/a.rs"))), 100)
+        );
         // a denied read never put the file in context
         assert_eq!(ev[1], (Event::PartialRead, 0));
     }
