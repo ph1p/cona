@@ -199,6 +199,31 @@ fn usage_with(rows: &[(i64, &str, &str, i64, &str, &str)]) -> Connection {
     }
     g
 }
+
+#[test]
+fn hook_conversion_counts_a_query_inside_the_window_only() {
+    let g = usage_with(&[
+        (100, "/p", "hook:read-block", 0, "a.rs", ""),
+        (130, "/p", "show", 10, "Foo", ""), // follows the first hook
+        (1000, "/p", "hook:read-block", 0, "b.rs", ""),
+        (
+            1000 + CONVERSION_WINDOW_SECS + 1,
+            "/p",
+            "show",
+            10,
+            "Bar",
+            "",
+        ), // too late
+        (2000, "/p", "hook:grep-block", 0, "x", ""),
+        (2010, "/q", "show", 10, "Foo", ""), // other project
+        (2020, "/p", "index", 0, "", ""),    // maintenance, not a query
+    ]);
+    let rows = hook_conversion(&g, Some("/p")).unwrap();
+    let get = |c: &str| rows.iter().find(|r| r.0 == c).map(|r| (r.1, r.2));
+    assert_eq!(get("hook:read-block"), Some((2, 1)));
+    assert_eq!(get("hook:grep-block"), Some((1, 0)));
+}
+
 #[test]
 fn failed_queries_group_and_respect_since() {
     let g = usage_with(&[

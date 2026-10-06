@@ -197,12 +197,18 @@ fn stats_section(
             ));
         }
     }
+    let (hooks, maint): (Vec<_>, Vec<_>) = maint
+        .into_iter()
+        .partition(|(cmd, ..)| cmd.starts_with("hook:"));
     if !maint.is_empty() {
         let parts: Vec<String> = maint
             .iter()
             .map(|(cmd, n, ms, ..)| format!("{cmd} {n}× (avg {ms:.0}ms)"))
             .collect();
         out.push_str(&format!("  maintenance {}\n", parts.join(" · ")));
+    }
+    if !hooks.is_empty() {
+        out.push_str(&hook_conversion_line(g, scope_ref)?);
     }
 
     // top targets
@@ -228,4 +234,21 @@ fn stats_section(
         }
     }
     Ok(())
+}
+
+/// One line: every hook outcome with how often a cona query followed it
+/// (`db::hook_conversion`). The number to watch when tuning hook cadence.
+fn hook_conversion_line(g: &Connection, scope: Option<&str>) -> Result<String> {
+    let parts: Vec<String> = db::hook_conversion(g, scope)?
+        .into_iter()
+        .map(|(cmd, n, followed)| {
+            let pct = if n > 0 { followed * 100 / n } else { 0 };
+            format!("{} {n}× → {pct}%", cmd.trim_start_matches("hook:"))
+        })
+        .collect();
+    Ok(format!(
+        "  hooks (→ % followed by a cona query within {}s) {}\n",
+        db::CONVERSION_WINDOW_SECS,
+        parts.join(" · ")
+    ))
 }

@@ -204,6 +204,43 @@ pub fn failures_per_command(g: &Connection, project: Option<&str>) -> Result<Vec
     Ok(rows)
 }
 
+/// Seconds after a hook hint in which a cona query counts as "followed".
+pub const CONVERSION_WINDOW_SECS: i64 = 120;
+
+/// Hook conversion row: (hook cmd, fired, followed by a cona query).
+pub type ConversionRow = (String, i64, i64);
+
+/// How often each hook outcome was followed by a cona query in the same
+/// project within `CONVERSION_WINDOW_SECS`. Hooks log with a session id the
+/// CLI never sees, so this is time-correlated, not session-exact: two
+/// sessions in one repo can credit each other. It is a trend metric — a hint
+/// that converts 5% of the time is noise the agent pays tokens to read.
+pub fn hook_conversion(g: &Connection, project: Option<&str>) -> Result<Vec<ConversionRow>> {
+    let (where_, params) = scope_clause(project);
+    let where_ = where_.replace("project", "h.project");
+    let hook = if where_.is_empty() {
+        " WHERE h.cmd LIKE 'hook:%'".to_string()
+    } else {
+        format!("{where_} AND h.cmd LIKE 'hook:%'")
+    };
+    let follow = QUERY_FILTER.replace("cmd", "q.cmd");
+    let sql = format!(
+        "SELECT h.cmd, COUNT(*),
+                SUM(EXISTS(SELECT 1 FROM usage q
+                           WHERE q.project = h.project
+                             AND q.ts BETWEEN h.ts AND h.ts + {CONVERSION_WINDOW_SECS}
+                             AND q.id > h.id AND {follow}))
+         FROM usage h{hook} GROUP BY h.cmd ORDER BY COUNT(*) DESC"
+    );
+    let mut stmt = g.prepare(&sql)?;
+    let p = rusqlite::params_from_iter(params.iter());
+    let rows = stmt
+        .query_map(p, |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .flatten()
+        .collect();
+    Ok(rows)
+}
+
 /// Failed-query row for `cona learn`: (cmd, detail, outcome, count, last ts).
 pub type FailureRow = (String, String, String, i64, i64);
 
