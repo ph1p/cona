@@ -241,6 +241,42 @@ pub fn hook_conversion(g: &Connection, project: Option<&str>) -> Result<Vec<Conv
     Ok(rows)
 }
 
+/// Bucket width for `savings_series`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bucket {
+    Day,
+    Week,
+}
+
+/// Savings-over-time row: (bucket label, queries, tokens_out, tokens_saved).
+pub type SeriesRow = (String, i64, i64, i64);
+
+/// Query savings per day/week (local time), newest first, `limit` buckets.
+pub fn savings_series(
+    g: &Connection,
+    project: Option<&str>,
+    bucket: Bucket,
+    limit: i64,
+) -> Result<Vec<SeriesRow>> {
+    let fmt = match bucket {
+        Bucket::Day => "%Y-%m-%d",
+        Bucket::Week => "%Y-W%W",
+    };
+    let (where_, params) = and_clause(project, QUERY_FILTER);
+    let sql = format!(
+        "SELECT strftime('{fmt}', ts, 'unixepoch', 'localtime') AS b, COUNT(*),
+                COALESCE(SUM(tokens_out),0), {SAVED_SUM}
+         FROM usage{where_} GROUP BY b ORDER BY b DESC LIMIT {limit}"
+    );
+    let mut stmt = g.prepare(&sql)?;
+    let p = rusqlite::params_from_iter(params.iter());
+    let rows = stmt
+        .query_map(p, |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .flatten()
+        .collect();
+    Ok(rows)
+}
+
 /// Failed-query row for `cona learn`: (cmd, detail, outcome, count, last ts).
 pub type FailureRow = (String, String, String, i64, i64);
 

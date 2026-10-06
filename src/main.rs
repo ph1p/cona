@@ -415,8 +415,19 @@ fn run() -> Result<()> {
             })?;
         }
         Cmd::Project(Project::Stats(a)) | Cmd::StatsFlat(a) => {
-            let StatsArgs { project } = a;
-            let out = if cli.json {
+            let StatsArgs {
+                project,
+                daily,
+                weekly,
+            } = a;
+            let bucket = match (daily, weekly) {
+                (true, _) => Some(db::Bucket::Day),
+                (_, true) => Some(db::Bucket::Week),
+                _ => None,
+            };
+            let out = if let Some(b) = bucket {
+                cmd_stats_series(&root, *project, b, cli.json)?
+            } else if cli.json {
                 cmd_stats_json(&root, *project)?
             } else {
                 cmd_stats(&root, *project)?

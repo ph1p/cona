@@ -252,3 +252,66 @@ fn hook_conversion_line(g: &Connection, scope: Option<&str>) -> Result<String> {
         parts.join(" · ")
     ))
 }
+
+/// `stats --daily/--weekly`: savings per bucket, newest first.
+pub fn cmd_stats_series(
+    root: &Path,
+    project_only: bool,
+    bucket: db::Bucket,
+    json: bool,
+) -> Result<String> {
+    let g = db::open_global_db()?;
+    let limit = match bucket {
+        db::Bucket::Day => 14,
+        db::Bucket::Week => 12,
+    };
+    let root_str = root.to_string_lossy().to_string();
+    let mut scopes: Vec<(&str, Option<&str>)> = vec![("this project", Some(&root_str))];
+    if !project_only {
+        scopes.push(("all projects", None));
+    }
+    let word = match bucket {
+        db::Bucket::Day => "day",
+        db::Bucket::Week => "week",
+    };
+    if json {
+        let mut obj = serde_json::Map::new();
+        for (_, scope) in scopes {
+            let rows: Vec<_> = db::savings_series(&g, scope, bucket, limit)?
+                .into_iter()
+                .map(|(b, n, tout, tsav)| {
+                    serde_json::json!({word: b, "queries": n, "tokens_out": tout, "tokens_saved": tsav})
+                })
+                .collect();
+            let key = if scope.is_some() { "project" } else { "global" };
+            obj.insert(key.into(), rows.into());
+        }
+        return Ok(format!("{}\n", serde_json::Value::Object(obj)));
+    }
+    let mut out = String::new();
+    for (label, scope) in scopes {
+        let rows = db::savings_series(&g, scope, bucket, limit)?;
+        out.push_str(&format!("── savings by {word} · {label} ──\n"));
+        if rows.is_empty() {
+            out.push_str("  (no queries recorded yet)\n");
+            continue;
+        }
+        let max = rows.iter().map(|r| r.3).max().unwrap_or(0).max(1);
+        out.push_str(&format!(
+            "  {:<10} {:>7} {:>11} {:>12}  {:>4}\n",
+            word, "queries", "tokens out", "tokens saved", "%"
+        ));
+        for (b, n, tout, tsav) in rows {
+            let pct = if tout + tsav > 0 {
+                tsav * 100 / (tout + tsav)
+            } else {
+                0
+            };
+            let bar = "▇".repeat(((tsav * 20) / max) as usize);
+            out.push_str(&format!(
+                "  {b:<10} {n:>7} {tout:>11} {tsav:>12}  {pct:>3}%  {bar}\n"
+            ));
+        }
+    }
+    Ok(out)
+}

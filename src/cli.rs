@@ -362,6 +362,12 @@ pub struct StatsArgs {
     /// Only current project
     #[arg(long)]
     pub project: bool,
+    /// Savings per day (last 14 days)
+    #[arg(long, conflicts_with = "weekly")]
+    pub daily: bool,
+    /// Savings per week (last 12 weeks)
+    #[arg(long)]
+    pub weekly: bool,
 }
 
 #[derive(clap::Args)]
