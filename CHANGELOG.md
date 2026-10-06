@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.33](https://github.com/ph1p/cona/compare/v0.0.32...v0.0.33) - 2026-10-06
+
+### Added
+
+- tighten code comments across the codebase
+- *(discover)* find missed cona lookups in Claude transcripts
+- *(stats)* add --daily and --weekly savings series
+- *(stats)* show how often hook hints convert
+- *(learn)* log query outcomes and suggest fixes for failed lookups
+
+### Fixed
+
+- *(discover)* use native path separators for transcript reads
+- *(stats)* cap the tree baseline and add an A/B benchmark
+
+### Other
+
+- *(resolve)* persist stack-graphs results on disk
+
 ## [0.0.32](https://github.com/ph1p/cona/compare/v0.0.31...v0.0.32) - 2026-10-04
 
 ### Added
