@@ -1,0 +1,8 @@
+# id<TAB>answer regex (case-insensitive ERE)<TAB>prompt
+# Read-only questions about THIS repo. Each has one checkable answer, so a
+# pass is the agent finding it, not the grader agreeing with prose.
+hash-fn	fnv	Which hash algorithm does db::project_hash use? Answer in one line.
+grep-default	literal	Does `cona grep` match its pattern literally or as a regex by default? Answer with one word, then one sentence of evidence.
+edit-guard	(syntax|parse)	What stops `cona edit` from writing a file, unless --force is given? One sentence.
+read-cap	max_file_bytes	Which constant in the indexer bounds how large a file may be to get indexed? Give its name only.
+orient-cap	20[_,]?000	What is the value of the cap on the modeled baseline of an orientation (tree) query? Number only.

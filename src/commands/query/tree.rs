@@ -52,7 +52,7 @@ pub fn cmd_tree(
                 .push(serde_json::json!({"file": p, "kind": k, "symbol": q, "start": s, "end": e}));
         }
         let out = format!("{}\n", serde_json::to_string(&items)?);
-        return Ok((out, db::est_tokens(bytes as usize)));
+        return Ok((out, db::orient_baseline(bytes as usize)));
     }
 
     let mut bo = BudgetOut::new(String::new(), budget);
@@ -79,7 +79,7 @@ pub fn cmd_tree(
         bo.push_always("no symbols indexed — run `cona index`\n");
     }
     let out = bo.finish("… truncated (raise --budget or filter with --path)\n");
-    Ok((out, db::est_tokens(bytes as usize)))
+    Ok((out, db::orient_baseline(bytes as usize)))
 }
 
 /// Rank top-level symbols by reference fan-in: identifier occurrences of the
@@ -167,8 +167,9 @@ pub fn cmd_tree_rank(
             .then_with(|| a.1.path.cmp(&b.1.path))
     });
 
-    // Baseline: ranking required reading every indexed file once.
-    let baseline = db::est_tokens(bytes);
+    // Baseline: ranking required reading every indexed file once — capped,
+    // nobody reads a whole large repo to orient.
+    let baseline = db::orient_baseline(bytes);
     if json {
         let items: Vec<_> = ranked
             .iter()

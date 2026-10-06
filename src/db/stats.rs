@@ -37,10 +37,16 @@ fn scope_clause(project: Option<&str>) -> (String, Vec<String>) {
     }
 }
 
+/// `SUM(tokens_saved)` with the orientation cap applied to rows logged
+/// before `ORIENT_BASELINE_CAP` existed, so old uncapped `tree` rows stop
+/// dominating every total (one 500-file tree once claimed 700k).
+pub(crate) const SAVED_SUM: &str = "COALESCE(SUM(CASE WHEN cmd IN ('tree','mcp:tree') \
+     THEN MIN(tokens_saved, 20000) ELSE tokens_saved END),0)";
+
 pub fn totals(g: &Connection, project: Option<&str>) -> Result<Totals> {
     let (where_, params) = scope_clause(project);
     let sql = format!(
-        "SELECT COUNT(*), COALESCE(SUM(tokens_out),0), COALESCE(SUM(tokens_saved),0),
+        "SELECT COUNT(*), COALESCE(SUM(tokens_out),0), {SAVED_SUM},
                 COALESCE(SUM(CASE WHEN cmd LIKE 'hook:%-block' THEN 1 ELSE 0 END),0),
                 COALESCE(SUM(ms),0)
          FROM usage{where_}"
@@ -65,7 +71,7 @@ pub type CommandRow = (String, i64, f64, i64, i64);
 pub fn per_command(g: &Connection, project: Option<&str>) -> Result<Vec<CommandRow>> {
     let (where_, params) = scope_clause(project);
     let sql = format!(
-        "SELECT cmd, COUNT(*), AVG(ms), COALESCE(SUM(tokens_out),0), COALESCE(SUM(tokens_saved),0)
+        "SELECT cmd, COUNT(*), AVG(ms), COALESCE(SUM(tokens_out),0), {SAVED_SUM}
          FROM usage{where_} GROUP BY cmd ORDER BY COUNT(*) DESC"
     );
     let mut stmt = g.prepare(&sql)?;
@@ -92,7 +98,7 @@ pub fn top_targets(
         where_.push_str(" AND detail <> ''");
     }
     let sql = format!(
-        "SELECT detail, COUNT(*), COALESCE(SUM(tokens_saved),0)
+        "SELECT detail, COUNT(*), {SAVED_SUM}
          FROM usage{where_} GROUP BY detail ORDER BY COUNT(*) DESC, 3 DESC LIMIT {limit}"
     );
     let mut stmt = g.prepare(&sql)?;

@@ -217,3 +217,17 @@ fn failed_queries_group_and_respect_since() {
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|r| r.1 != "Old" && r.1 != "Bar"));
 }
+
+#[test]
+fn old_tree_rows_are_capped_in_totals() {
+    let g = usage_with(&[
+        (1, "/p", "tree", 700_000, "", ""),
+        (2, "/p", "show", 100, "Foo", ""),
+    ]);
+    let t = totals(&g, Some("/p")).unwrap();
+    assert_eq!(t.tokens_saved, ORIENT_BASELINE_CAP + 100);
+    // the SQL literal and the constant must agree
+    assert!(SAVED_SUM.contains(&ORIENT_BASELINE_CAP.to_string()));
+    assert_eq!(orient_baseline(4 * 1_000_000), ORIENT_BASELINE_CAP);
+    assert_eq!(orient_baseline(400), 100);
+}

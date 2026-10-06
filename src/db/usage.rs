@@ -135,6 +135,18 @@ pub fn est_tokens(chars: usize) -> i64 {
     (chars as i64 + 3) / 4
 }
 
+/// Ceiling on the modeled baseline of an orientation query (`tree`). The raw
+/// model — "ranking needs every indexed file read once" — grows with the repo,
+/// but no agent reads a 500-file repo to orient: it lists the tree and opens a
+/// handful of files. ~8 mid-size files. `stats` applies the same cap to rows
+/// logged before it existed (`db::stats::SAVED_SUM`).
+pub const ORIENT_BASELINE_CAP: i64 = 20_000;
+
+/// Baseline for reading `bytes` of source to orient, capped.
+pub fn orient_baseline(bytes: usize) -> i64 {
+    est_tokens(bytes).min(ORIENT_BASELINE_CAP)
+}
+
 /// Lines of context a disciplined agent Reads around a hit before/after — the
 /// padding in the grep-then-Read baseline model (see `baseline_tokens`).
 pub const READ_PAD_LINES: usize = 40;
