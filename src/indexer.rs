@@ -213,7 +213,9 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
         }
         let abs = entry.path().to_path_buf();
         let rel = match abs.strip_prefix(root) {
-            Ok(r) => r.to_string_lossy().to_string(),
+            // `/` on every OS: deps, `--path` and output all assume it, and
+            // rg/grep prefilter paths are matched against these strings.
+            Ok(r) => r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"),
             Err(_) => continue,
         };
         let Some(language) = lang::detect_lang(&rel) else {
