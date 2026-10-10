@@ -459,10 +459,20 @@ pub(crate) fn grep_prefilter(
             Some(0) | Some(1) => {}
             _ => continue,
         }
+        // Windows rg/grep print `./sub\b.rs`; the index stores `/`, so an
+        // unnormalized path never matches and the file is silently dropped.
+        // Only there: on Unix `\` is a legal filename byte.
         return Some(
             String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .map(|l| l.trim_start_matches("./").to_string())
+                .map(|l| {
+                    let l = if cfg!(windows) {
+                        l.replace('\\', "/")
+                    } else {
+                        l.to_string()
+                    };
+                    l.trim_start_matches("./").to_string()
+                })
                 .collect(),
         );
     }
