@@ -218,7 +218,8 @@ pub fn open_project_db(root: &Path) -> Result<Connection> {
 /// Bump whenever symbol extraction changes what an unchanged file yields
 /// (new kinds, new parents) — see `open_project_db`.
 /// 1: Go methods qualified by receiver type; JS/TS/Go top-level constants.
-const EXTRACT_VERSION: i64 = 1;
+/// 2: JS/TS signatures keep their `export` prefix.
+const EXTRACT_VERSION: i64 = 2;
 
 /// Open an already-built project index without creating files or migrating.
 /// Prefers durable storage, but also checks the sandbox fallback so

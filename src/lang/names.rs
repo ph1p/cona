@@ -383,7 +383,17 @@ pub(crate) fn node_name(node: Node, src: &str, field: &str, lang: &str) -> Optio
 }
 
 pub(crate) fn first_line_sig(node: Node, src: &str) -> String {
-    let text = node.utf8_text(src.as_bytes()).unwrap_or("");
+    // js/ts: `export` lives on a wrapping export_statement (declarator →
+    // declaration → export) — start there so the signature says it is exported
+    let mut from = node;
+    for anc in std::iter::successors(node.parent(), |n| n.parent()).take(2) {
+        if anc.kind() == "export_statement" && anc.start_position().row == node.start_position().row
+        {
+            from = anc;
+            break;
+        }
+    }
+    let text = &src[from.start_byte()..node.end_byte()];
     let mut line = text.lines().next().unwrap_or("").trim();
     // Drop a trailing `{` (no signature info). A dangling `(` stays: it signals
     // multi-line params.
