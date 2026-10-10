@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.34](https://github.com/ph1p/cona/compare/v0.0.33...v0.0.34) - 2026-10-10
+
+### Added
+
+- *(grep)* -l/-c and one honest empty result
+- *(show)* print a line range with file:N-M
+- *(ui)* tabs for index and failures, background reindex
+
+### Fixed
+
+- *(index)* store repo-relative paths with / on Windows
+- *(grep)* normalize Windows separators in prefilter output
+- *(locate)* list real code before test helpers
+- *(rank)* rust method calls do not count for free fns
+- *(show)* a file:Name miss says where Name is defined
+- *(rank)* rank only importable code, count js/ts uses at imports
+
+### Other
+
+- line ranges, grep -l/-c, export-aware rank
+
 ## [0.0.33](https://github.com/ph1p/cona/compare/v0.0.32...v0.0.33) - 2026-10-06
 
 ### Added
