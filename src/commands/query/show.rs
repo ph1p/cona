@@ -18,6 +18,11 @@ pub fn cmd_show(
 ) -> Result<(String, i64)> {
     // `context` is not read here — it is `show_one`'s to apply, per candidate.
     let ShowOpts { kind, sig, all, .. } = opts;
+    // `file:120-160` / `file:120` — a line range, for the code between symbols
+    // (file headers, one block of a long body) that `sed -n` would otherwise read
+    if let Some((file, start, end)) = line_range(root, symbol) {
+        return show_lines(root, file, start, end, opts.context, json);
+    }
     // A path means "map this file" → outline (directories reach its
     // `tree --path` redirect). The filesystem decides; `split_locator` only
     // keeps a `file.rs:Name` locator from being mistaken for a path.
@@ -87,6 +92,44 @@ pub fn cmd_show(
         }
     }
     show_one(root, conn, symbol, opts, json, true)
+}
+
+/// `path:N-M` or `path:N` naming an existing file → (path, N, M).
+fn line_range<'a>(root: &Path, arg: &'a str) -> Option<(&'a str, usize, usize)> {
+    let (file, range) = arg.rsplit_once(':')?;
+    let (a, b) = range.split_once('-').unwrap_or((range, range));
+    let (start, end) = (
+        a.trim().parse::<usize>().ok()?,
+        b.trim().parse::<usize>().ok()?,
+    );
+    (start >= 1 && end >= start && root.join(file).is_file()).then_some((file, start, end))
+}
+
+fn show_lines(
+    root: &Path,
+    file: &str,
+    start: usize,
+    end: usize,
+    context: usize,
+    json: bool,
+) -> Result<(String, i64)> {
+    let src = std::fs::read_to_string(root.join(file))?;
+    let lines: Vec<&str> = src.lines().collect();
+    if start > lines.len() {
+        anyhow::bail!("{file} has {} lines — {start} is past the end", lines.len());
+    }
+    let from = (start - 1).saturating_sub(context);
+    let to = (end + context).min(lines.len());
+    let line_lens: Vec<usize> = lines.iter().map(|l| l.len()).collect();
+    let baseline = db::baseline_tokens(&line_lens, &[start, end.min(lines.len())]);
+    if json {
+        let obj = serde_json::json!({"file": file, "start": from + 1, "end": to,
+            "code": lines[from..to].join("\n")});
+        return jout(&obj, baseline);
+    }
+    let mut out = format!("{file}:{}-{to}\n", from + 1);
+    push_numbered_lines(&mut out, &lines, from, to);
+    Ok((out, baseline))
 }
 
 fn show_one(

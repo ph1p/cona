@@ -40,6 +40,7 @@ From coarse to fine:
 cona tree --rank              # ranked overview of the codebase
 cona outline src/indexer.rs   # every symbol in a file
 cona show open_project_db     # just that symbol's source
+cona show src/db.rs:40-80      # just those lines (no sed -n)
 cona context open_project_db  # the symbol + what it calls + who calls it
 cona edit open_project_db --file new.rs   # replace it, syntax-verified
 ```

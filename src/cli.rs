@@ -133,7 +133,7 @@ pub struct FindArgs {
 #[derive(clap::Args)]
 pub struct ShowArgs {
     /// One or more symbol names — each printed in turn. A file path prints
-    /// that file's outline instead.
+    /// that file's outline instead; `file:40-80` or `file:40` prints those lines.
     #[arg(required = true)]
     pub symbols: Vec<String>,
     /// On an ambiguous name, print every candidate instead of erroring
