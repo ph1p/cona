@@ -547,6 +547,11 @@ fn locate_rows(
         })?
         .flatten()
         .collect();
+    let unscoped = if file_filter.is_some() {
+        rows.clone()
+    } else {
+        Vec::new()
+    };
     if let Some(f) = &file_filter {
         // An exact path wins outright — else `src/main.rs` also suffix-matches
         // `src/resolve-helper/src/main.rs`, defeating the escape hatch (inv. 4).
@@ -561,6 +566,19 @@ fn locate_rows(
         let hint = kind
             .map(|k| format!(" with kind '{k}'"))
             .unwrap_or_default();
+        if let (Some(f), false) = (&file_filter, unscoped.is_empty()) {
+            // `file:Name` for a name the file only imports or uses: say where
+            // it IS defined rather than send the agent to `find` for it.
+            let at: Vec<String> = unscoped
+                .iter()
+                .take(8)
+                .map(|(p, s, _, q)| format!("  {q}  {p}:{s}"))
+                .collect();
+            bail!(
+                "'{symbol}'{hint} is not defined in '{f}' — defined at:\n{}",
+                at.join("\n")
+            );
+        }
         bail!("symbol '{symbol}'{hint} not found — try `cona find {symbol}`");
     }
     Ok((rows, symbol.to_string()))

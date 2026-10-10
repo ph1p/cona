@@ -327,3 +327,70 @@ fn session_start_refuses_to_index_the_home_dir() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// Agent-UX lookups: `show file:N-M` line ranges, `grep -l`/`-c`, the zero-hit
+// messages, and `file:Name` misses that say where the name lives.
+#[test]
+fn line_ranges_grep_counts_and_honest_misses() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("cona-ux-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(
+        dir.join("a.rs"),
+        "pub fn alpha() {}\n// alpha twice\npub fn beta() {}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("sub/b.rs"), "use crate::alpha;\nfn gamma() {}\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let run = |args: &[&str]| -> (String, bool) {
+        let o = Command::new(bin)
+            .args(args)
+            .env("CONA_DATA_DIR", dir.join(".cona-data"))
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+        s.push_str(&String::from_utf8_lossy(&o.stderr));
+        (s, o.status.success())
+    };
+    run(&["index"]);
+
+    let (out, ok) = run(&["show", "a.rs:2-3"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("a.rs:2-3"), "{out}");
+    assert!(
+        out.contains("2 // alpha twice") && out.contains("3 pub fn beta"),
+        "{out}"
+    );
+    assert!(!out.contains("pub fn alpha"), "{out}");
+    let (out, ok) = run(&["show", "a.rs:9"]);
+    assert!(!ok && out.contains("past the end"), "{out}");
+
+    let (out, _) = run(&["grep", "alpha", "-c"]);
+    assert_eq!(out, "a.rs:2\nsub/b.rs:1\n");
+    let (out, _) = run(&["grep", "alpha", "-l"]);
+    assert_eq!(out, "a.rs\nsub/b.rs\n");
+
+    let (out, _) = run(&["grep", "beta", "--path", "sub"]);
+    assert!(
+        out.starts_with("no matches for 'beta' under 'sub' — elsewhere:"),
+        "{out}"
+    );
+    assert!(out.contains("a.rs:3"), "{out}");
+    let (out, _) = run(&["grep", "no such text"]);
+    assert!(
+        out.contains("anywhere in the repo") && !out.contains("cona find"),
+        "{out}"
+    );
+
+    let (out, ok) = run(&["show", "sub/b.rs:alpha"]);
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("not defined in 'sub/b.rs'") && out.contains("a.rs:1"),
+        "{out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
