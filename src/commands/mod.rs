@@ -494,7 +494,12 @@ pub(crate) fn locate_all(
 fn locate_candidates(conn: &Connection, symbol: &str, kind: Option<&str>) -> Result<Vec<Located>> {
     let (rows, symbol) = locate_rows(conn, symbol, kind)?;
     let exact: Vec<Located> = rows.iter().filter(|r| r.3 == symbol).cloned().collect();
-    Ok(if exact.is_empty() { rows } else { exact })
+    let mut pool = if exact.is_empty() { rows } else { exact };
+    // Ambiguity stays an error (inv. 4), but real code lists before test
+    // helpers: the wanted definition is rarely the 10th `run` in a test file,
+    // and the ambiguity error's `file:Name` example then names it.
+    pool.sort_by_key(|(p, ..)| crate::entries::is_test_path(p));
+    Ok(pool)
 }
 
 /// THE `file.rs:Name` locator grammar: `Some((path, name))` for a
@@ -690,5 +695,27 @@ mod tests {
         let root = Path::new("/nonexistent-cona-test-root");
         assert!(PathFilter::new(root, None).ok("anything/at/all.rs"));
         assert!(!PathFilter::new(root, Some("tests")).ok("src/db.rs"));
+    }
+
+    #[test]
+    fn ambiguous_candidates_list_real_code_before_tests() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files(id INTEGER PRIMARY KEY, path TEXT);
+             CREATE TABLE symbols(file_id INTEGER, kind TEXT, name TEXT,
+                 qualified TEXT, start_line INTEGER, end_line INTEGER);
+             INSERT INTO files VALUES (1, 'a_test.ts'), (2, 'm.ts');
+             INSERT INTO symbols VALUES (1, 'fn', 'step', 'step', 1, 1),
+                                        (2, 'fn', 'step', 'step', 1, 1);",
+        )
+        .unwrap();
+        let paths: Vec<String> = locate_all(&conn, "step", None)
+            .unwrap()
+            .into_iter()
+            .map(|(p, ..)| p)
+            .collect();
+        assert_eq!(paths, ["m.ts", "a_test.ts"]);
+        let err = locate_symbol(&conn, "step").unwrap_err().to_string();
+        assert!(err.contains("file (`m.ts:step`)"), "{err}");
     }
 }
