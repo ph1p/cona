@@ -2,7 +2,7 @@
 //! enclosing symbol. `Matcher` is THE line-matching rule; `grep_prefilter`
 //! narrows candidate files via rg/grep with the same mode.
 
-use crate::commands::{jout, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL, LIMIT_TRAILER};
+use crate::commands::{defaults, jout, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL, LIMIT_TRAILER};
 use crate::{db, indexer};
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
@@ -26,6 +26,8 @@ pub fn cmd_grep(
         include_deps,
         before,
         after,
+        files_only,
+        count,
     } = opts;
     let matcher = Matcher::new(pattern, ignore_case, regex)?;
     let pf = PathFilter::new(root, path_filter);
@@ -61,6 +63,9 @@ pub fn cmd_grep(
         None => {}
     }
     files.retain(|f| pf.ok(f));
+    if files_only || count {
+        return grep_files(root, conn, pattern, &matcher, files, opts, json);
+    }
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     let mut hits: Vec<(String, usize, String, String)> = Vec::new();
     // Per hit, the surrounding lines asked for with -A/-B/-C (empty otherwise).
@@ -141,31 +146,123 @@ pub fn cmd_grep(
         out.push_str(LIMIT_TRAILER);
     }
     if hits.is_empty() {
-        out.push_str(&format!("no matches for '{pattern}'"));
-        // A regex-looking pattern with zero literal hits is the worst failure
-        // mode — the agent concludes the code doesn't exist. Name the flag.
-        if let Some(literal) =
-            regexish_literal(pattern).filter(|_| matches!(matcher, Matcher::Literal { .. }))
-        {
-            out.push_str(&format!(
-                "\n  note: matching is literal by default — '{pattern}' was searched verbatim.\
-                 \n  try `cona grep {pattern} --regex`"
-            ));
-            if !literal.is_empty() {
-                out.push_str(&format!(" — or the literal part: `cona grep {literal}`"));
-            }
-        } else if path_filter.is_some() {
-            out.push_str(" — try without --path");
-        } else {
-            // Plain identifier, no filter, zero hits: likely a typo — point at
-            // the fuzzy recovery.
-            out.push_str(&format!(
-                "\n  try `cona find {pattern}` — symbol search with a typo-tolerant fallback"
-            ));
-        }
-        out.push('\n');
+        out.push_str(&no_matches(root, conn, pattern, &matcher, opts)?);
     }
     Ok((out, baseline))
+}
+
+/// `-l`/`-c`: one line per matching file. Nothing to label, so no index
+/// lookups; the baseline is 0 — `grep -l` costs the same without cona.
+fn grep_files(
+    root: &Path,
+    conn: &Connection,
+    pattern: &str,
+    matcher: &Matcher,
+    files: Vec<String>,
+    opts: GrepOpts<'_>,
+    json: bool,
+) -> Result<(String, i64)> {
+    let mut found: Vec<(String, usize)> = Vec::new();
+    let mut truncated = false;
+    for rel in files {
+        let Ok(src) = std::fs::read_to_string(root.join(&rel)) else {
+            continue;
+        };
+        let n = src.lines().filter(|l| matcher.is_match(l)).count();
+        if n == 0 {
+            continue;
+        }
+        if found.len() >= opts.limit {
+            truncated = true;
+            break;
+        }
+        found.push((rel, n));
+    }
+    if json {
+        let items: Vec<_> = found
+            .iter()
+            .map(|(f, n)| serde_json::json!({"file": f, "count": n}))
+            .collect();
+        return jout(&items, 0);
+    }
+    let mut out = String::new();
+    for (f, n) in &found {
+        if opts.count {
+            out.push_str(&format!("{f}:{n}\n"));
+        } else {
+            out.push_str(&format!("{f}\n"));
+        }
+    }
+    if truncated {
+        out.push_str(LIMIT_TRAILER);
+    }
+    if found.is_empty() {
+        out.push_str(&no_matches(root, conn, pattern, matcher, opts)?);
+    }
+    Ok((out, 0))
+}
+
+/// The zero-hit message. Under `--path` it searches the rest of the repo
+/// itself and shows what is there — a "try without --path" hint only costs the
+/// agent a second call to learn the same thing.
+fn no_matches(
+    root: &Path,
+    conn: &Connection,
+    pattern: &str,
+    matcher: &Matcher,
+    opts: GrepOpts<'_>,
+) -> Result<String> {
+    let mut out = String::new();
+    let path_filter = opts.path;
+    out.push_str(&format!("no matches for '{pattern}'"));
+    // A regex-looking pattern with zero literal hits is the worst failure
+    // mode — the agent concludes the code doesn't exist. Name the flag.
+    if let Some(literal) =
+        regexish_literal(pattern).filter(|_| matches!(matcher, Matcher::Literal { .. }))
+    {
+        out.push_str(&format!(
+            "\n  note: matching is literal by default — '{pattern}' was searched verbatim.\
+             \n  try `cona grep {pattern} --regex`"
+        ));
+        if !literal.is_empty() {
+            out.push_str(&format!(" — or the literal part: `cona grep {literal}`"));
+        }
+    } else if let Some(scope) = path_filter {
+        let wide = GrepOpts {
+            path: None,
+            limit: defaults::GREP_ELSEWHERE,
+            before: 0,
+            after: 0,
+            ..opts
+        };
+        let (elsewhere, _) = cmd_grep(root, conn, pattern, wide, false)?;
+        if elsewhere.starts_with("no matches") {
+            out.push_str(" anywhere in the repo");
+        } else {
+            let elsewhere = elsewhere.replace(LIMIT_TRAILER, "… more without --path\n");
+            out.push_str(&format!(" under '{scope}' — elsewhere:\n{elsewhere}"));
+            return Ok(out);
+        }
+    } else if looks_like_name(pattern) {
+        // A bare identifier with no hits anywhere: likely a typo — point
+        // at the fuzzy symbol search.
+        out.push_str(&format!(
+            "\n  try `cona find {pattern}` — symbol search with a typo-tolerant fallback"
+        ));
+    } else {
+        out.push_str(" anywhere in the repo");
+    }
+    out.push('\n');
+    Ok(out)
+}
+
+/// One identifier (or a dotted path) — something `find` could resolve. Text
+/// with spaces, quotes or punctuation never names a symbol.
+fn looks_like_name(pattern: &str) -> bool {
+    !pattern.is_empty()
+        && pattern
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | ':'))
 }
 
 /// `-A`/`-B`/`-C` output: one header per block (`file:line (in sym)`), then

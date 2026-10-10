@@ -209,6 +209,8 @@ pub mod defaults {
     pub const REFS_LIMIT: usize = 100;
     pub const CONTEXT_BUDGET: i64 = 3000;
     pub const GREP_LIMIT: usize = 50;
+    /// Hits shown from the rest of the repo when a `--path` grep finds none.
+    pub const GREP_ELSEWHERE: usize = 3;
     pub const CALLS_DEPTH: usize = 2;
     pub const SHAPE_BUDGET: i64 = 2000;
     pub const ENTRIES_LIMIT: usize = 40;
@@ -261,6 +263,10 @@ pub struct GrepOpts<'a> {
     /// 0 = one line per hit.
     pub before: usize,
     pub after: usize,
+    /// `-l`/`-c`: one line per matching file (with its hit count under `count`)
+    /// instead of one per hit.
+    pub files_only: bool,
+    pub count: bool,
 }
 
 /// THE `--path` policy for every query command (tree/find/refs/grep/…).

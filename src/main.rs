@@ -234,6 +234,8 @@ fn run() -> Result<()> {
                 context,
                 after,
                 before,
+                files_with_matches,
+                count,
             } = a;
             queried(&root, t0, "grep", pattern, |conn| {
                 cmd_grep(
@@ -248,6 +250,8 @@ fn run() -> Result<()> {
                         include_deps: *include_deps,
                         before: before.or(*context).unwrap_or(0),
                         after: after.or(*context).unwrap_or(0),
+                        files_only: *files_with_matches,
+                        count: *count,
                     },
                     cli.json,
                 )

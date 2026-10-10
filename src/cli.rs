@@ -211,6 +211,12 @@ pub struct GrepArgs {
     /// Lines of context before each hit (like grep -B)
     #[arg(short = 'B', long)]
     pub before: Option<usize>,
+    /// Only the files that match, one per line (like grep -l)
+    #[arg(short = 'l', long)]
+    pub files_with_matches: bool,
+    /// Matching lines per file, `path:N` (like grep -c)
+    #[arg(short = 'c', long)]
+    pub count: bool,
 }
 
 #[derive(clap::Args)]
