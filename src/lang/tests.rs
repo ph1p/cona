@@ -126,3 +126,14 @@ fn html_scanner_exports_do_not_collide() {
     );
     assert!(!super::extract_symbols("html", src).unwrap().is_empty());
 }
+
+// Rank counts uses of top-level items: in Rust `x.ok()` is a method, never the
+// free `fn ok`; in Go `pkg.Func()` IS the use, so only Rust skips fields.
+#[test]
+fn ident_counts_skip_rust_method_names() {
+    let names: std::collections::HashSet<&str> = ["ok", "Run"].into();
+    let rs = super::ident_counts(Some("rust"), "fn f() { ok(); x.ok(); y.ok }", &names);
+    assert_eq!(rs.get("ok"), Some(&1));
+    let go = super::ident_counts(Some("go"), "package p\nfunc f() { pkg.Run() }", &names);
+    assert_eq!(go.get("Run"), Some(&1));
+}

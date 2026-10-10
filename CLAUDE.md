@@ -246,8 +246,8 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
   — no real type resolution. narrow_by_scope handles common cases; rest stays
   `·ambiguous`. Full resolution = LSP integration. `tree --rank` counts only
   importable symbols (JS/TS `export`, Rust `pub`) outside tests, and JS/TS
-  fan-in only in files that import the name; Rust method calls still count
-  by name (`.ok()` lifts any `fn ok`).
+  fan-in only in files that import the name. Rust skips `x.name` (methods,
+  fields); same-named locals (`let ok`) still count.
 - Unsupported languages fall back to textual word-boundary scan (fail-open,
   matches strings/comments there).
 - Token estimate = 4 chars ≈ 1 token (heuristic, trend metric).
@@ -344,8 +344,7 @@ Too many hits? `--path <dir|file>` scopes `find`/`refs`/`grep`/`tree`/`show`.
 Ambiguous name? `cona show <Sym> --all` prints every definition instead of
 erroring. `cona grep` matches literally (`a\|b` = either); `--regex` for a
 real regex; `-C 3` prints context lines, so `cona grep X --path f -C 3`
-replaces `grep -n X f` + `sed -n` range reads; `cona show f:40-80` prints a
-line range. `-l`/`-c` list matching files / counts. Batch: `show A B`,
+replaces `grep -n X f` + `sed -n` range reads. Batch: `show A B`,
 `outline f1 f2`, `find A B`. Go methods are `Type.Method`.
 
 Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`

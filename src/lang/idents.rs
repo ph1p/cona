@@ -112,14 +112,24 @@ pub fn ident_counts(
     names: &std::collections::HashSet<&str>,
 ) -> std::collections::HashMap<String, i64> {
     let mut counts = std::collections::HashMap::new();
-    match lang.and_then(|l| ident_occurrences(l, src).ok()) {
-        Some(occ) => {
-            for (n, _) in occ {
-                if names.contains(n.as_str()) {
-                    *counts.entry(n).or_insert(0) += 1;
+    // Callers count uses of TOP-LEVEL items, which Rust never reaches as
+    // `x.name` — so a method call or field (`.ok()`, `.len`) is not a use of a
+    // same-named free fn. Go's `pkg.Func()` shares the leaf kind, hence rust-only.
+    let skip_fields = lang == Some("rust");
+    match lang.and_then(|l| parse(l, src).ok()) {
+        Some(tree) => for_each_node(tree.root_node(), |n| {
+            if n.child_count() == 0 && n.kind().ends_with("identifier") {
+                if !(skip_fields && n.kind() == "field_identifier") {
+                    if let Ok(t) = n.utf8_text(src.as_bytes()) {
+                        if names.contains(t) {
+                            *counts.entry(t.to_string()).or_insert(0) += 1;
+                        }
+                    }
                 }
+                return false;
             }
-        }
+            true
+        }),
         None => each_ident_token(src, |t| {
             if names.contains(t) {
                 *counts.entry(t.to_string()).or_insert(0) += 1;
