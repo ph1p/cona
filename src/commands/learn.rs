@@ -114,6 +114,16 @@ fn render_fix(f: &Fix) -> String {
 
 /// `cona learn`: recurring failed lookups for this project (or all, without
 /// suggestions — other projects' indexes are not open here).
+/// One rendered fix per failed-query row (`""` = nothing to suggest). Loads
+/// the symbol pool ONCE — shared by `cmd_learn` and the `ui` failures tab.
+pub fn suggest_fixes(conn: &Connection, rows: &[db::FailureRow]) -> Result<Vec<String>> {
+    let pool = Pool::load(conn)?;
+    Ok(rows
+        .iter()
+        .map(|(cmd, detail, outcome, ..)| render_fix(&fix_for(conn, &pool, cmd, detail, outcome)))
+        .collect())
+}
+
 pub fn cmd_learn(
     root: &Path,
     conn: Option<&Connection>,
@@ -125,17 +135,10 @@ pub fn cmd_learn(
     let scope = conn.map(|_| root.to_string_lossy().to_string());
     let since = db::now() - days * 86_400;
     let rows = db::failed_queries(&g, scope.as_deref(), since, limit)?;
-    let pool = match conn {
-        Some(c) => Some(Pool::load(c)?),
-        None => None,
+    let fixes = match conn {
+        Some(c) => suggest_fixes(c, &rows)?,
+        None => vec![String::new(); rows.len()],
     };
-    let fixes: Vec<Fix> = rows
-        .iter()
-        .map(|(cmd, detail, outcome, ..)| match (conn, &pool) {
-            (Some(c), Some(p)) => fix_for(c, p, cmd, detail, outcome),
-            _ => Fix::None,
-        })
-        .collect();
 
     if json {
         let items: Vec<_> = rows
@@ -143,7 +146,7 @@ pub fn cmd_learn(
             .zip(&fixes)
             .map(|((cmd, detail, outcome, n, last), f)| {
                 serde_json::json!({"cmd": cmd, "target": detail, "outcome": outcome,
-                    "count": n, "last": last, "fix": render_fix(f)})
+                    "count": n, "last": last, "fix": f})
             })
             .collect();
         return Ok(format!("{}\n", serde_json::Value::from(items)));
@@ -165,8 +168,7 @@ pub fn cmd_learn(
         .max()
         .unwrap_or(0)
         .min(36);
-    for ((cmd, detail, outcome, n, _), f) in rows.iter().zip(&fixes) {
-        let fix = render_fix(f);
+    for ((cmd, detail, outcome, n, _), fix) in rows.iter().zip(&fixes) {
         let arrow = if fix.is_empty() {
             String::new()
         } else {

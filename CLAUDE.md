@@ -81,7 +81,8 @@ src/hook/        PreToolUse/PostToolUse/PreCompact hooks (PreCompact answered in
                  segment passes the whole line. mod.rs (decide_*), shell.rs
                  (classify_shell), intercept.rs (redirected queries),
                  markers.rs (session cadence state)
-src/dashboard.rs `cona ui` — ratatui live TUI, read-only
+src/dashboard.rs `cona ui` — ratatui live TUI; tabs overview/index/failures,
+                 in-TUI background reindex (`i`, `a` auto)
 src/ui.rs        ANSI styling (zero deps) + select/multiselect primitives
 src/mcp.rs       MCP framing (stdio JSON-RPC 2.0, pure, tested)
 src/install/     install/upgrade/uninstall/agents/doctor; marker-based,

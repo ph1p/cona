@@ -323,12 +323,29 @@ src/hook/        PreToolUse + PostToolUse + PreCompact hooks
                  only "deny" + the cona command to run instead. Every hint path
                  (advisory, streak, nudge) is additionalContext ONLY. cona NEVER
                  emits "allow" — that would silently bypass the permission system
-src/dashboard.rs `cona ui` — ratatui live TUI, read-only. DBs opened ONCE (not
-                 per tick); cheap usage stats refresh 1s, the expensive index-
-                 state scan (one fs stat/file) throttled to 5s. Keys: q quit,
-                 p scope, s sort by-command (saved/calls/avg-ms), r force
-                 refresh; Resize handled. Requires a TTY (else clean error, no
-                 panic)
+src/dashboard.rs `cona ui` — ratatui live TUI. Read-only EXCEPT a reindex
+                 the user asks for: `i` (or `a` = auto when files go stale,
+                 10s cooldown so a file that stays stale cannot loop) runs
+                 index_project + the "index" usage line on a worker thread with
+                 its OWN connection (rusqlite handles are not Send-shared; WAL
+                 keeps the UI's readers live); result arrives over mpsc and
+                 shows in the footer (spinner → ✓/✗ toast). Manual `i` = typed
+                 `cona index`: takes IndexLock if free but always walks; auto =
+                 unattended: defers when the lock is held. Quit waits for an
+                 in-flight walk (no orphaned marker). DBs opened ONCE; usage
+                 stats refresh 1s, index-state scan (one fs stat/file + lang/
+                 density aggregates) 5s. Tabs (1/2/3, tab/←/→): overview
+                 (gauge, totals w/ failed + hint conversion, 14d sparkline from
+                 savings_series with gap days = 0, by-command table, top
+                 targets, live feed), index (per-language files/symbols bars,
+                 densest files, stale list modified/deleted), failures
+                 (failed_queries 30d + learn::suggest_fixes — the SAME fix
+                 `cona learn` prints; only gathered while the tab is open, and
+                 fixes only in project scope: the pool is THIS index). Other
+                 keys: p scope, s sort, r rescan, space pause, ? help. Widths
+                 derive from panel width; empty panels show a hint; below 60×18
+                 a notice replaces the layout. draw() is pure over Snapshot/
+                 IndexState/Job → TestBackend tests. Requires a TTY.
 src/ui.rs        ANSI styling (zero deps): NO_COLOR/CLICOLOR_FORCE/TERM=dumb +
                  IsTerminal — piped output stays plain (agents!). All CLI colors
                  run through here; clap help styles in cli.rs. ui::cmd_table =

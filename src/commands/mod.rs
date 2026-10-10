@@ -16,7 +16,7 @@ pub use callgraph::*;
 pub use discover::cmd_discover;
 pub use history::*;
 pub use insight::*;
-pub use learn::{cmd_learn, learned_hints};
+pub use learn::{cmd_learn, learned_hints, suggest_fixes};
 pub use mcp_server::*;
 pub use mutate::*;
 pub use query::*;
