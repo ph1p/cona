@@ -51,6 +51,21 @@ pub fn open_indexed(root: &Path) -> Result<Connection> {
     } else {
         db::open_project_db(root)?
     };
+    // Indexes built before paths were stored with `/` hold `sub\b.rs` rows that
+    // per-file refresh never prunes (the path still resolves). `\` cannot occur
+    // in a Windows filename, so any such row is legacy: one full walk heals it.
+    if cfg!(windows) && !db::is_read_only() {
+        let legacy = conn
+            .query_row(
+                "SELECT 1 FROM files WHERE instr(path, '\\') > 0 LIMIT 1",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if legacy {
+            indexer::index_project(root, &conn)?;
+        }
+    }
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
     if n == 0 {
         if db::is_read_only() {
