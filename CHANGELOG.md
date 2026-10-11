@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.35](https://github.com/ph1p/cona/compare/v0.0.34...v0.0.35) - 2026-10-11
+
+### Fixed
+
+- *(index)* reindex Windows indexes holding legacy backslash paths
+
 ## [0.0.34](https://github.com/ph1p/cona/compare/v0.0.33...v0.0.34) - 2026-10-10
 
 ### Added
