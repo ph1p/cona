@@ -366,19 +366,18 @@ pub(crate) fn scan_ref_sites(
     let pf = PathFilter::new(root, path_filter);
     let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let mut files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
-    // Prefilter to files literally containing the name (fail-open), always
-    // keeping the preloaded file. A directory scope narrows the walk itself;
-    // the scope filter below would drop an out-of-scope preloaded file anyway.
-    let matcher = query::Matcher::literal(name);
-    // include_deps=false: a hit inside a dependency has no symbol row.
-    if let Some(candidates) =
-        query::grep_prefilter(root, name, &matcher, false, pf.search_root(), false)
-    {
-        files.retain(|f| candidates.contains(f) || preloaded.map(|(p, _)| p == f).unwrap_or(false));
-    }
-    // `--path` applies AFTER the prefilter and overrides the preloaded
-    // exemption: an explicit scope excludes even the defining file.
+    // `--path` overrides the preloaded exemption: an explicit scope excludes
+    // even the defining file. Then keep files literally containing the name,
+    // plus the preloaded one (already in memory, never re-read).
     files.retain(|f| pf.ok(f));
+    let pre = preloaded.map(|(p, _)| p);
+    let (kept, rest): (Vec<String>, Vec<String>) =
+        files.into_iter().partition(|f| Some(f.as_str()) == pre);
+    let mut files = query::prefilter_indexed(root, rest, &query::Matcher::literal(name));
+    if !kept.is_empty() {
+        files.extend(kept);
+        files.sort();
+    }
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     'files: for rel in &files {
         let owned;

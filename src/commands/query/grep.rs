@@ -1,6 +1,7 @@
 //! `grep`: literal/regex line search over indexed files, hits mapped to their
-//! enclosing symbol. `Matcher` is THE line-matching rule; `grep_prefilter`
-//! narrows candidate files via rg/grep with the same mode.
+//! enclosing symbol. `Matcher` is THE line-matching rule; `prefilter_indexed`
+//! narrows indexed files in-process, `grep_prefilter` (rg/grep, same mode)
+//! only serves `--include-deps`, which searches outside the index.
 
 use crate::commands::{defaults, jout, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL, LIMIT_TRAILER};
 use crate::{db, indexer};
@@ -33,36 +34,33 @@ pub fn cmd_grep(
     let pf = PathFilter::new(root, path_filter);
     let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let mut files: Vec<String> = stmt.query_map([], |r| r.get(0))?.flatten().collect();
-    // rg (or grep) prefilters candidate files far faster than an in-process
-    // scan; on failure we fall back to the full scan. A directory scope becomes
-    // rg's search root, so a scoped query walks only that subtree.
-    match grep_prefilter(
-        root,
-        matcher.source(pattern),
-        &matcher,
-        ignore_case,
-        pf.search_root(),
-        include_deps,
-    ) {
+    if include_deps {
         // --include-deps searches OUTSIDE the index by design: dependency trees
         // are never indexed, so intersecting with the index would make the flag
-        // a no-op. The prefilter's list becomes the file list (hits there just
-        // carry no enclosing symbol), sorted for deterministic output.
-        Some(candidates) if include_deps => {
-            files = candidates.into_iter().collect();
-            files.sort();
-        }
-        Some(candidates) => files.retain(|f| candidates.contains(f)),
-        // No rg and no grep: the index is all we have, so the flag cannot widen
-        // the search. Say so rather than silently returning repo-only hits.
-        None if include_deps => {
+        // a no-op. rg/grep's list becomes the file list (hits there just carry
+        // no enclosing symbol), sorted for deterministic output. A directory
+        // scope becomes rg's search root, so a scoped query walks only that.
+        let Some(candidates) = grep_prefilter(
+            root,
+            matcher.source(pattern),
+            &matcher,
+            ignore_case,
+            pf.search_root(),
+            true,
+        ) else {
+            // No rg and no grep: the index is all we have, so the flag cannot
+            // widen the search. Say so rather than silently returning repo-only hits.
             return Err(anyhow::anyhow!(
                 "--include-deps needs `rg` or `grep` on PATH — dependency dirs are not indexed, so there is nothing to search without one"
             ));
-        }
-        None => {}
+        };
+        files = candidates.into_iter().collect();
+        files.sort();
+        files.retain(|f| pf.ok(f));
+    } else {
+        files.retain(|f| pf.ok(f));
+        files = prefilter_indexed(root, files, &matcher);
     }
-    files.retain(|f| pf.ok(f));
     if files_only || count {
         return grep_files(root, conn, pattern, &matcher, files, opts, json);
     }
@@ -368,6 +366,20 @@ impl Matcher {
         }
     }
 
+    /// Could any line of `text` match? A superset test over the whole buffer —
+    /// one substring search per file instead of one per line. Regex goes line
+    /// by line so `^`/`$` keep their per-line meaning.
+    pub(crate) fn matches_text(&self, text: &str) -> bool {
+        match self {
+            Matcher::Literal {
+                needle,
+                ignore_case: true,
+            } => text.to_lowercase().contains(needle.as_str()),
+            Matcher::Literal { needle, .. } => text.contains(needle.as_str()),
+            Matcher::Regex(re) => text.lines().any(|l| re.is_match(l)),
+        }
+    }
+
     fn is_match(&self, line: &str) -> bool {
         match self {
             Matcher::Literal {
@@ -407,6 +419,38 @@ fn regexish_literal(pattern: &str) -> Option<String> {
             .unwrap_or("")
             .to_string(),
     )
+}
+
+/// The indexed `files` that could hold a match, order kept. Replaces the rg
+/// subprocess for index-scoped searches: the index already names every file, so
+/// spawning rg to walk the tree again cost more than reading them (≈25ms vs a
+/// few ms on a mid-size repo) — and rg's paths needed per-OS normalizing.
+/// Unreadable files drop out; every caller skips them anyway.
+pub(crate) fn prefilter_indexed(root: &Path, files: Vec<String>, matcher: &Matcher) -> Vec<String> {
+    let hit = |rel: &String| {
+        std::fs::read_to_string(root.join(rel)).is_ok_and(|src| matcher.matches_text(&src))
+    };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    // Thread spawn costs more than reading a handful of small files.
+    if threads == 1 || files.len() < 64 {
+        return files.into_iter().filter(|f| hit(f)).collect();
+    }
+    let chunk = files.len().div_ceil(threads);
+    let keep: Vec<bool> = std::thread::scope(|s| {
+        let handles: Vec<_> = files
+            .chunks(chunk)
+            .map(|part| s.spawn(move || part.iter().map(hit).collect::<Vec<bool>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    files
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(f, k)| k.then_some(f))
+        .collect()
 }
 
 /// Files containing `pattern`, via ripgrep, else system grep. `None` = no
@@ -582,6 +626,18 @@ mod tests {
             out,
             "f.rs:3 (in S)\n    2  x\n    3> hit\n    4  x\n    5> hit\n    6  x\n--\nf.rs:20 (in S)\n   19  x\n   20> hit\n   21  x\n"
         );
+    }
+
+    /// The per-file prefilter must never drop a file the per-line scan would
+    /// hit — `^` anchors per line, not per buffer.
+    #[test]
+    fn matches_text_is_a_superset_of_line_matching() {
+        let text = "fn a() {}\nfoo bar\n";
+        let anchored = Matcher::new("^foo", false, true).unwrap();
+        assert!(anchored.matches_text(text));
+        let ci = Matcher::new("FOO", true, false).unwrap();
+        assert!(ci.matches_text(text));
+        assert!(!Matcher::literal("baz").matches_text(text));
     }
 
     #[test]

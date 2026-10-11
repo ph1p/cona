@@ -49,10 +49,13 @@ src/commands/    cmd_* implementations, split by concern:
                           default (`foo.bar` is code, not a pattern), regex on
                           `--regex`/`-e`; Matcher::literal for identifier
                           callers (scan_ref_sites) where regex is never right.
-                          prefilter_flag keeps rg/grep reading the pattern the
-                          SAME way — a disagreeing prefilter drops files holding
-                          real matches (rg needs no flag in regex mode: it is
-                          already Rust-regex). Invalid regex = error, never a
+                          prefilter_indexed narrows the indexed files
+                          in-process (Matcher::matches_text = a per-file
+                          SUPERSET of per-line matching; regex stays per line
+                          so `^` keeps its meaning). rg/grep run only for
+                          --include-deps, where prefilter_flag keeps them
+                          reading the pattern the SAME way — a disagreeing
+                          prefilter drops files holding real matches. Invalid regex = error, never a
                           silent literal fallback. Zero hits on a metachar
                           pattern in literal mode names `--regex` + the longest
                           literal run

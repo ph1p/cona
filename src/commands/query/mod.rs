@@ -15,7 +15,7 @@ pub use context::cmd_context;
 pub use diff::cmd_diff;
 pub use find::{cmd_find, cmd_find_fuzzy};
 pub use grep::cmd_grep;
-pub(crate) use grep::{grep_prefilter, Matcher};
+pub(crate) use grep::{prefilter_indexed, Matcher};
 pub use outline::cmd_outline;
 pub use refs::cmd_refs;
 pub use show::cmd_show;

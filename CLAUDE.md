@@ -261,8 +261,8 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
   would change what existing queries mean. `regex` is a direct dependency at
   zero cost: it was already in `Cargo.lock` via `tree-sitter` (`cargo tree -i
   regex`), so it adds no crates and ~32 KB of binary. A regex is matched
-  in-process by the `regex` crate, and rg/grep get the matching flag so the
-  prefilter agrees.
+  in-process by the `regex` crate; under `--include-deps` rg/grep get the
+  matching flag so their file list agrees.
 - `rename` semantic (identifier positions) but name-based: collision guard +
   syntax verify + all-or-nothing rollback; unparsable files only with --force.
 - `deps`: internal imports → edges; external packages counted + listed but not
@@ -308,9 +308,10 @@ scoped to one file) and `"hook:read-nudge"` / `"hook:grep-nudge"` (unindexed rep
 first eligible event per session, repeats every `CONA_NUDGE_EVERY` suppressed
 ones, default 10, 0 = never) — all count lines with
 `tokens_saved = 0` (saving credited to the follow-up query, else
-double-counting). `cmd_grep` prefilters candidates
-via rg (fallback system grep, else full scan — fail-open); hit labeling stays
-with the index. `db::is_maintenance_cmd` (index/edit/rename/note/hook:*)
+double-counting). `cmd_grep` and `scan_ref_sites` prefilter the INDEXED file
+list in-process (`prefilter_indexed`, parallel, `Matcher::matches_text`) —
+no rg spawn or tree walk (~12ms off every grep/refs/context); rg/grep only
+serve `--include-deps` (outside the index). Hit labeling stays with the index. `db::is_maintenance_cmd` (index/edit/rename/note/hook:*)
 separates maintenance from query lines; `stats` + TUI show maintenance as
 compact one-liners under the query table, never in savings columns. Aggregate
 helpers (totals/per_command/top_targets/recent/savings_series) feed both
