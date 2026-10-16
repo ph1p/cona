@@ -215,6 +215,45 @@ pub(crate) fn push_numbered_lines(out: &mut String, lines: &[&str], start: usize
     }
 }
 
+/// `items.iter().map(f)` across all cores, order preserved. Items are handed
+/// out one at a time, so one large file cannot stall a whole fixed chunk.
+/// Below `min` items it stays serial — thread spawn costs more than the work.
+pub(crate) fn par_map<T: Sync, R: Send>(
+    items: &[T],
+    min: usize,
+    f: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len());
+    if threads <= 1 || items.len() < min {
+        return items.iter().map(f).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let mut tagged: Vec<(usize, R)> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut got = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(i) else { break };
+                        got.push((i, f(item)));
+                    }
+                    got
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    });
+    tagged.sort_unstable_by_key(|(i, _)| *i);
+    tagged.into_iter().map(|(_, r)| r).collect()
+}
+
 /// Per-command default limits/budgets — the single source for the clap
 /// `default_value_t`s AND the MCP dispatch fallbacks, so they can't drift.
 pub mod defaults {

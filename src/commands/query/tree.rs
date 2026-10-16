@@ -143,21 +143,42 @@ pub fn cmd_tree_rank(
     let mut self_counts: HashMap<String, HashMap<String, i64>> = HashMap::new();
     // js/ts names exported by list (`export { a, b }`, `export default a`)
     let mut listed: HashMap<String, HashSet<String>> = HashMap::new();
+    // Read + parse is the whole cost and per-file independent: scan in
+    // parallel, fold serially.
+    struct Scan {
+        bytes: usize,
+        counts: HashMap<String, i64>,
+        imports: Option<Option<HashSet<String>>>,
+        listed: Option<HashSet<String>>,
+    }
+    let scans = crate::commands::par_map(&all_files, 8, |rel| {
+        let src = std::fs::read_to_string(root.join(rel)).ok()?;
+        let lang = lang::detect_lang(rel);
+        let defines = defining.contains(rel.as_str());
+        Some(Scan {
+            bytes: src.len(),
+            counts: lang::ident_counts(lang, &src, &names),
+            imports: matches!(lang, Some("javascript" | "typescript" | "tsx"))
+                .then(|| imported_names(&src)),
+            listed: (defines && src.contains("export")).then(|| export_list_names(&src)),
+        })
+    });
     let mut bytes: usize = 0;
-    for rel in &all_files {
-        let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+    for (rel, scan) in all_files.iter().zip(scans) {
+        let Some(Scan {
+            bytes: b,
+            counts,
+            imports,
+            listed: l,
+        }) = scan
+        else {
             continue;
         };
-        bytes += src.len();
-        let counts = lang::ident_counts(lang::detect_lang(rel), &src, &names);
+        bytes += b;
         for (n, c) in &counts {
             *total.entry(n.clone()).or_insert(0) += c;
         }
-        if matches!(
-            lang::detect_lang(rel),
-            Some("javascript" | "typescript" | "tsx")
-        ) {
-            let imports = imported_names(&src);
+        if let Some(imports) = imports {
             for (n, c) in &counts {
                 if imports.as_ref().is_none_or(|i| i.contains(n)) {
                     *imported_total.entry(n.clone()).or_insert(0) += c;
@@ -167,8 +188,8 @@ pub fn cmd_tree_rank(
         if defining.contains(rel.as_str()) && !counts.is_empty() {
             self_counts.insert(rel.clone(), counts);
         }
-        if defining.contains(rel.as_str()) && src.contains("export") {
-            listed.insert(rel.clone(), export_list_names(&src));
+        if let Some(l) = l {
+            listed.insert(rel.clone(), l);
         }
     }
 

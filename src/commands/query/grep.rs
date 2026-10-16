@@ -427,24 +427,8 @@ fn regexish_literal(pattern: &str) -> Option<String> {
 /// few ms on a mid-size repo) — and rg's paths needed per-OS normalizing.
 /// Unreadable files drop out; every caller skips them anyway.
 pub(crate) fn prefilter_indexed(root: &Path, files: Vec<String>, matcher: &Matcher) -> Vec<String> {
-    let hit = |rel: &String| {
+    let keep = crate::commands::par_map(&files, 64, |rel| {
         std::fs::read_to_string(root.join(rel)).is_ok_and(|src| matcher.matches_text(&src))
-    };
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    // Thread spawn costs more than reading a handful of small files.
-    if threads == 1 || files.len() < 64 {
-        return files.into_iter().filter(|f| hit(f)).collect();
-    }
-    let chunk = files.len().div_ceil(threads);
-    let keep: Vec<bool> = std::thread::scope(|s| {
-        let handles: Vec<_> = files
-            .chunks(chunk)
-            .map(|part| s.spawn(move || part.iter().map(hit).collect::<Vec<bool>>()))
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap_or_default())
-            .collect()
     });
     files
         .into_iter()
