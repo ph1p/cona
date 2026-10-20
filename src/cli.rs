@@ -161,6 +161,9 @@ pub struct RefsArgs {
     /// Only references in files under this path prefix (file or directory)
     #[arg(long)]
     pub path: Option<String>,
+    /// List test-file sites too (default: folded into one count line)
+    #[arg(long)]
+    pub tests: bool,
 }
 
 #[derive(clap::Args)]

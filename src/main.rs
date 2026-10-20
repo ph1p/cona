@@ -202,9 +202,14 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Nav(Nav::Refs(a)) | Cmd::Refs(a) => {
-            let RefsArgs { name, limit, path } = a;
+            let RefsArgs {
+                name,
+                limit,
+                path,
+                tests,
+            } = a;
             queried(&root, t0, "refs", name, |conn| {
-                cmd_refs(&root, conn, name, *limit, path.as_deref(), cli.json)
+                cmd_refs(&root, conn, name, *limit, path.as_deref(), *tests, cli.json)
             })?;
         }
         Cmd::Inspect(Inspect::Context(a)) | Cmd::ContextFlat(a) => {

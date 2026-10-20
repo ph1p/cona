@@ -36,7 +36,7 @@ fn all_tools() -> Vec<serde_json::Value> {
         mcp_tool(
             "refs",
             "Usage sites of a name as file:line (semantic — strings/comments don't match). Use instead of grepping for callers/usages",
-            json!({"name": s("identifier name"), "path": s("only references in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 100)"}}),
+            json!({"name": s("identifier name"), "path": s("only references in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 100)"}, "tests": {"type": "boolean", "description": "list test-file sites too (default: folded into one count line)"}}),
             &["name"],
             read_only("Find references"),
         ),
@@ -328,6 +328,7 @@ fn mcp_call(
                 n,
                 uint("limit", defaults::REFS_LIMIT),
                 opt("path"),
+                flag("tests"),
                 false,
             )?;
             (o, b, n.to_string())

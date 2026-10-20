@@ -82,7 +82,7 @@ cona edit open_project_db --file new.rs   # replace it, syntax-verified
 | ------------------------- | -------------------------------------------------------------- |
 | `cona find <Name>`        | Locate a symbol: file, line range, signature                   |
 | `cona grep <text>`        | Code-only search, hits labeled by symbol (`--regex` for regex) |
-| `cona refs <Name>`        | Every usage site; skips strings and comments                   |
+| `cona refs <Name>`        | Every usage site; skips strings and comments, folds test sites |
 | `cona diff [ref]`         | Changed _symbols_ vs a git ref; a good start for reviews       |
 | `cona impact <Sym>`       | Before an edit: refs, callers, tests, history                  |
 | `cona insert <Sym> [--after]` | Add code before/after a symbol (stdin or `--file`), syntax-verified |

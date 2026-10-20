@@ -394,3 +394,60 @@ fn line_ranges_grep_counts_and_honest_misses() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// refs folds test-file sites into one count line: on a hot symbol they
+// outnumber production sites and eat the limit. --tests, --path, or a symbol
+// used only in tests show them.
+#[test]
+fn refs_folds_test_sites() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("cona-refs-fold-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::write(
+        dir.join("a.rs"),
+        "pub fn alpha() {}\nfn main() { alpha(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("tests/t.rs"),
+        "fn t() { alpha(); }\nfn only_t() {}\nfn u() { only_t(); }\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let run = |args: &[&str]| -> String {
+        let o = Command::new(bin)
+            .args(args)
+            .env("CONA_DATA_DIR", dir.join(".cona-data"))
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).to_string()
+    };
+    run(&["index"]);
+
+    let out = run(&["refs", "alpha"]);
+    assert!(
+        out.contains("a.rs\n") && !out.contains("tests/t.rs"),
+        "{out}"
+    );
+    assert!(out.contains("+ 1 test site in 1 file folded"), "{out}");
+    let out = run(&["refs", "alpha", "--tests"]);
+    assert!(
+        out.contains("tests/t.rs") && !out.contains("folded"),
+        "{out}"
+    );
+    let out = run(&["refs", "alpha", "--path", "tests"]);
+    assert!(
+        out.contains("tests/t.rs") && !out.contains("folded"),
+        "{out}"
+    );
+    // only test sites: they are the answer, not folded away
+    let out = run(&["refs", "only_t"]);
+    assert!(
+        out.contains("tests/t.rs") && !out.contains("folded"),
+        "{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
