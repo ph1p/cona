@@ -4,7 +4,7 @@
 //! (`cona mcp`). Two config shapes cover every harness:
 //!
 //! * JSON with a server map under one top-level key — Claude Code (`.mcp.json`),
-//!   Cursor, Gemini CLI, Windsurf, Qwen, Copilot. The key is NOT universal
+//!   Cursor, Gemini CLI, Windsurf, Qwen, Copilot, Devin. The key is NOT universal
 //!   (`mcp` for OpenCode/Crush, `context_servers` for Zed), and a wrong key is
 //!   a silent no-op. See `ServerKey`.
 //! * TOML with an `[mcp_servers.cona]` table — Codex (`~/.codex/config.toml`).
