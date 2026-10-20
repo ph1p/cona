@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.38](https://github.com/ph1p/cona/compare/v0.0.37...v0.0.38) - 2026-10-20
+
+### Added
+
+- *(agents)* add Devin CLI target
+
+### Other
+
+- *(mcp)* list Devin among mcpServers harnesses
+
 ## [0.0.37](https://github.com/ph1p/cona/compare/v0.0.36...v0.0.37) - 2026-10-16
 
 ### Other
