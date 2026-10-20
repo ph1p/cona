@@ -44,9 +44,11 @@ err() { echo "error: $*" >&2; exit 1; }
 if command -v curl >/dev/null 2>&1; then
     dl() { curl -fsSL -A cona-install "$1" -o "$2"; }
     fetch() { curl -fsSL -A cona-install "$1"; }
+    probe() { curl -fsIL -A cona-install -o /dev/null "$1"; }
 elif command -v wget >/dev/null 2>&1; then
     dl() { wget -qO "$2" "$1"; }
     fetch() { wget -qO- "$1"; }
+    probe() { wget -q --spider "$1"; }
 else
     err "need curl or wget (or run ./install.sh from a source checkout with cargo)"
 fi
@@ -67,9 +69,20 @@ target="${archp}-${osp}"
 
 ver="${CONA_VERSION:-}"
 if [ -z "$ver" ]; then
-    ver="$(fetch "https://api.github.com/repos/$REPO/releases/latest" \
-        | sed -n 's/.*"tag_name":[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
-    [ -n "$ver" ] || err "could not resolve latest version — set CONA_VERSION"
+    # Newest release that has an archive for this target: a tag whose build
+    # failed has no assets, yet `releases/latest` would still name it.
+    # The API may answer on ONE line; split so each tag_name is its own match.
+    tags="$(fetch "https://api.github.com/repos/$REPO/releases?per_page=5" \
+        | tr ',' '\n' | sed -n 's/.*"tag_name":[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p')"
+    [ -n "$tags" ] || err "could not list releases — set CONA_VERSION"
+    for t in $tags; do
+        if probe "https://github.com/$REPO/releases/download/v$t/cona-v$t-$target.tar.gz"; then
+            ver="$t"
+            break
+        fi
+        echo "note: v$t has no $target build — trying an older release"
+    done
+    [ -n "$ver" ] || err "no recent release has a $target build — set CONA_VERSION"
 fi
 ver="${ver#v}"
 
