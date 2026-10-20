@@ -3,3 +3,4 @@
 AGENTS.md
 /.claude/
 .DS_Store
+/scripts/bench/

@@ -8,8 +8,9 @@
 
 cona indexes your project into a symbol tree (functions, classes, methods with
 exact line ranges), so a coding agent pulls the one symbol it needs instead of
-the whole file. Fewer tokens, faster answers, lower cost. One Rust binary,
-tree-sitter + SQLite, works across all your projects.
+the whole file. In a measured A/B run with Claude Opus that meant **43% lower
+cost, a third fewer turns and answers in half the time** ([details](#does-it-actually-save-tokens)).
+One Rust binary, tree-sitter + SQLite, works across all your projects.
 
 ```sh
 cargo install cona      # or the install script, see below
@@ -30,7 +31,39 @@ symbol, and the index refreshes itself on every commit and edit.
    a name) and points the agent at the cheaper query. It never blocks anything
    else and always fails open.
 4. **Measure.** Every query logs what it returned vs. what grep-then-read would
-   have cost. `cona stats` and `cona ui` show the savings.
+   have cost. `cona stats` and `cona ui` show that estimate per project.
+
+## Does it actually save tokens?
+
+Measured, not estimated: the same 9 questions about this repo, each asked 3
+times by Claude Opus 5.5 in a fresh `claude -p --bare` session, once with cona
+(MCP server only, no hooks, no extra prompt) and once without (2026-10-20,
+cona 0.0.39).
+
+| Mean per session          | Without cona | With cona | Change   |
+| ------------------------- | -----------: | --------: | -------: |
+| Cost                      |      $0.023  |   $0.013  | **−43%** |
+| Uncached input tokens     |       2,486  |    1,337  | −46%     |
+| Output tokens             |         429  |      204  | −52%     |
+| Turns                     |         3.8  |      2.6  | −32%     |
+| Wall time                 |       12.7 s |     6.0 s | −53%     |
+| Correct answers           |       27/27  |    27/27  |          |
+
+Where it comes from: fewer round trips. `find` → `show` lands on the answer
+where grep → read → read takes more turns, so less output and less fresh
+context. What it costs: cona's tool schemas ride along on every turn, so
+*cached* input goes up (+34%) — cheap, which is why the bill still drops.
+Quick lookups gain most (down to ¼–⅓ of the cost); multi-file tracing
+questions use as many or more total tokens but still cost 23–43% less.
+
+Limits: one repo of 85 files and read-only questions. Bigger repos make grep
+and full reads more expensive, so the gap should widen, but that is untested.
+Hooks were off, so their effect is not part of these numbers. The whole run
+cost under $1.
+
+`cona stats` reports a much higher share (~90%+) because it compares against a
+modeled grep-then-read baseline per query and ignores the per-turn schema cost.
+Read it as a trend, not a bill.
 
 ## Commands
 
@@ -40,7 +73,7 @@ From coarse to fine:
 cona tree --rank              # ranked overview of the codebase
 cona outline src/indexer.rs   # every symbol in a file
 cona show open_project_db     # just that symbol's source
-cona show src/db.rs:40-80      # just those lines (no sed -n)
+cona show src/db/mod.rs:40-80 # just those lines (no sed -n)
 cona context open_project_db  # the symbol + what it calls + who calls it
 cona edit open_project_db --file new.rs   # replace it, syntax-verified
 ```
@@ -61,7 +94,7 @@ cona edit open_project_db --file new.rs   # replace it, syntax-verified
 
 Handy flags:
 
-- `--path <dir>` scopes `find`/`refs`/`grep`/`tree` to a subtree.
+- `--path <dir>` scopes `find`/`refs`/`grep`/`tree`/`show` to a subtree.
 - `show <Sym> --all` prints every definition of an ambiguous name.
 - A symbol can be written as `Name`, `Parent.Name` or `file.rs:Name`.
 - `grep --include-deps` also searches `node_modules`/`vendor`/… (not indexed).
@@ -169,8 +202,9 @@ To add it by hand:
 ```
 
 The server lists 8 core tools plus a `more` tool that unlocks 13 advanced ones,
-which keeps the per-turn schema cost low. Where hooks are available, the CLI +
-hook setup is still the cheapest option; MCP is the fallback.
+which keeps the per-turn schema cost low (~1.8k tokens, mostly cached). The
+benchmark above used MCP alone; where hooks are available they add the read
+redirect on top.
 
 ## Languages
 
@@ -201,9 +235,11 @@ XML/HTML elements become symbols named `tag#identity`, e.g.
   for TS/JS/Python/Rust.
 - **Read-only mode.** `cona --read-only <query>` reads an existing index without
   indexing, logging stats or writing anything.
-- **Savings are an estimate.** Baseline = grep, then read ±40 lines around each
-  hit (capped at the whole file), at 4 characters per token. A trend, not an
-  invoice.
+- **`stats` savings are an estimate.** Baseline = grep, then read ±40 lines
+  around each hit (capped at the whole file), at 4 characters per token; `find`
+  claims nothing (the follow-up `show` does), and identical queries within 2s
+  count once. It overstates the real saving — see
+  [Does it actually save tokens?](#does-it-actually-save-tokens).
 
 ### Environment variables
 

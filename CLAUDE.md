@@ -365,8 +365,6 @@ rows in every aggregate. `find` claims 0 (it replaces only the
 grep pass; the Read is the follow-up show's) — `SAVED_SUM` zeroes old find
 rows too. `log_usage_outcome` drops a row whose project+cmd+detail was logged
 within `REPEAT_WINDOW_SECS` (benchmark loops) and logs nothing under
-`CONA_NO_STATS` (ab.sh sets it). `stats --daily/--weekly` = `savings_series`.
+`CONA_NO_STATS` (set it for benchmark runs). `stats --daily/--weekly` = `savings_series`.
 `cona discover` reads `~/.claude/projects/<dir>/**/*.jsonl` (read-only, never
 logged elsewhere) and reports full code reads cona could have answered.
-`scripts/bench/ab.sh` = honest A/B (claude -p, control vs cona arm, costs API
-money — never run in CI).
