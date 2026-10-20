@@ -255,3 +255,25 @@ fn old_tree_rows_are_capped_in_totals() {
     assert_eq!(orient_baseline(4 * 1_000_000), ORIENT_BASELINE_CAP);
     assert_eq!(orient_baseline(400), 100);
 }
+
+#[test]
+fn old_find_rows_claim_no_savings() {
+    let g = usage_with(&[
+        (1, "/p", "find", 56_000, "run", ""),
+        (2, "/p", "mcp:find", 9_000, "run", ""),
+        (3, "/p", "show", 100, "Foo", ""),
+    ]);
+    assert_eq!(totals(&g, Some("/p")).unwrap().tokens_saved, 100);
+}
+
+#[test]
+fn repeat_queries_inside_the_window_are_detected() {
+    let g = usage_with(&[(100, "/p", "grep", 50, "alpha", "")]);
+    assert!(is_repeat(&g, "/p", "grep", "alpha", 100 + REPEAT_WINDOW_SECS));
+    // past the window, other cmd/target/project, or no target → logged
+    assert!(!is_repeat(&g, "/p", "grep", "alpha", 101 + REPEAT_WINDOW_SECS));
+    assert!(!is_repeat(&g, "/p", "refs", "alpha", 100));
+    assert!(!is_repeat(&g, "/p", "grep", "beta", 100));
+    assert!(!is_repeat(&g, "/q", "grep", "alpha", 100));
+    assert!(!is_repeat(&g, "/p", "grep", "", 100));
+}

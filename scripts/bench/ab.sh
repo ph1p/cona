@@ -33,6 +33,9 @@ mcp="$here/../../plugin/.mcp.json"
 command -v jq >/dev/null || { echo "error: jq not found" >&2; exit 1; }
 command -v cona >/dev/null || { echo "error: cona not on PATH" >&2; exit 1; }
 
+# bench sessions are not real usage — keep them out of `cona stats`
+export CONA_NO_STATS=1
+
 control_args="${CONTROL_ARGS:---disallowedTools Bash(cona:*) mcp__cona}"
 cona_args="${CONA_ARGS:---strict-mcp-config --mcp-config $mcp}"
 model_args=""

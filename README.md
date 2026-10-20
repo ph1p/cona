@@ -219,6 +219,7 @@ XML/HTML elements become symbols named `tag#identity`, e.g.
 | `CONA_NUDGE_EVERY`          | In unindexed repos: suggest `cona index` every n events (10, `0` = never) |
 | `CONA_USAGE_RETENTION_DAYS` | Keep usage stats this long (90)                            |
 | `CONA_MAX_USAGE_ROWS`       | Cap on stored usage rows (200k)                            |
+| `CONA_NO_STATS`             | Don't log usage stats (benchmarks, scripted loops)         |
 | `CONA_RESOLVE_HELPER`       | Path to the stack-graphs helper binary                     |
 | `CONA_NO_FETCH_HELPER`      | Never download the helper                                  |
 

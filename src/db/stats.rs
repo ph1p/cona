@@ -38,9 +38,12 @@ fn scope_clause(project: Option<&str>) -> (String, Vec<String>) {
 }
 
 /// `SUM(tokens_saved)` with `ORIENT_BASELINE_CAP` applied to older rows, so
-/// uncapped `tree` rows (one claimed 700k) stop dominating every total.
+/// uncapped `tree` rows (one claimed 700k) stop dominating every total, and
+/// `find` zeroed: old rows claimed every hit file's whole size, but a find
+/// only replaces the grep pass — the Read is credited to the follow-up show.
 pub(crate) const SAVED_SUM: &str = "COALESCE(SUM(CASE WHEN cmd IN ('tree','mcp:tree') \
-     THEN MIN(tokens_saved, 20000) ELSE tokens_saved END),0)";
+     THEN MIN(tokens_saved, 20000) WHEN cmd IN ('find','mcp:find') THEN 0 \
+     ELSE tokens_saved END),0)";
 
 pub fn totals(g: &Connection, project: Option<&str>) -> Result<Totals> {
     let (where_, params) = scope_clause(project);

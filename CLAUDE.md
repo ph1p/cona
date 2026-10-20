@@ -361,7 +361,11 @@ migration, index `usage_project_ts`) feeds `stats`' failed column and
 project within `CONVERSION_WINDOW_SECS` (time-correlated, not session-exact).
 Orientation baseline (`tree`) is capped at `ORIENT_BASELINE_CAP` (20k) via
 `db::orient_baseline`; `SAVED_SUM` applies the same cap retroactively to old
-rows in every aggregate. `stats --daily/--weekly` = `savings_series`.
+rows in every aggregate. `find` claims 0 (it replaces only the
+grep pass; the Read is the follow-up show's) — `SAVED_SUM` zeroes old find
+rows too. `log_usage_outcome` drops a row whose project+cmd+detail was logged
+within `REPEAT_WINDOW_SECS` (benchmark loops) and logs nothing under
+`CONA_NO_STATS` (ab.sh sets it). `stats --daily/--weekly` = `savings_series`.
 `cona discover` reads `~/.claude/projects/<dir>/**/*.jsonl` (read-only, never
 logged elsewhere) and reports full code reads cona could have answered.
 `scripts/bench/ab.sh` = honest A/B (claude -p, control vs cona arm, costs API

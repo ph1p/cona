@@ -1,10 +1,9 @@
 //! `find`: exact / LIKE / fuzzy symbol lookup.
 
 use crate::commands::{clip, jout, PathFilter, LIMIT_TRAILER};
-use crate::{db, fuzzy};
+use crate::fuzzy;
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::HashSet;
 use std::path::Path;
 
 pub fn cmd_find(
@@ -19,7 +18,7 @@ pub fn cmd_find(
     let pf = PathFilter::new(root, path_filter);
     let kind_clause = kind.map(|_| "AND s.kind = ?4").unwrap_or("");
     let sql = format!(
-        "SELECT f.path, s.kind, s.qualified, s.start_line, s.end_line, s.signature, f.size,
+        "SELECT f.path, s.kind, s.qualified, s.start_line, s.end_line, s.signature,
                 CASE WHEN s.name = ?1 OR s.qualified = ?1 THEN 0 ELSE 1 END AS rank
          FROM symbols s JOIN files f ON f.id = s.file_id
          WHERE (s.name = ?1 OR s.qualified = ?1 OR s.name LIKE ?2 OR s.qualified LIKE ?2)
@@ -39,7 +38,7 @@ pub fn cmd_find(
     } as i64;
     let mut stmt = conn.prepare(&sql)?;
     let mapper =
-        |r: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, i64, String, i64)> {
+        |r: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, i64, String)> {
             Ok((
                 r.get(0)?,
                 r.get(1)?,
@@ -47,10 +46,9 @@ pub fn cmd_find(
                 r.get(3)?,
                 r.get(4)?,
                 r.get(5)?,
-                r.get(6)?,
             ))
         };
-    let mut rows: Vec<(String, String, String, i64, i64, String, i64)> = if let Some(k) = kind {
+    let mut rows: Vec<(String, String, String, i64, i64, String)> = if let Some(k) = kind {
         stmt.query_map(rusqlite::params![name, like, sql_limit, k], mapper)?
             .flatten()
             .collect()
@@ -78,26 +76,21 @@ pub fn cmd_find(
         return cmd_find_fuzzy(conn, name, kind, json);
     }
     let truncated = clip(&mut rows, limit);
-    // Baseline: each hit file's size once (rank-ordered, so dedup via a set).
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut bytes: i64 = 0;
-    for (p, .., size) in &rows {
-        if seen.insert(p) {
-            bytes += size;
-        }
-    }
-    let baseline = db::est_tokens(bytes as usize);
+    // Baseline 0: a find replaces only the grep pass (≈ free in the
+    // grep-then-Read model); the Read it avoids is credited to the follow-up
+    // show, so counting it here too would double-count.
+    let baseline = 0;
     if json {
         let items: Vec<_> = rows
             .iter()
-            .map(|(p, k, q, s, e, sig, _)| {
+            .map(|(p, k, q, s, e, sig)| {
                 serde_json::json!({"file": p, "kind": k, "symbol": q, "start": s, "end": e, "sig": sig})
             })
             .collect();
         return jout(&items, baseline);
     }
     let mut out = String::new();
-    for (path, kind, q, s, e, sig, _) in rows {
+    for (path, kind, q, s, e, sig) in rows {
         out.push_str(&format!("{kind} {q}  {path}:{s}-{e}  {sig}\n"));
     }
     if truncated {
@@ -121,10 +114,9 @@ pub fn cmd_find_fuzzy(
         start: i64,
         end: i64,
         sig: String,
-        size: i64,
     }
     let mut stmt = conn.prepare(
-        "SELECT f.path, s.kind, s.qualified, s.start_line, s.end_line, s.signature, f.size, s.name
+        "SELECT f.path, s.kind, s.qualified, s.start_line, s.end_line, s.signature, s.name
          FROM symbols s JOIN files f ON f.id = s.file_id",
     )?;
     let candidates: Vec<(Hit, String)> = stmt
@@ -136,9 +128,8 @@ pub fn cmd_find_fuzzy(
                 start: r.get(3)?,
                 end: r.get(4)?,
                 sig: r.get(5)?,
-                size: r.get(6)?,
             };
-            let bare: String = r.get(7)?;
+            let bare: String = r.get(6)?;
             Ok((hit, bare))
         })?
         .flatten()
@@ -158,14 +149,7 @@ pub fn cmd_find_fuzzy(
     if scored.is_empty() {
         return Ok((format!("no match for '{name}'\n"), 0));
     }
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut bytes: i64 = 0;
-    for (_, hit) in &scored {
-        if seen.insert(&hit.path) {
-            bytes += hit.size;
-        }
-    }
-    let baseline = db::est_tokens(bytes as usize);
+    let baseline = 0; // same as cmd_find: the follow-up show earns the saving
     if json {
         let items: Vec<_> = scored
             .iter()

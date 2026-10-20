@@ -42,12 +42,19 @@ pub fn log_usage_outcome(
     detail: &str,
     outcome: &str,
 ) {
+    if std::env::var_os("CONA_NO_STATS").is_some_and(|v| !v.is_empty()) {
+        return;
+    }
     if let Ok(g) = open_global_db() {
+        let ts = now();
+        if is_repeat(&g, &root.to_string_lossy(), cmd, detail, ts) {
+            return;
+        }
         let _ = g.execute(
             "INSERT INTO usage(ts, project, cmd, ms, results, tokens_out, tokens_saved, detail, outcome)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
-                now(),
+                ts,
                 root.to_string_lossy(),
                 cmd,
                 ms,
@@ -125,6 +132,24 @@ pub fn notes_all(conn: &Connection) -> Result<Vec<(i64, String, String, i64)>> {
         .flatten()
         .collect();
     Ok(rows)
+}
+
+/// Seconds within which an identical query counts as a repeat.
+pub const REPEAT_WINDOW_SECS: i64 = 2;
+
+/// Same project + cmd + target logged within `REPEAT_WINDOW_SECS`? Agents
+/// don't re-ask the same question within two seconds; benchmark loops
+/// (hyperfine over `cona grep X`) do, and each run would otherwise claim the
+/// full baseline again. Rows without a target (index, plain log_usage) are
+/// never deduped.
+pub fn is_repeat(g: &Connection, project: &str, cmd: &str, detail: &str, ts: i64) -> bool {
+    !detail.is_empty()
+        && g.query_row(
+            "SELECT 1 FROM usage WHERE project = ?1 AND ts >= ?2 AND cmd = ?3 AND detail = ?4 LIMIT 1",
+            rusqlite::params![project, ts - REPEAT_WINDOW_SECS, cmd, detail],
+            |_| Ok(()),
+        )
+        .is_ok()
 }
 
 /// Rough token estimate (chars / 4).
