@@ -41,6 +41,7 @@ else
         "$XDG/opencode/AGENTS.md" "$XDG/opencode/opencode.json" \
         "$XDG/zed/AGENTS.md" "$XDG/zed/settings.json" \
         "$XDG/crush/CRUSH.md" "$XDG/crush/crush.json" \
+        "$XDG/devin/AGENTS.md" "$XDG/devin/mcp_config.json" \
         "$HOME/.codeium/windsurf/memories/global_rules.md" \
         "$HOME/.codeium/windsurf/mcp_config.json" \
         "$HOME/.qwen/QWEN.md" "$HOME/.qwen/settings.json" \

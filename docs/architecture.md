@@ -479,7 +479,7 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           without that set it would take a user's empty event —
                           and, if it was the only key, the whole settings.json.
                           xdg_config = THE $XDG_CONFIG_HOME rule (opencode/zed/
-                          crush): honoured only when absolute AND under the
+                          crush/devin): honoured only when absolute AND under the
                           `home` being probed — an inherited value would let a
                           synthetic test/probe home escape into the developer's
                           real ~/.config; uninstall.sh guards the same way.
@@ -496,10 +496,10 @@ src/install/     install/upgrade/uninstall/agents/doctor:
                           disagree about ownership.
                           TWO per-scope path lists, deliberately separate:
                           config_paths = the guide/skill/hook targets a scope can
-                          ACT on (empty at project scope for pi/opencode/zed —
-                          the latter two read the project AGENTS.md the generic
-                          bucket already owns, so a second writer would fight
-                          over one marker block) → agents_in_scope +
+                          ACT on (empty at project scope for pi/opencode/zed/
+                          devin — the latter three read the project AGENTS.md
+                          the generic bucket already owns, so a second writer
+                          would fight over one marker block) → agents_in_scope +
                           the n/a cells; footprint_paths = those PLUS the MCP
                           entry (Presence::McpServer) + Claude's subagent-defs
                           probe (Presence::SubagentDefs) = "is cona installed

@@ -36,11 +36,12 @@ pub enum AgentName {
     Qwen,
     Crush,
     Copilot,
+    Devin,
 }
 
 impl AgentName {
     /// Every agent, in menu/priority order. The one place the full set lives.
-    pub const ALL: [AgentName; 11] = [
+    pub const ALL: [AgentName; 12] = [
         AgentName::Claude,
         AgentName::Agents,
         AgentName::Cursor,
@@ -51,6 +52,7 @@ impl AgentName {
         AgentName::Qwen,
         AgentName::Crush,
         AgentName::Copilot,
+        AgentName::Devin,
         AgentName::Pi,
     ];
 
@@ -68,6 +70,7 @@ impl AgentName {
             AgentName::Qwen => "qwen",
             AgentName::Crush => "crush",
             AgentName::Copilot => "copilot",
+            AgentName::Devin => "devin",
         }
     }
 
@@ -88,6 +91,7 @@ impl AgentName {
             AgentName::Qwen => "Qwen Code — QWEN.md",
             AgentName::Crush => "Crush — CRUSH.md",
             AgentName::Copilot => "GitHub Copilot — copilot-instructions.md",
+            AgentName::Devin => "Devin CLI — AGENTS.md + mcp_config.json",
         }
     }
 
@@ -148,11 +152,11 @@ impl AgentName {
                     project_root.join(".windsurf").exists()
                 }
             }
-            AgentName::Zed => {
+            AgentName::Zed | AgentName::Devin => {
                 if global {
-                    xdg_config(home).join("zed").exists()
+                    xdg_config(home).join(self.slug()).exists()
                 } else {
-                    project_root.join(".zed").exists()
+                    project_root.join(format!(".{}", self.slug())).exists()
                 }
             }
             AgentName::Qwen => {
@@ -253,17 +257,15 @@ impl AgentName {
             // Pi only has its own path at global scope.
             AgentName::Pi if global => vec![(home.join(".pi/agent/AGENTS.md"), Presence::Marker)],
             AgentName::Pi => vec![],
-            // OpenCode / Zed read the PROJECT AGENTS.md the generic bucket owns
-            // (two writers would fight over one marker block), so at project
-            // scope they contribute only their MCP entry.
-            AgentName::Opencode if global => vec![(
-                xdg_config(home).join("opencode/AGENTS.md"),
+            // OpenCode / Zed / Devin read the PROJECT AGENTS.md the generic
+            // bucket owns (two writers would fight over one marker block), so at
+            // project scope they contribute only their MCP entry. Globally each
+            // keeps an AGENTS.md under its XDG config dir, named by its slug.
+            AgentName::Opencode | AgentName::Zed | AgentName::Devin if global => vec![(
+                xdg_config(home).join(self.slug()).join("AGENTS.md"),
                 Presence::Marker,
             )],
-            AgentName::Zed if global => {
-                vec![(xdg_config(home).join("zed/AGENTS.md"), Presence::Marker)]
-            }
-            AgentName::Opencode | AgentName::Zed => vec![],
+            AgentName::Opencode | AgentName::Zed | AgentName::Devin => vec![],
             // Windsurf: project rule file is ours alone; the global memories
             // file is shared, so a marker block.
             AgentName::Windsurf if global => vec![(
@@ -332,6 +334,10 @@ impl AgentName {
             // The VS Code extension's `.vscode/mcp.json` is IDE-managed, not ours.
             AgentName::Copilot if global => Some(home.join(".copilot/mcp-config.json")),
             AgentName::Copilot => None,
+            // Since Devin CLI v3000.3, servers live in their own file (older
+            // `config.json` entries are migrated on startup).
+            AgentName::Devin if global => Some(xdg_config(home).join("devin/mcp_config.json")),
+            AgentName::Devin => Some(project_root.join(".devin/mcp_config.json")),
         }
     }
 
@@ -359,6 +365,7 @@ impl AgentName {
             AgentName::Qwen => "qwen memory",
             AgentName::Crush => "crush memory",
             AgentName::Copilot => "copilot guide",
+            AgentName::Devin => "devin guide",
             AgentName::Claude => "claude skill",
             AgentName::Agents => "AGENTS.md",
             AgentName::Cursor => "cursor rule",

@@ -267,7 +267,12 @@ fn config_paths_empty_only_for_pi_project_scope() {
     // Exactly the agents whose project guide is the AGENTS.md the generic
     // bucket owns (two owners would fight over one marker block). Checked
     // over ALL, so a new agent that forgets a project target fails HERE.
-    let no_project_target = [AgentName::Pi, AgentName::Opencode, AgentName::Zed];
+    let no_project_target = [
+        AgentName::Pi,
+        AgentName::Opencode,
+        AgentName::Zed,
+        AgentName::Devin,
+    ];
     for a in AgentName::ALL {
         let empty = a.config_paths(proj, home, false).is_empty();
         assert_eq!(

@@ -206,7 +206,7 @@ pub fn toml_server(path: &Path, exe: &str, install: bool) -> Result<Change> {
 ///
 /// Substring, not a parse: this is on the auto-refresh hot path (every command
 /// → `maybe_refresh_project_config` → `project_has_cona` → `installed`), where
-/// parsing up to eight configs is real cost for a boolean. Same trade as
+/// parsing one config per agent is real cost for a boolean. Same trade as
 /// `Presence::Needle`; the writers still parse properly.
 pub fn registered(path: &Path) -> bool {
     let Ok(body) = std::fs::read_to_string(path) else {

@@ -108,7 +108,7 @@ cona agents uninstall cursor       # remove it again
 
 Supported: `claude`, `agents` (project `AGENTS.md`, read by Codex, Amp, Jules,
 Cline), `cursor`, `gemini`, `opencode`, `windsurf`, `zed`, `qwen`, `crush`,
-`copilot`, `pi`. Installing writes a short usage guide, and where the harness
+`copilot`, `devin`, `pi`. Installing writes a short usage guide, and where the harness
 supports it, hooks, a skill and the MCP server. Every change sits between
 `<!-- cona:begin/end -->` markers or in cona's own entries; your own config is
 never touched, and re-running is safe.
@@ -148,18 +148,19 @@ cona uninstall -y --purge   # also delete ~/.cona (indexes + stats)
 `cona mcp` serves the same tools over stdio. `cona agents install` registers it
 automatically wherever the harness config directory exists:
 
-| Harness     | Project                 | Global                                |
-| ----------- | ----------------------- | ------------------------------------- |
-| Claude Code | `.mcp.json`             | —                                     |
-| Codex       | `.codex/config.toml`    | `~/.codex/config.toml`                |
-| Cursor      | `.cursor/mcp.json`      | `~/.cursor/mcp.json`                  |
-| Gemini CLI  | `.gemini/settings.json` | `~/.gemini/settings.json`             |
-| OpenCode    | `opencode.json`         | `~/.config/opencode/opencode.json`    |
-| Zed         | `.zed/settings.json`    | `~/.config/zed/settings.json`         |
-| Qwen Code   | `.qwen/settings.json`   | `~/.qwen/settings.json`               |
-| Crush       | `.crush.json`           | `~/.config/crush/crush.json`          |
-| Windsurf    | —                       | `~/.codeium/windsurf/mcp_config.json` |
-| Copilot CLI | —                       | `~/.copilot/mcp-config.json`          |
+| Harness     | Project                  | Global                                |
+| ----------- | ------------------------ | ------------------------------------- |
+| Claude Code | `.mcp.json`              | —                                     |
+| Codex       | `.codex/config.toml`     | `~/.codex/config.toml`                |
+| Cursor      | `.cursor/mcp.json`       | `~/.cursor/mcp.json`                  |
+| Gemini CLI  | `.gemini/settings.json`  | `~/.gemini/settings.json`             |
+| OpenCode    | `opencode.json`          | `~/.config/opencode/opencode.json`    |
+| Zed         | `.zed/settings.json`     | `~/.config/zed/settings.json`         |
+| Qwen Code   | `.qwen/settings.json`    | `~/.qwen/settings.json`               |
+| Crush       | `.crush.json`            | `~/.config/crush/crush.json`          |
+| Devin CLI   | `.devin/mcp_config.json` | `~/.config/devin/mcp_config.json`     |
+| Windsurf    | —                        | `~/.codeium/windsurf/mcp_config.json` |
+| Copilot CLI | —                        | `~/.copilot/mcp-config.json`          |
 
 To add it by hand:
 
