@@ -43,35 +43,20 @@ pub fn tool_annotated(
     v
 }
 
-/// One tool's result: the text plus, when the tool declares an `outputSchema`,
-/// the machine-readable form as `structuredContent`.
-///
-/// Text is never optional: the spec keeps `content` authoritative and
-/// `structuredContent` is an addition, so a structured tool emits BOTH —
-/// dropping text breaks every client that only reads content blocks.
+/// One tool's result. Text only — no tool declares an `outputSchema`, because
+/// Claude Code feeds `structuredContent` to the model in place of the text,
+/// and the JSON rows cost ~2× the tokens of the compact text render.
 pub struct ToolOut {
     pub text: String,
-    pub structured: Option<Value>,
     /// Set by the disclosure gate: this call revealed the extended tools, so
     /// tools/list must start returning them and the client must be told.
     pub expand: bool,
 }
 
 impl ToolOut {
-    /// Text-only result (no `outputSchema` on this tool).
     pub fn text(text: String) -> Self {
         Self {
             text,
-            structured: None,
-            expand: false,
-        }
-    }
-
-    /// Text plus the structured payload matching the tool's `outputSchema`.
-    pub fn structured(text: String, structured: Value) -> Self {
-        Self {
-            text,
-            structured: Some(structured),
             expand: false,
         }
     }
@@ -87,28 +72,6 @@ impl From<String> for ToolOut {
     fn from(text: String) -> Self {
         Self::text(text)
     }
-}
-
-/// Attach an `outputSchema` to a tool entry built by `tool`/`tool_annotated`.
-///
-/// A declared schema is a CONTRACT: the server must then return conforming
-/// `structuredContent`, so only wrap tools whose dispatch produces it.
-pub fn with_output_schema(mut tool: Value, schema: Value) -> Value {
-    tool["outputSchema"] = schema;
-    tool
-}
-
-/// `outputSchema` for list-of-rows tools. MCP requires an object at the top
-/// level, so the array rides in a named field.
-pub fn rows_schema(field: &str, item_props: Value, desc: &str) -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            field: {"type": "array", "description": desc,
-                    "items": {"type": "object", "properties": item_props}}
-        },
-        "required": [field]
-    })
 }
 
 /// Read-only tool annotation: safe to call, no side effects, repeatable.
@@ -207,11 +170,7 @@ pub fn serve<R: BufRead, W: Write>(
                     Ok(out) => {
                         newly_expanded = out.expand && !expanded;
                         expanded |= out.expand;
-                        let mut r = json!({"content": [{"type": "text", "text": out.text}]});
-                        if let Some(sc) = out.structured {
-                            r["structuredContent"] = sc;
-                        }
-                        r
+                        json!({"content": [{"type": "text", "text": out.text}]})
                     }
                     Err(e) => json!({
                         "content": [{"type": "text", "text": format!("error: {e}")}],

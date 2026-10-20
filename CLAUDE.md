@@ -155,13 +155,10 @@ Query tools expose optional `limit`/`budget`/`max_depth` knobs (find/refs/grep/
 entries: limit; tree/context/shape: budget; path: max_depth) defaulting to the
 `defaults` module — same numbers as the CLI flags.
 
-**outputSchema.** find/refs/outline declare one and therefore MUST return
-matching `structuredContent` (`ToolOut::structured`); the payload comes from
-re-running the same query with `json = true`, since a cmd_* returns ONE string,
-either text or JSON. The second pass MUST read the same caller-supplied
-`limit` as the first, or structuredContent and text could disagree. Text is never dropped — the spec keeps `content`
-authoritative. A parse/query failure on the second pass degrades to text-only:
-structured content is an optimisation, a failed call is a lost answer.
+**No outputSchema / structuredContent.** Every tool answers in text only.
+Claude Code feeds the model `structuredContent` INSTEAD of the text, and the
+JSON rows repeat the file per hit — `refs` measured ~2× the tokens of its text
+render (idlegame A/B, 2026-10-20). `tests/basic/mcp.rs` pins its absence.
 
 Tool parity with CLI: find/show/refs/outline/tree/grep/context/diff/edit +
 batch_edit/insert/check/impact/callers/callees/path/deps/shape/entries/tests/

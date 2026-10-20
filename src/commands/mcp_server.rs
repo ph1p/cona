@@ -2,26 +2,10 @@
 //! functions. Framing lives in mcp.rs (tested).
 
 use super::*;
-use crate::mcp::{
-    read_only, rows_schema, tool_annotated as mcp_tool, with_output_schema, writes, ToolOut,
-};
+use crate::mcp::{read_only, tool_annotated as mcp_tool, writes, ToolOut};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
-
-/// Wrap a text result with the structured form parsed from the same command's
-/// `--json` render, under `field`.
-///
-/// `json_out` is the cmd_* output with `json = true`. It is parsed rather than
-/// re-queried so payload and text can never describe different index states.
-/// A parse failure degrades to text-only: a missing `structuredContent` is a
-/// lost optimisation, a failed tool call is a lost answer.
-fn structured(text: String, json_out: &str, field: &str) -> ToolOut {
-    match serde_json::from_str::<serde_json::Value>(json_out) {
-        Ok(v) => ToolOut::structured(text, serde_json::json!({field: v})),
-        Err(_) => ToolOut::text(text),
-    }
-}
 
 /// Names of the always-exposed core tools, in tools/list order. The rest are
 /// reachable only after `more` discloses them (see `mcp_tools`).
@@ -35,19 +19,12 @@ fn all_tools() -> Vec<serde_json::Value> {
     use serde_json::json;
     let s = |d: &str| json!({"type": "string", "description": d});
     vec![
-        with_output_schema(
-            mcp_tool(
-                "find",
-                "Locate a symbol by name: file, line range, signature. Use instead of grepping for a definition",
-                json!({"name": s("symbol name (exact, then substring; case-insensitive) — comma-separate several"), "kind": s("filter: fn, struct, class, method, …"), "path": s("only symbols in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 25)"}}),
-                &["name"],
-                read_only("Find symbol"),
-            ),
-            rows_schema(
-                "symbols",
-                json!({"file": s("path relative to project root"), "kind": s("symbol kind"), "symbol": s("qualified name"), "start": {"type": "integer"}, "end": {"type": "integer"}, "sig": s("signature")}),
-                "matching symbols, best match first",
-            ),
+        mcp_tool(
+            "find",
+            "Locate a symbol by name: file, line range, signature. Use instead of grepping for a definition",
+            json!({"name": s("symbol name (exact, then substring; case-insensitive) — comma-separate several"), "kind": s("filter: fn, struct, class, method, …"), "path": s("only symbols in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 25)"}}),
+            &["name"],
+            read_only("Find symbol"),
         ),
         mcp_tool(
             "show",
@@ -56,33 +33,19 @@ fn all_tools() -> Vec<serde_json::Value> {
             &["symbol"],
             read_only("Show symbol source"),
         ),
-        with_output_schema(
-            mcp_tool(
-                "refs",
-                "Usage sites of a name as file:line (semantic — strings/comments don't match). Use instead of grepping for callers/usages",
-                json!({"name": s("identifier name"), "path": s("only references in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 100)"}}),
-                &["name"],
-                read_only("Find references"),
-            ),
-            rows_schema(
-                "refs",
-                json!({"file": s("path relative to project root"), "line": {"type": "integer"}, "text": s("the source line")}),
-                "usage sites",
-            ),
+        mcp_tool(
+            "refs",
+            "Usage sites of a name as file:line (semantic — strings/comments don't match). Use instead of grepping for callers/usages",
+            json!({"name": s("identifier name"), "path": s("only references in files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max results (default 100)"}}),
+            &["name"],
+            read_only("Find references"),
         ),
-        with_output_schema(
-            mcp_tool(
-                "outline",
-                "All symbols of one file with line ranges. Use instead of reading a file to see what's in it, then show the one you need",
-                json!({"file": s("path relative to the project root — comma-separate several"), "sig": {"type": "boolean", "description": "include full signatures (default: names + ranges only)"}}),
-                &["file"],
-                read_only("Outline file"),
-            ),
-            rows_schema(
-                "symbols",
-                json!({"file": s("path relative to project root"), "kind": s("symbol kind"), "symbol": s("qualified name"), "start": {"type": "integer"}, "end": {"type": "integer"}, "sig": s("signature"), "stale": {"type": "boolean", "description": "index line range may be out of date"}}),
-                "symbols in file order",
-            ),
+        mcp_tool(
+            "outline",
+            "All symbols of one file with line ranges. Use instead of reading a file to see what's in it, then show the one you need",
+            json!({"file": s("path relative to the project root — comma-separate several"), "sig": {"type": "boolean", "description": "include full signatures (default: names + ranges only)"}}),
+            &["file"],
+            read_only("Outline file"),
         ),
         mcp_tool(
             "tree",
@@ -567,58 +530,10 @@ fn mcp_call(
     };
     finish(root, &format!("mcp:{name}"), t0, &out, baseline, &detail);
 
-    // Tools that declare an outputSchema must return matching
-    // structuredContent. cmd_* returns ONE string (text or JSON), so the JSON
-    // comes from re-running the query with json = true — a cheap indexed read
-    // on a warm connection, skipped for tools without a schema.
-    //
-    // Errors degrade to text-only: structuredContent is an optimisation, and a
-    // second-pass hiccup must not fail a call whose answer is already in hand.
-    let structured_out = |field: &str, r: Result<(String, i64)>| match r {
-        Ok((j, _)) => structured(out.clone(), &j, field),
-        Err(_) => ToolOut::text(out.clone()),
-    };
-    // A comma batch has no single structured render — its text is the answer.
-    let batched = |k: &str| {
-        args.get(k)
-            .and_then(|v| v.as_str())
-            .is_some_and(|v| v.contains(','))
-    };
-    if (name == "find" && batched("name")) || (name == "outline" && batched("file")) {
-        return Ok(ToolOut::text(out));
-    }
-    Ok(match name {
-        // The second pass MUST read the same caller-supplied limit as the
-        // first — otherwise structuredContent and the text render disagree.
-        "find" => structured_out(
-            "symbols",
-            cmd_find(
-                root,
-                conn,
-                sarg("name")?,
-                opt("kind"),
-                uint("limit", defaults::FIND_LIMIT),
-                opt("path"),
-                true,
-            ),
-        ),
-        "refs" => structured_out(
-            "refs",
-            cmd_refs(
-                root,
-                conn,
-                sarg("name")?,
-                uint("limit", defaults::REFS_LIMIT),
-                opt("path"),
-                true,
-            ),
-        ),
-        "outline" => structured_out(
-            "symbols",
-            cmd_outline(root, conn, sarg("file")?, flag("sig"), true),
-        ),
-        _ => ToolOut::text(out),
-    })
+    // Text only, no outputSchema/structuredContent: Claude Code hands the
+    // model the structured JSON INSTEAD of the text, and the JSON repeats the
+    // file on every row — `refs` came out ~2× the tokens of its text render.
+    Ok(ToolOut::text(out))
 }
 
 /// MCP twin of the CLI's multi-target `outline`/`find`: run `one` per

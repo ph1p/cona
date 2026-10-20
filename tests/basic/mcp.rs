@@ -174,20 +174,14 @@ fn mcp_stdio_handshake_and_tools_list() {
     assert_eq!(ann("edit")["destructiveHint"], true);
     assert_eq!(ann("insert")["destructiveHint"], false);
 
-    // A declared outputSchema is a contract: the tool must return matching
-    // structuredContent, so schema and payload are asserted together.
-    let find_tool = lines[1]["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["name"] == "find")
-        .unwrap()
-        .clone();
-    assert_eq!(find_tool["outputSchema"]["type"], "object");
-    assert!(find_tool["outputSchema"]["properties"]["symbols"].is_object());
+    // No outputSchema anywhere: Claude Code shows the model structuredContent
+    // INSTEAD of the text, and the JSON rows cost ~2× the tokens.
+    for t in lines[1]["result"]["tools"].as_array().unwrap() {
+        assert!(t.get("outputSchema").is_none(), "{}: outputSchema", t["name"]);
+    }
     assert!(
-        lines[3]["result"]["structuredContent"]["symbols"].is_array(),
-        "find must return structuredContent: {:?}",
+        lines[3]["result"].get("structuredContent").is_none(),
+        "find must answer in text only: {:?}",
         lines[3]["result"]
     );
 }
@@ -219,9 +213,6 @@ fn every_mcp_tool_schema_is_well_formed() {
             for r in t["inputSchema"]["required"].as_array().unwrap() {
                 let r = r.as_str().unwrap();
                 assert!(props.contains_key(r), "{name}: required {r} not declared");
-            }
-            if let Some(out) = t.get("outputSchema") {
-                assert_eq!(out["type"], "object", "{name}: outputSchema not object");
             }
         }
     }
