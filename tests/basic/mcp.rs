@@ -177,7 +177,11 @@ fn mcp_stdio_handshake_and_tools_list() {
     // No outputSchema anywhere: Claude Code shows the model structuredContent
     // INSTEAD of the text, and the JSON rows cost ~2× the tokens.
     for t in lines[1]["result"]["tools"].as_array().unwrap() {
-        assert!(t.get("outputSchema").is_none(), "{}: outputSchema", t["name"]);
+        assert!(
+            t.get("outputSchema").is_none(),
+            "{}: outputSchema",
+            t["name"]
+        );
     }
     assert!(
         lines[3]["result"].get("structuredContent").is_none(),
