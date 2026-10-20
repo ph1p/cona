@@ -96,14 +96,15 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
     // 2. Remote release newer → update. A source checkout stays the source of
     //    truth (git pull + rebuild, never a release binary over a dev build).
     let current = env!("CARGO_PKG_VERSION");
-    let latest = latest_remote_version();
+    let latest = remote_releases(current);
     if latest.is_some() {
         // Only a check that ANSWERED counts toward the daily gate — a failed
         // one (offline, timeout) is retried by the next session, not tomorrow.
         let _ = db::meta_set("last_remote_check", &db::now().to_string());
     }
     match latest {
-        Some((remote, _)) if remote_is_newer(&remote, current) => {
+        Some(rel) if remote_is_newer(&rel.latest, current) => {
+            let remote = rel.latest;
             if !quiet {
                 println!(
                     "{}",
@@ -113,7 +114,7 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
             let src = db::meta_get("source_dir")?
                 .map(PathBuf::from)
                 .filter(|s| is_source_dir(s));
-            if let Some(src) = src {
+            let installed = if let Some(src) = src {
                 if !quiet {
                     println!(
                         "  {}",
@@ -124,13 +125,27 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
                     );
                 }
                 update_source_checkout(&src, &remote, &dst, quiet)?;
+                remote.clone()
             } else {
-                install_release_binary(&remote, &dst)?;
-            }
+                let published = rel.published.as_deref();
+                let candidates = upgrade_candidates(&remote, published.unwrap_or(&[]), current);
+                install_newest_release(&candidates, published, &dst)?
+            };
             if !quiet {
+                if installed != remote {
+                    println!(
+                        "  {}",
+                        ui::warn(&format!(
+                            "v{remote} has no installable build yet — took v{installed}"
+                        ))
+                    );
+                }
                 println!(
                     "  {}",
-                    ui::ok(&format!("{} → v{remote}", crate::install::short_path(&dst)))
+                    ui::ok(&format!(
+                        "{} → v{installed}",
+                        crate::install::short_path(&dst)
+                    ))
                 );
             }
             refresh_config(quiet);
@@ -138,7 +153,11 @@ pub fn cmd_upgrade(quiet: bool) -> Result<()> {
                 println!("\n{}", ui::ok(&ui::bold("upgrade complete")));
             }
         }
-        Some((remote, source)) => {
+        Some(Remote {
+            latest: remote,
+            source,
+            ..
+        }) => {
             if !quiet {
                 println!(
                     "{}",
@@ -189,16 +208,48 @@ fn remote_is_newer(remote: &str, current: &str) -> bool {
 /// Newest release and where it was seen. GitHub first: binaries come from
 /// there and `cargo publish` lands only after them, so crates.io alone said
 /// "up to date" during that gap. Sparse index is the fallback. Fail-open.
-fn latest_remote_version() -> Option<(String, &'static str)> {
+fn remote_releases(current: &str) -> Option<Remote> {
     let url = format!("https://github.com/{GITHUB_REPO}/releases/latest");
-    if let Some(v) = curl(&["-fsSI", &url])
+    let github = curl(&["-fsSI", &url])
         .as_deref()
-        .and_then(tag_from_redirect)
-    {
-        return Some((v, "GitHub"));
-    }
-    let index = curl(&["-fsSL", "https://index.crates.io/co/na/cona"])?;
-    Some((newest_in_index(&index)?, "crates.io"))
+        .and_then(tag_from_redirect);
+    // GitHub's tag alone can't say whether its release built: a failed build
+    // leaves a tag with no binaries. crates.io gets a version only after the
+    // pipeline finished, so read it whenever there is something to install.
+    let published = match &github {
+        Some(v) if !remote_is_newer(v, current) => None,
+        _ => curl(&["-fsSL", "https://index.crates.io/co/na/cona"]).map(|i| index_versions(&i)),
+    };
+    let (latest, source) = match github {
+        Some(v) => (v, "GitHub"),
+        None => (published.as_ref()?.first()?.clone(), "crates.io"),
+    };
+    Some(Remote {
+        latest,
+        source,
+        published,
+    })
+}
+
+/// What the remotes offer. `published` = crates.io versions newest-first,
+/// `None` when the index wasn't read (unknown, not "nothing published").
+struct Remote {
+    latest: String,
+    source: &'static str,
+    published: Option<Vec<String>>,
+}
+
+/// Versions newer than `current` to try, newest first: GitHub's latest tag plus
+/// every published one, so a release whose build failed falls back to the
+/// newest that has binaries instead of blocking the upgrade.
+fn upgrade_candidates(latest: &str, published: &[String], current: &str) -> Vec<String> {
+    let mut v: Vec<String> = std::iter::once(latest.to_string())
+        .chain(published.iter().cloned())
+        .filter(|v| remote_is_newer(v, current))
+        .collect();
+    v.sort_by_key(|v| std::cmp::Reverse(parse_semver(v)));
+    v.dedup();
+    v
 }
 
 /// stdout of a 5 s curl, None on any failure.
@@ -229,8 +280,8 @@ fn tag_from_redirect(headers: &str) -> Option<String> {
 
 /// Highest non-yanked, non-pre-release version in a sparse-index file — by
 /// version, not line order (a late patch to an older series is the last line).
-fn newest_in_index(index: &str) -> Option<String> {
-    index
+fn index_versions(index: &str) -> Vec<String> {
+    let mut v: Vec<_> = index
         .lines()
         .filter_map(|line| {
             let v: serde_json::Value = serde_json::from_str(line).ok()?;
@@ -243,8 +294,9 @@ fn newest_in_index(index: &str) -> Option<String> {
             }
             Some((parse_semver(vers)?, vers.to_string()))
         })
-        .max_by_key(|(key, _)| *key)
-        .map(|(_, vers)| vers)
+        .collect();
+    v.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+    v.into_iter().map(|(_, vers)| vers).collect()
 }
 
 /// Rewrite the source repo's upgrade git hooks: strip legacy `self-update`

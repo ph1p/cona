@@ -83,7 +83,7 @@ fn latest_tag_comes_from_the_redirect_location() {
 }
 
 #[test]
-fn index_newest_is_highest_version_not_last_line() {
+fn index_versions_are_newest_first_not_line_order() {
     let idx = [
         r#"{"vers":"0.0.9","yanked":false}"#,
         r#"{"vers":"0.1.0","yanked":false}"#,
@@ -93,8 +93,26 @@ fn index_newest_is_highest_version_not_last_line() {
         "not json",
     ]
     .join("\n");
-    assert_eq!(newest_in_index(&idx).as_deref(), Some("0.1.0"));
-    assert_eq!(newest_in_index(""), None);
+    assert_eq!(index_versions(&idx), ["0.1.0", "0.0.10", "0.0.9"]);
+    assert!(index_versions("").is_empty());
+}
+
+#[test]
+fn candidates_fall_back_past_a_release_without_binaries() {
+    // v0.0.39 tagged but its build failed (never reached crates.io): try it,
+    // then the newest published one, never the installed or older ones.
+    let published = ["0.0.38".to_string(), "0.0.37".into(), "0.0.36".into()];
+    assert_eq!(
+        upgrade_candidates("0.0.39", &published, "0.0.37"),
+        ["0.0.39", "0.0.38"]
+    );
+    // GitHub and crates.io agree → one candidate, not two.
+    assert_eq!(
+        upgrade_candidates("0.0.38", &published, "0.0.37"),
+        ["0.0.38"]
+    );
+    // Already on the newest → nothing to try.
+    assert!(upgrade_candidates("0.0.38", &published, "0.0.38").is_empty());
 }
 
 #[test]

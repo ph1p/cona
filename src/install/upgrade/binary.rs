@@ -117,14 +117,33 @@ pub(super) fn sweep_old_husks(dst: &Path) {
     }
 }
 
-/// Update `dst` to release `ver`: prebuilt GitHub-release binary first,
-/// `cargo install` from crates.io as fallback (private repo, exotic platform).
-pub(super) fn install_release_binary(ver: &str, dst: &Path) -> Result<Change> {
-    match download_release_binary(ver, dst) {
-        Ok(ch) => Ok(ch),
-        Err(e) => install_via_cargo(ver, dst)
-            .map_err(|e2| anyhow!("binary download failed ({e}); cargo fallback failed ({e2})")),
+/// Update `dst` to the newest of `candidates` (newest first) that installs:
+/// prebuilt GitHub-release binary first, `cargo install` from crates.io as
+/// fallback (private repo, exotic platform). Returns the installed version.
+pub(super) fn install_newest_release(
+    candidates: &[String],
+    published: Option<&[String]>,
+    dst: &Path,
+) -> Result<String> {
+    let mut errs = Vec::new();
+    for ver in candidates {
+        let err = match download_release_binary(ver, dst) {
+            Ok(_) => return Ok(ver.clone()),
+            Err(e) => e,
+        };
+        // cargo can't install what crates.io never got; skip the slow attempt
+        if published.is_some_and(|p| !p.contains(ver)) {
+            errs.push(format!("v{ver}: binary download failed ({err})"));
+            continue;
+        }
+        match install_via_cargo(ver, dst) {
+            Ok(_) => return Ok(ver.clone()),
+            Err(e2) => errs.push(format!(
+                "v{ver}: binary download failed ({err}); cargo fallback failed ({e2})"
+            )),
+        }
     }
+    bail!("no installable release — {}", errs.join("; "))
 }
 
 /// Download the GitHub-release archive for `ver`, extract, replace `dst`.
