@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0](https://github.com/ph1p/cona/compare/v0.0.39...v0.1.0) - 2026-10-20
+
+### Added
+
+- *(refs)* fold test-file sites into one count line
+
+### Fixed
+
+- *(skill)* sync canonical SKILL.md with the plugin copy
+- *(mcp)* drop outputSchema so clients get compact text
+- *(stats)* stop find and benchmark loops from inflating savings
+- *(install.sh)* fall back to the newest release with a build for this target
+- *(upgrade)* fall back to the newest release that has binaries
+
+### Other
+
+- bump version to 0.1.0
+- cargo fmt the stats and mcp tests
+- *(readme)* add measured A/B numbers, drop bench from repo
+
 ## [0.0.39](https://github.com/ph1p/cona/compare/v0.0.38...v0.0.39) - 2026-10-20
 
 ### Other
