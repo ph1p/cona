@@ -353,7 +353,12 @@ group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).
 `outcome` ('' ok / `empty` / `miss` / `ambiguous` / `error`, guarded
 migration, index `usage_project_ts`) feeds `stats`' failed column and
 `cona learn` (recurring failures + closest name / qualified forms; ≥2× in
-30d with a concrete fix → ≤3 lines in the SessionStart context).
+30d with a concrete fix → ≤3 lines in the SessionStart context). The same
+log feeds `hot_symbols`: answered show/context/refs on ≥2 distinct days in
+30d, re-resolved against the current index → ≤5 "kept coming back to" lines
+(days rank, not count — one looping session is not a hub). SessionStart also
+lists the 3 newest notes (or, while there are none, a one-line `cona note`
+nudge); `rename` carries notes along (`notes_rekey`).
 `hook_conversion` = share of hook hints followed by a cona query in the same
 project within `CONVERSION_WINDOW_SECS` (time-correlated, not session-exact).
 Orientation baseline (`tree`) is capped at `ORIENT_BASELINE_CAP` (20k) via

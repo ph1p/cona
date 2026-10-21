@@ -1,6 +1,6 @@
 //! `learn`: mine the usage log for lookups that keep failing and say what
 //! would have worked (closest name for misses, qualified forms for
-//! ambiguities). Also feeds `learned_hints` for SessionStart.
+//! ambiguities). Also feeds `learned_hints` + `hot_symbols` for SessionStart.
 
 use super::{locate_candidates, Located};
 use crate::{db, fuzzy};
@@ -14,6 +14,9 @@ const SYMBOL_CMDS: &[&str] = &[
     "show", "find", "refs", "context", "impact", "callers", "callees", "tests", "shape", "edit",
     "insert", "rename", "path",
 ];
+
+/// How far back the SessionStart hints (`learned_hints`, `hot_symbols`) look.
+const HINT_WINDOW_SECS: i64 = 30 * 86_400;
 
 /// What would have worked instead of a failed lookup.
 #[derive(Debug, PartialEq)]
@@ -185,7 +188,7 @@ pub fn cmd_learn(
     Ok(out)
 }
 
-fn clip_str(s: &str, max: usize) -> String {
+pub fn clip_str(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
@@ -195,12 +198,9 @@ fn clip_str(s: &str, max: usize) -> String {
 
 /// At most `max` SessionStart lines: names that failed ≥2× in 30 days and now
 /// have a concrete fix. Rides every session start, so empty unless worth it.
-pub fn learned_hints(root: &Path, conn: &Connection, max: usize) -> Vec<String> {
-    let Ok(g) = db::open_global_db() else {
-        return vec![];
-    };
-    let since = db::now() - 30 * 86_400;
-    let Ok(rows) = db::failed_queries(&g, root.to_str(), since, 20) else {
+pub fn learned_hints(g: &Connection, root: &Path, conn: &Connection, max: usize) -> Vec<String> {
+    let since = db::now() - HINT_WINDOW_SECS;
+    let Ok(rows) = db::failed_queries(g, root.to_str(), since, 20) else {
         return vec![];
     };
     let Ok(pool) = Pool::load(conn) else {
@@ -221,6 +221,48 @@ pub fn learned_hints(root: &Path, conn: &Connection, max: usize) -> Vec<String> 
         )
         .take(max)
         .collect()
+}
+
+/// Symbols agents kept returning to here (answered lookups on ≥2 days in the
+/// last 30), resolved against the CURRENT index: a deleted or renamed target
+/// drops out on its own, an ambiguous one is skipped (never pick, inv. 4).
+/// Lines are `q  path:start-end  (N days)`.
+pub fn hot_symbols(g: &Connection, root: &Path, conn: &Connection, max: usize) -> Vec<String> {
+    let since = db::now() - HINT_WINDOW_SECS;
+    // rows arrive best-first; a few spares cover targets that no longer resolve
+    let Ok(rows) = db::hot_targets(g, root.to_str(), since, (max * 4) as i64) else {
+        return vec![];
+    };
+    // the candidate pool, not locate_symbol: an ambiguity is skipped here, so
+    // building its error text would be wasted
+    let unique = |t: &str| {
+        locate_candidates(conn, t, None)
+            .ok()
+            .filter(|c| c.len() == 1)
+            .and_then(|mut c| c.pop())
+    };
+    rank_hot(&rows, unique)
+        .into_iter()
+        .take(max)
+        .map(|((p, s, e, q), days)| format!("{q}  {p}:{s}-{e}  ({days} days)"))
+        .collect()
+}
+
+/// Split comma-joined details, resolve each, merge targets that name the same
+/// definition (`Foo` and `a.rs:Foo`) keeping their best day count; rank by days.
+fn rank_hot(rows: &[db::HotRow], resolve: impl Fn(&str) -> Option<Located>) -> Vec<(Located, i64)> {
+    let mut out: Vec<(Located, i64)> = Vec::new();
+    for (detail, days) in rows {
+        for t in detail.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            let Some(loc) = resolve(t) else { continue };
+            match out.iter_mut().find(|(l, _)| l.0 == loc.0 && l.3 == loc.3) {
+                Some((_, d)) => *d = (*d).max(*days),
+                None => out.push((loc, *days)),
+            }
+        }
+    }
+    out.sort_by_key(|(_, d)| std::cmp::Reverse(*d));
+    out
 }
 
 #[cfg(test)]
@@ -258,5 +300,21 @@ mod tests {
             "qualify: A.run · B.run (+2)"
         );
         assert_eq!(clip_str("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn hot_targets_split_merge_and_drop_unresolved() {
+        let rows = vec![
+            ("Foo".to_string(), 2),
+            ("a.rs:Foo,Bar".to_string(), 4), // same Foo, more days
+            ("Gone".to_string(), 6),         // deleted since → dropped
+        ];
+        let ranked = rank_hot(&rows, |t| match t {
+            "Foo" | "a.rs:Foo" => Some(loc("a.rs", "Foo")),
+            "Bar" => Some(loc("b.rs", "Bar")),
+            _ => None,
+        });
+        let got: Vec<(&str, i64)> = ranked.iter().map(|(l, d)| (l.3.as_str(), *d)).collect();
+        assert_eq!(got, [("Foo", 4), ("Bar", 4)]);
     }
 }

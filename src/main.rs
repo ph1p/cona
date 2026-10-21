@@ -766,12 +766,14 @@ fn session_start_context(
     ));
     // One statement is enough for current models; the PreToolUse redirect is
     // the backstop for an actual wrong Read/Grep.
-    // Social proof: what the habit already saved here. Fail-open — no tally,
-    // no line.
-    if let Some(saved) = db::open_global_db()
-        .and_then(|g| db::totals(&g, root.to_str()))
+    // One global.db open serves the tally and both usage miners. Fail-open:
+    // no db, no lines.
+    let g = db::open_global_db().ok();
+    // Social proof: what the habit already saved here.
+    if let Some(saved) = g
+        .as_ref()
+        .and_then(|g| db::totals(g, root.to_str()).ok())
         .map(|t| t.tokens_saved)
-        .ok()
         .filter(|s| *s > 0)
     {
         ctx.push_str(&format!(
@@ -779,19 +781,57 @@ fn session_start_context(
             fmt_count(saved)
         ));
     }
-    // Names that kept failing here, with what resolves them — saves the
-    // retry the last sessions paid for. Usually empty.
-    let hints = learned_hints(root, conn, 3);
-    if !hints.is_empty() {
-        ctx.push_str("Lookups that failed here before:\n");
-        for h in hints {
-            ctx.push_str(&format!("- {h}\n"));
-        }
+    if let Some(g) = &g {
+        // Names that kept failing here, with what resolves them — saves the
+        // retry the last sessions paid for. Usually empty.
+        push_list(
+            &mut ctx,
+            "Lookups that failed here before:",
+            learned_hints(g, root, conn, 3),
+        );
+        // What agents actually worked on here, across sessions — fan-in says
+        // what the code leans on, this says what the work touches.
+        push_list(
+            &mut ctx,
+            "Symbols recent sessions kept coming back to:",
+            hot_symbols(g, root, conn, 5),
+        );
     }
+    // Notes are the one thing here a human/agent wrote on purpose; they only
+    // pay off if the next session knows they exist.
+    let notes = db::notes_recent(conn, 3).unwrap_or_default();
+    if notes.is_empty() {
+        // the skill alone produced zero notes across every project — ask
+        // where it is read, and only until the first one exists
+        ctx.push_str(
+            "Learn something the code doesn't say (invariant, gotcha, why)? \
+             `cona note <Sym> <text>` — the next session starts with it.\n",
+        );
+    }
+    push_list(
+        &mut ctx,
+        "Notes left on this project (`cona note` for all):",
+        notes
+            .into_iter()
+            .map(|(sym, note)| format!("{sym}: {}", clip_str(&note, 160))),
+    );
     ctx.push_str("\nMost-referenced symbols (your orientation map):\n\n");
     ctx.push_str(&map);
 
     hook::additional_context("SessionStart", &ctx)
+}
+
+/// A `heading` + one `- item` line each; nothing at all when `items` is empty.
+fn push_list(ctx: &mut String, heading: &str, items: impl IntoIterator<Item = String>) {
+    let mut items = items.into_iter().peekable();
+    if items.peek().is_none() {
+        return;
+    }
+    ctx.push_str(heading);
+    ctx.push('\n');
+    for i in items {
+        ctx.push_str(&format!("- {i}\n"));
+    }
 }
 
 /// One-shot setup: index, then wire agents for the project and/or home

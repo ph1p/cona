@@ -306,3 +306,38 @@ pub fn failed_queries(
         .collect();
     Ok(rows)
 }
+
+/// Hot-target row: (detail, distinct days it was asked on).
+pub type HotRow = (String, i64);
+
+/// Symbol lookups that ANSWERED and recurred across days — what agents keep
+/// coming back to in this project. Days, not raw count, rank it: one session
+/// re-showing a symbol ten times is a loop, the same symbol on four days is a
+/// hub. `detail` may hold several comma-joined targets (`show A B`); the
+/// caller splits and resolves them against the current index.
+pub fn hot_targets(
+    g: &Connection,
+    project: Option<&str>,
+    since_ts: i64,
+    limit: i64,
+) -> Result<Vec<HotRow>> {
+    let (where_, params) = and_clause(
+        project,
+        &format!(
+            "outcome = '' AND detail <> '' AND ts >= {since_ts} \
+             AND REPLACE(cmd, 'mcp:', '') IN ('show', 'context', 'refs')"
+        ),
+    );
+    let sql = format!(
+        "SELECT detail, COUNT(DISTINCT ts / 86400) AS days
+         FROM usage{where_} GROUP BY detail HAVING days >= 2
+         ORDER BY days DESC, COUNT(*) DESC LIMIT {limit}"
+    );
+    let mut stmt = g.prepare(&sql)?;
+    let p = rusqlite::params_from_iter(params.iter());
+    let rows = stmt
+        .query_map(p, |r| Ok((r.get(0)?, r.get(1)?)))?
+        .flatten()
+        .collect();
+    Ok(rows)
+}

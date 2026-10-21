@@ -71,7 +71,11 @@ src/commands/    cmd_* implementations, split by concern:
                  stats.rs, mcp_server.rs (mcp_tools/mcp_call/cmd_mcp)
                  learn.rs `learn` (usage.outcome ≠ '' grouped → fix:
                           resolves now / closest (fuzzy) / qualified forms) +
-                          learned_hints for SessionStart
+                          learned_hints for SessionStart; hot_symbols
+                          (db::hot_targets: answered show/context/refs on ≥2
+                          days in 30d, split + re-resolved against the CURRENT
+                          index, ambiguous skipped) = the "kept coming back
+                          to" SessionStart block, ≤5 lines
                  discover.rs `discover` (Claude transcripts: tool_use paired
                           with tool_result; shell lines classified per segment
                           via hook::classify_command; full reads of callable

@@ -73,7 +73,7 @@ Everything below is reference — reach for it when the four above don't cover t
 - Use `--json` when you need to parse output programmatically.
 - Line numbers in the index can go stale after manual edits — `cona index` refreshes in ms (or install git hooks: `cona hooks install`).
 - `--json` works on find, outline, show, tree, refs, grep, diff, context, stats, entries, tests, blame, hot, coupling, callers, callees, path, shape, deps, check, impact.
-- Orientation in an unknown repo: `entries` → `tree --rank` → `deps` → `hot`. Before editing: `context`/`shape` + `tests` + `blame`. Leave `note`s for the next agent.
+- Orientation in an unknown repo: `entries` → `tree --rank` → `deps` → `hot`. Before editing: `context`/`shape` + `tests` + `blame`. When you learn something the code does not say (an invariant, a gotcha, why it is this way), `cona note <Sym> <text…>` it before you finish — the next session gets it in its start context and in show/context.
 - `cona setup` = index + git hooks + agent integration in one shot.
 - `cona stats` (per-project + global: savings, top targets, recent) shows how many tokens you've saved.
 - `cona ui` opens a live dashboard of index state + token savings in real time.

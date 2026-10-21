@@ -327,3 +327,23 @@ fn notes_rekey_moves_the_symbol_and_its_members_only() {
     let recent = notes_recent(&c, 1).unwrap();
     assert_eq!(recent.len(), 1);
 }
+
+#[test]
+fn hot_targets_need_two_days_and_an_answer() {
+    let day = 86_400;
+    let g = usage_with(&[
+        (day, "/p", "show", 0, "Hub", ""),
+        (3 * day, "/p", "mcp:context", 0, "Hub", ""),
+        (3 * day + 5, "/p", "show", 0, "Loop", ""), // many hits, one day
+        (3 * day + 6, "/p", "show", 0, "Loop", ""),
+        (3 * day + 7, "/p", "show", 0, "Loop", ""),
+        (day, "/p", "show", 0, "Miss", "miss"),
+        (4 * day, "/p", "show", 0, "Miss", "miss"),
+        (day, "/p", "grep", 0, "pattern", ""),
+        (4 * day, "/p", "grep", 0, "pattern", ""),
+        (day, "/q", "show", 0, "Elsewhere", ""),
+        (4 * day, "/q", "show", 0, "Elsewhere", ""),
+    ]);
+    let rows = hot_targets(&g, Some("/p"), 0, 10).unwrap();
+    assert_eq!(rows, [("Hub".to_string(), 2)]);
+}
