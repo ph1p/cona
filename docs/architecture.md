@@ -576,7 +576,11 @@ src/db/          SQLite: ~/.cona/projects/<fnv1a-hash>.db per project.
                  (data dir overridable via CONA_DATA_DIR — tests set it,
                  real ~/.cona never sees test repos)
                  (files/symbols + notes: persistent symbol annotations,
-                 auto-shown in show/context); ~/.cona/global.db (registry +
+                 auto-shown in show/context; exact key or a BARE key equal to
+                 the tail — a qualified `A.run` never shows on `B.run`;
+                 `rename` re-keys notes on the symbol + its `Sym.*` members
+                 (notes_rekey); `cona note` lists unresolvable keys as
+                 `· dangling`; 3 newest are in the SessionStart context); ~/.cona/global.db (registry +
                  usage stats + meta: source_dir/install_path/last_tidy).
                  Storage introspection (total_storage_bytes/global_db_size;
                  storage_summary = THE struct both `stats` and `doctor` render),

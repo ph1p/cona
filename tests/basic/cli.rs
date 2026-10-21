@@ -451,3 +451,64 @@ fn refs_folds_test_sites() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// Notes are the project knowledge an agent wrote on purpose: rename must carry
+// them along, a same-named sibling must not see them, and a key nothing
+// resolves to anymore is flagged rather than silently never shown.
+#[test]
+fn notes_follow_rename_and_stay_on_their_symbol() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("cona-it-notes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("s.rs"),
+        "struct A;\nimpl A {\n    fn run(&self) {}\n}\nstruct B;\nimpl B {\n    fn run(&self) {}\n}\nfn gone() {}\nfn main() { A.run(); }\n",
+    )
+    .unwrap();
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let run = |args: &[&str]| -> String {
+        let o = Command::new(bin)
+            .args(args)
+            .env("CONA_DATA_DIR", dir.join(".cona-data"))
+            .env("CONA_NO_STATS", "1")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr)
+    };
+    run(&["index"]);
+    run(&["note", "A.run", "hot path, keep alloc-free"]);
+    run(&["note", "gone", "about to be deleted"]);
+
+    assert!(run(&["show", "A.run"]).contains("alloc-free"));
+    assert!(
+        !run(&["show", "B.run"]).contains("alloc-free"),
+        "note leaked to sibling"
+    );
+
+    let out = run(&["rename", "A.run", "go"]);
+    assert!(out.contains("moved 1 note to A.go"), "{out}");
+    assert!(run(&["show", "A.go"]).contains("alloc-free"));
+
+    std::fs::write(
+        dir.join("s.rs"),
+        std::fs::read_to_string(dir.join("s.rs"))
+            .unwrap()
+            .replace("fn gone() {}\n", ""),
+    )
+    .unwrap();
+    run(&["index"]);
+    let list = run(&["note"]);
+    assert!(
+        list.lines()
+            .any(|l| l.contains("gone") && l.contains("dangling")),
+        "{list}"
+    );
+    assert!(
+        list.lines()
+            .any(|l| l.contains("A.go") && !l.contains("dangling")),
+        "{list}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

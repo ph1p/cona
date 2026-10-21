@@ -289,3 +289,41 @@ fn repeat_queries_inside_the_window_are_detected() {
     assert!(!is_repeat(&g, "/q", "grep", "alpha", 100));
     assert!(!is_repeat(&g, "/p", "grep", "", 100));
 }
+
+fn notes_db(keys: &[&str]) -> Connection {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch(
+        "CREATE TABLE notes(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, note TEXT NOT NULL, ts INTEGER NOT NULL)",
+    )
+    .unwrap();
+    for k in keys {
+        note_add(&c, k, &format!("on {k}")).unwrap();
+    }
+    c
+}
+
+#[test]
+fn notes_match_exact_or_bare_key_never_a_sibling_by_tail() {
+    let c = notes_db(&["A.run", "run_all", "run"]);
+    let on = |q: &str| -> Vec<String> {
+        notes_for(&c, q)
+            .unwrap()
+            .into_iter()
+            .map(|(_, n, _)| n)
+            .collect()
+    };
+    assert_eq!(on("A.run"), ["on A.run", "on run"]);
+    // the old tail match leaked A.run's note onto every other `run`
+    assert_eq!(on("B.run"), ["on run"]);
+    assert_eq!(on("run_all"), ["on run_all"]);
+}
+
+#[test]
+fn notes_rekey_moves_the_symbol_and_its_members_only() {
+    let c = notes_db(&["Pool", "Pool.load", "PoolX.load", "Other"]);
+    assert_eq!(notes_rekey(&c, "Pool", "Cache").unwrap(), 2);
+    let keys: Vec<String> = notes_all(&c).unwrap().into_iter().map(|r| r.1).collect();
+    assert_eq!(keys, ["Cache", "Cache.load", "Other", "PoolX.load"]);
+    let recent = notes_recent(&c, 1).unwrap();
+    assert_eq!(recent.len(), 1);
+}

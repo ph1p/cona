@@ -91,9 +91,8 @@ pub fn outcome_of_error(msg: &str) -> &'static str {
     }
 }
 
-/// Symbol annotations — the knowledge layer. Keyed by qualified name (or bare
-/// name/file path); lookups also match the last segment, so `Foo.bar` notes
-/// surface for `bar`.
+/// Symbol annotations — the knowledge layer. Keyed by qualified name (or the
+/// bare name/file path a note was saved under when it did not resolve).
 pub fn note_add(conn: &Connection, symbol: &str, note: &str) -> Result<i64> {
     conn.execute(
         "INSERT INTO notes(symbol, note, ts) VALUES (?1, ?2, ?3)",
@@ -112,17 +111,41 @@ pub fn name_tail(sym: &str) -> &str {
     sym.rsplit('.').next().unwrap_or(sym)
 }
 
-/// Notes attached to `symbol`: exact key or matching last `.`-segment. Notes
-/// stay few, so filtering in Rust beats clever SQL.
-pub fn notes_for(conn: &Connection, symbol: &str) -> Result<Vec<(i64, String, i64)>> {
-    let tail = name_tail(symbol);
-    let mut out = Vec::new();
-    for (id, key, note, ts) in notes_all(conn)? {
-        if key == symbol || name_tail(&key) == tail {
-            out.push((id, note, ts));
-        }
-    }
-    Ok(out)
+/// Notes attached to the symbol whose qualified name is `q`: exact key, or a
+/// bare key (saved unresolved) equal to its last segment. A QUALIFIED key
+/// never matches by tail — a note on `A.run` must not surface on `B.run`.
+pub fn notes_for(conn: &Connection, q: &str) -> Result<Vec<(i64, String, i64)>> {
+    let tail = name_tail(q);
+    let bare = if tail.contains(':') { q } else { tail };
+    let mut stmt =
+        conn.prepare("SELECT id, note, ts FROM notes WHERE symbol IN (?1, ?2) ORDER BY ts, id")?;
+    let rows = stmt
+        .query_map([q, bare], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .flatten()
+        .collect();
+    Ok(rows)
+}
+
+/// Move notes keyed on `old_q` (and on its members, `old_q.*`) to `new_q` —
+/// rename keeps them attached instead of orphaning them. Returns the count.
+pub fn notes_rekey(conn: &Connection, old_q: &str, new_q: &str) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE notes SET symbol = ?2 || substr(symbol, length(?1) + 1)
+         WHERE symbol = ?1 OR substr(symbol, 1, length(?1) + 1) = ?1 || '.'",
+        rusqlite::params![old_q, new_q],
+    )?;
+    Ok(n)
+}
+
+/// Newest notes first, at most `limit` — SessionStart surfaces these.
+pub fn notes_recent(conn: &Connection, limit: i64) -> Result<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT symbol, note FROM notes ORDER BY ts DESC, id DESC LIMIT ?1")?;
+    let rows = stmt
+        .query_map([limit], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .flatten()
+        .collect();
+    Ok(rows)
 }
 
 pub fn notes_all(conn: &Connection) -> Result<Vec<(i64, String, String, i64)>> {

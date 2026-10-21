@@ -1,6 +1,6 @@
 //! Mutating commands: edit, note, rename.
 
-use super::locate_symbol;
+use super::{locate_candidates, locate_symbol};
 use crate::{db, editing, indexer, lang};
 use anyhow::{anyhow, bail, Result};
 use rusqlite::Connection;
@@ -220,12 +220,18 @@ pub fn cmd_note(
         }
         let mut out = String::new();
         for (id, sym, note, ts) in all {
-            out.push_str(&format!("#{id}  {sym}  ⚑ {note}  ({})\n", db::ago(ts)));
+            // a key nothing resolves to anymore (symbol deleted or renamed
+            // outside `cona rename`) — say so instead of silently never showing
+            let dangling = locate_candidates(conn, &sym, None).map_or(true, |c| c.is_empty());
+            let tag = if dangling { "  · dangling" } else { "" };
+            out.push_str(&format!("#{id}  {sym}  ⚑ {note}  ({}){tag}\n", db::ago(ts)));
         }
         return Ok(out);
     };
     if text.is_empty() {
-        let notes = db::notes_for(conn, symbol)?;
+        // the same notes show/context print: resolve first, else the key as given
+        let key = locate_symbol(conn, symbol).map_or_else(|_| symbol.to_string(), |l| l.3);
+        let notes = db::notes_for(conn, &key)?;
         if notes.is_empty() {
             return Ok(format!("no notes on '{symbol}'\n"));
         }
@@ -345,6 +351,10 @@ pub fn cmd_rename(
         }
         written.push(plan);
     }
+    // notes follow the symbol (and its members) instead of dangling
+    let new_q = crate::graph::scope_parent(&q)
+        .map_or_else(|| new_name.to_string(), |p| format!("{p}.{new_name}"));
+    let moved = db::notes_rekey(conn, &q, &new_q).unwrap_or(0);
     let mut total = 0usize;
     let mut per_file = String::new();
     for (rel, _, _, hits) in &plans {
@@ -364,6 +374,12 @@ pub fn cmd_rename(
     );
     if plans.len() > 1 {
         out.push_str(&per_file);
+    }
+    if moved > 0 {
+        out.push_str(&format!(
+            "moved {} to {new_q}\n",
+            crate::ui::plural(moved, "note")
+        ));
     }
     if !fallback_files.is_empty() {
         out.push_str(&format!(
