@@ -279,27 +279,26 @@ fn run() -> Result<()> {
             } else {
                 path.iter().chain(paths).map(|p| Some(p.as_str())).collect()
             };
+            let opts = GrepOpts {
+                ignore_case: *ignore_case,
+                regex: *regex,
+                limit: *limit,
+                path: None,
+                include_deps: *include_deps,
+                before: before.or(*context).unwrap_or(0),
+                after: after.or(*context).unwrap_or(0),
+                files_only: *files_with_matches,
+                count: *count,
+            };
             queried(&root, t0, "grep", pattern, |conn| {
                 let mut out = String::new();
                 let mut baseline = 0i64;
                 for scope in &scopes {
-                    let (o, b) = cmd_grep(
-                        &root,
-                        conn,
-                        pattern,
-                        GrepOpts {
-                            ignore_case: *ignore_case,
-                            regex: *regex,
-                            limit: *limit,
-                            path: *scope,
-                            include_deps: *include_deps,
-                            before: before.or(*context).unwrap_or(0),
-                            after: after.or(*context).unwrap_or(0),
-                            files_only: *files_with_matches,
-                            count: *count,
-                        },
-                        cli.json,
-                    )?;
+                    let scoped = GrepOpts {
+                        path: *scope,
+                        ..opts
+                    };
+                    let (o, b) = cmd_grep(&root, conn, pattern, scoped, cli.json)?;
                     if cli.json && scopes.len() > 1 {
                         // one JSON array per scope → merge into one array
                         let o = o.trim();

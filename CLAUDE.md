@@ -191,7 +191,7 @@ matcher, so widening it self-heals existing installs.
 **The plugin installs the binary itself**: SessionStart and the `.mcp.json`
 `sh -c` launcher both run install.sh (`CONA_NO_SETUP=1` — a hook must never
 prompt; output to stderr — stdout is model context / JSON-RPC) when `cona` is
-missing, unless `CONA_NO_AUTO_INSTALL`; every hook prepends `~/.local/bin` to
+missing, unless `CONA_NO_AUTO_INSTALL`; every hook appends `~/.local/bin` to
 PATH. Pinned by `plugin_bootstraps_the_binary`. install.sh on a TTY chains into
 `cona setup` (repo) / `setup global` (elsewhere); setup skips indexing $HOME.
 Codex specifics that bite: a `local` source is COPIED into

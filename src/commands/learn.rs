@@ -79,17 +79,21 @@ fn fix_for(conn: &Connection, pool: &Pool, cmd: &str, detail: &str, outcome: &st
     if !SYMBOL_CMDS.contains(&cmd) {
         return Fix::None;
     }
-    match locate_candidates(conn, detail, None) {
-        Ok(c) if c.len() == 1 => Fix::ResolvesNow,
-        Ok(c) if outcome == "ambiguous" || c.len() > 1 => {
+    // an empty pool is a miss (locate_candidates no longer errors on one)
+    match locate_candidates(conn, detail, None)
+        .ok()
+        .filter(|c| !c.is_empty())
+    {
+        Some(c) if c.len() == 1 => Fix::ResolvesNow,
+        Some(c) if outcome == "ambiguous" || c.len() > 1 => {
             let mut forms: Vec<String> = c.iter().map(|x| qualify(x, &c)).collect();
             forms.dedup();
             let total = forms.len();
             forms.truncate(3);
             Fix::Qualify(forms, total)
         }
-        Ok(_) => Fix::ResolvesNow,
-        Err(_) => {
+        Some(_) => Fix::ResolvesNow,
+        None => {
             let bare = super::split_locator(detail).map_or(detail, |(_, n)| n);
             match pool.closest(bare) {
                 Some((q, p, l)) => Fix::Closest(q, p, l),

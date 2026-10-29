@@ -350,16 +350,29 @@ pub(crate) fn path_matches_dir(rel: &str, filter: &str, dir_filter: bool) -> boo
     rel.starts_with(filter)
 }
 
-/// A `--path` filter with the directory question answered ONCE.
-///
-/// `%/{f}` for LIKE: a `/`-guarded suffix (`db.rs` must not pull in
-/// `gitdb.rs`), LIKE metacharacters escaped so `_`/`%` in names stay literal.
-pub(crate) fn suffix_like(f: &str) -> String {
-    let escaped = f
-        .replace('\\', "\\\\")
+/// Quote a word for pasting into a POSIX shell, so a suggested command runs
+/// as printed (an unquoted `a|b` would be a pipe); bare when nothing needs it.
+pub(crate) fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// `f` with LIKE metacharacters escaped (for `ESCAPE '\'`), so `_`/`%` in
+/// names stay literal.
+pub(crate) fn like_escape(f: &str) -> String {
+    f.replace('\\', "\\\\")
         .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("%/{escaped}")
+        .replace('_', "\\_")
+}
+
+/// `%/{f}` for LIKE: a `/`-guarded suffix (`db.rs` must not pull in `gitdb.rs`).
+pub(crate) fn suffix_like(f: &str) -> String {
+    format!("%/{}", like_escape(f))
 }
 
 /// Indexed paths `f` names: the exact path when indexed, else every
@@ -380,24 +393,26 @@ pub(crate) fn files_named(conn: &Connection, f: &str) -> Vec<String> {
     rows
 }
 
-/// The "did you mean" for a path that isn't indexed: up to 3 indexed files
-/// with the same file name (`src/cli/commands/tunnel.ts` → `src/core/tunnel.ts`).
-/// Agents misremember the directory far more often than the name.
-pub(crate) fn similar_files(conn: &Connection, f: &str) -> Vec<String> {
+/// The "did you mean" for a path that isn't indexed: `" — did you mean a, b?"`
+/// naming up to 3 indexed files with the same file name
+/// (`src/cli/commands/tunnel.ts` → `src/core/tunnel.ts`), or empty. Agents
+/// misremember the directory far more often than the name.
+pub(crate) fn did_you_mean_file(conn: &Connection, f: &str) -> String {
     let base = f.rsplit('/').next().unwrap_or(f);
-    let mut hits = files_named(conn, base);
-    hits.truncate(3);
-    hits
-}
-
-/// `" — did you mean a, b?"`, or empty when nothing is close.
-pub(crate) fn did_you_mean(cands: &[String]) -> String {
-    if cands.is_empty() {
+    if base == f {
+        // a bare name already missed files_named — the base lookup is the same query
         return String::new();
     }
-    format!(" — did you mean {}?", cands.join(", "))
+    let mut hits = files_named(conn, base);
+    if hits.is_empty() {
+        return String::new();
+    }
+    hits.truncate(3);
+    format!(" — did you mean {}?", hits.join(", "))
 }
 
+/// A `--path` filter with the directory question answered ONCE.
+///
 /// The dir-vs-prefix reading is loop-invariant, but the filter runs per row
 /// (up to thousands); resolving it up front keeps the hot path a pure string
 /// compare. A struct, not a closure, so it doesn't pin a caller's scope alive.
@@ -588,7 +603,8 @@ pub(crate) fn locate_all(
 }
 
 /// The candidate pool for `symbol` in priority order (exact-qualified first),
-/// after `path:Name` and `--kind` narrowing. Shared by the single-result
+/// after `path:Name` and `--kind` narrowing — empty on a miss (the error text
+/// is `locate_symbol_kind`'s). Shared by the single-result
 /// resolver and `locate_all` so they can't disagree about the candidates.
 fn locate_candidates(conn: &Connection, symbol: &str, kind: Option<&str>) -> Result<Vec<Located>> {
     let (rows, symbol) = locate_rows(conn, symbol, kind)?;
@@ -651,11 +667,6 @@ fn locate_rows(
         })?
         .flatten()
         .collect();
-    let unscoped = if file_filter.is_some() {
-        rows.clone()
-    } else {
-        Vec::new()
-    };
     if let Some(f) = &file_filter {
         // An exact path wins outright — else `src/main.rs` also suffix-matches
         // `src/resolve-helper/src/main.rs`, defeating the escape hatch (inv. 4).
@@ -663,82 +674,122 @@ fn locate_rows(
             rows.retain(|(p, ..)| p == f);
         } else {
             // suffix (`views/Plan.tsx:Name`) or directory scope (`web/src:Name`)
-            rows.retain(|(p, ..)| p.ends_with(&format!("/{f}")) || path_matches_dir(p, f, true));
+            let suffix = format!("/{f}");
+            rows.retain(|(p, ..)| p.ends_with(&suffix) || path_matches_dir(p, f, true));
         }
-    }
-    if rows.is_empty() {
-        let hint = kind
-            .map(|k| format!(" with kind '{k}'"))
-            .unwrap_or_default();
-        if let (Some(f), false) = (&file_filter, unscoped.is_empty()) {
-            // `file:Name` for a name the file only imports or uses: say where
-            // it IS defined rather than send the agent to `find` for it.
-            let at: Vec<String> = unscoped
-                .iter()
-                .take(8)
-                .map(|(p, s, _, q)| format!("  {q}  {p}:{s}"))
-                .collect();
-            bail!(
-                "'{symbol}'{hint} is not defined in '{f}' — defined at:\n{}",
-                at.join("\n")
-            );
-        }
-        let mut near = closest_symbols(conn, symbol, kind, 3);
-        if near.is_empty() {
-            // `Parent.Name` whose parent the index lost or never had (Swift
-            // members after an `#if`, free fns guessed as methods): list the
-            // bare name's definitions instead of a dead end.
-            if let Some(tail) = symbol
-                .rsplit(['.', ':'])
-                .next()
-                .filter(|t| *t != symbol && !t.is_empty())
-            {
-                near = closest_symbols(conn, tail, kind, 3);
-            }
-        }
-        if near.is_empty() {
-            bail!("symbol '{symbol}'{hint} not found — try `cona find {symbol}`");
-        }
-        // Inline the fuzzy top hits: agents rarely run the suggested `find`
-        // after a miss, but they do retry with a name they can see.
-        bail!(
-            "symbol '{symbol}'{hint} not found — closest:\n{}",
-            near.join("\n")
-        );
     }
     Ok((rows, symbol.to_string()))
 }
 
 /// Up to `n` fuzzy-closest symbols as `  qualified  path:line` rows — the
 /// same ranking `find` falls back to, so a miss names its likely target.
-fn closest_symbols(conn: &Connection, symbol: &str, kind: Option<&str>, n: usize) -> Vec<String> {
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT f.path, s.start_line, s.qualified, s.name
+/// One fuzzy `find` hit — shared by `find`'s fallback and the miss error.
+#[derive(Clone)]
+pub(crate) struct FuzzyHit {
+    pub path: String,
+    pub kind: String,
+    pub qualified: String,
+    pub start: i64,
+    pub end: i64,
+    pub sig: String,
+}
+
+/// The `n` symbols closest to `name` (fuzzy::rank), optionally of one kind.
+pub(crate) fn fuzzy_symbols(
+    conn: &Connection,
+    name: &str,
+    kind: Option<&str>,
+    n: usize,
+) -> Result<Vec<FuzzyHit>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.path, s.kind, s.qualified, s.start_line, s.end_line, s.signature, s.name
          FROM symbols s JOIN files f ON f.id = s.file_id
          WHERE (?1 IS NULL OR s.kind = ?1)",
-    ) else {
-        return Vec::new();
-    };
-    let cands: Vec<(String, i64, String, String)> = stmt
+    )?;
+    let cands: Vec<(FuzzyHit, String)> = stmt
         .query_map(rusqlite::params![kind], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })
-        .map(|it| it.flatten().collect())
-        .unwrap_or_default();
-    crate::fuzzy::rank(
-        symbol,
+            let hit = FuzzyHit {
+                path: r.get(0)?,
+                kind: r.get(1)?,
+                qualified: r.get(2)?,
+                start: r.get(3)?,
+                end: r.get(4)?,
+                sig: r.get(5)?,
+            };
+            Ok((hit, r.get(6)?))
+        })?
+        .flatten()
+        .collect();
+    Ok(crate::fuzzy::rank(
+        name,
         cands
             .iter()
             .enumerate()
-            .map(|(i, c)| (i, c.3.as_str(), c.2.as_str())),
+            .map(|(i, (h, bare))| (i, bare.as_str(), h.qualified.as_str())),
         n,
     )
     .into_iter()
-    .map(|(_, i)| {
-        let (p, l, q, _) = &cands[i];
-        format!("  {q}  {p}:{l}")
-    })
-    .collect()
+    .map(|(_, i)| cands[i].0.clone())
+    .collect())
+}
+
+/// The error for a lookup with no candidates. Built only here, on the
+/// user-facing path: `locate_candidates` callers that just probe (SessionStart
+/// hints, `note` dangling checks) must not pay a full fuzzy scan per miss.
+fn miss_error(conn: &Connection, symbol: &str, kind: Option<&str>) -> anyhow::Error {
+    let hint = kind
+        .map(|k| format!(" with kind '{k}'"))
+        .unwrap_or_default();
+    let (file_filter, symbol) = match split_locator(symbol) {
+        Some((f, n)) => (Some(f), n),
+        None => (None, symbol),
+    };
+    if let Some(f) = file_filter {
+        // `file:Name` for a name the file only imports or uses: say where
+        // it IS defined rather than send the agent to `find` for it.
+        let at: Vec<String> = locate_rows(conn, symbol, kind)
+            .map(|(rows, _)| rows)
+            .unwrap_or_default()
+            .iter()
+            .take(8)
+            .map(|(p, s, _, q)| format!("  {q}  {p}:{s}"))
+            .collect();
+        if !at.is_empty() {
+            return anyhow::anyhow!(
+                "'{symbol}'{hint} is not defined in '{f}' — defined at:\n{}",
+                at.join("\n")
+            );
+        }
+    }
+    let closest = |name: &str| -> Vec<String> {
+        fuzzy_symbols(conn, name, kind, 3)
+            .unwrap_or_default()
+            .iter()
+            .map(|h| format!("  {}  {}:{}", h.qualified, h.path, h.start))
+            .collect()
+    };
+    let mut near = closest(symbol);
+    if near.is_empty() {
+        // `Parent.Name` whose parent the index lost or never had (Swift
+        // members after an `#if`, free fns guessed as methods): list the
+        // bare name's definitions instead of a dead end.
+        if let Some(tail) = symbol
+            .rsplit(['.', ':'])
+            .next()
+            .filter(|t| *t != symbol && !t.is_empty())
+        {
+            near = closest(tail);
+        }
+    }
+    if near.is_empty() {
+        return anyhow::anyhow!("symbol '{symbol}'{hint} not found — try `cona find {symbol}`");
+    }
+    // Inline the fuzzy top hits: agents rarely run the suggested `find`
+    // after a miss, but they do retry with a name they can see.
+    anyhow::anyhow!(
+        "symbol '{symbol}'{hint} not found — closest:\n{}",
+        near.join("\n")
+    )
 }
 
 /// Like `locate_symbol`, optionally narrowed to a kind (`--kind struct` splits
@@ -746,6 +797,9 @@ fn closest_symbols(conn: &Connection, symbol: &str, kind: Option<&str>, n: usize
 /// pool — invariant 4 stands.
 fn locate_symbol_kind(conn: &Connection, symbol: &str, kind: Option<&str>) -> Result<Located> {
     let pool = locate_candidates(conn, symbol, kind)?;
+    if pool.is_empty() {
+        return Err(miss_error(conn, symbol, kind));
+    }
     let symbol = symbol.rsplit_once(':').map_or(symbol, |(_, n)| n);
     if pool.len() == 1 {
         return Ok(pool[0].clone());

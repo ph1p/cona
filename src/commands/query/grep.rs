@@ -3,7 +3,9 @@
 //! narrows indexed files in-process, `grep_prefilter` (rg/grep, same mode)
 //! only serves `--include-deps`, which searches outside the index.
 
-use crate::commands::{defaults, jout, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL, LIMIT_TRAILER};
+use crate::commands::{
+    defaults, jout, shell_quote, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL, LIMIT_TRAILER,
+};
 use crate::{db, indexer};
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
@@ -60,13 +62,15 @@ pub fn cmd_grep(
         files.retain(|f| pf.ok(f));
     } else {
         files.retain(|f| pf.ok(f));
-        let all = files.clone();
-        files = prefilter_indexed(root, files, &matcher);
         // `\bstate\b`, `\.alarm`, `a|b`: grep habits that match nothing
         // verbatim. Agents rarely retry an empty answer — they conclude the code
         // doesn't exist — so a zero-hit literal that compiles as a regex is
         // answered as one, with a note saying which reading produced the hits.
-        if files.is_empty() && !regex && regexish_literal(pattern).is_some() {
+        let retry = !regex && regexish_literal(pattern).is_some();
+        // the retry's file list; only a regex-looking literal pays for the copy
+        let all = if retry { files.clone() } else { Vec::new() };
+        files = prefilter_indexed(root, files, &matcher);
+        if files.is_empty() && retry {
             if let Ok(re) = Matcher::new(pattern, ignore_case, true) {
                 let hits = prefilter_indexed(root, all, &re);
                 if !hits.is_empty() {
@@ -468,17 +472,6 @@ fn regexish_literal(pattern: &str) -> Option<String> {
             .unwrap_or("")
             .to_string(),
     )
-}
-
-/// Single-quoted for a POSIX shell, so a suggested command runs as printed —
-/// an unquoted `a|b` would be a pipe.
-fn shell_quote(s: &str) -> String {
-    if s.chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | ':'))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// The indexed `files` that could hold a match, order kept. Replaces the rg

@@ -586,7 +586,7 @@ pub(super) fn literal_advice(pattern: &str) -> String {
     let regex = pattern
         .replace("\\|", "")
         .contains(['[', '*', '+', '?', '(', '|', '^', '$', '{', '\\']);
-    let quoted = shell_quote(pattern);
+    let quoted = crate::commands::shell_quote(pattern);
     let cmd = if regex {
         format!("cona grep {quoted} --regex")
     } else {
@@ -601,17 +601,6 @@ pub(super) fn literal_advice(pattern: &str) -> String {
         "this project is cona-indexed — `{cmd}` searches code only and labels every hit \
          with its enclosing symbol{dialect}. This search ran as-is."
     )
-}
-
-/// Quote a word for pasting into a POSIX shell; bare when nothing needs it.
-fn shell_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Emit the PreToolUse deny decision and count the intercept. Credits no

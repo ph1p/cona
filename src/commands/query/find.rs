@@ -1,7 +1,6 @@
 //! `find`: exact / LIKE / fuzzy symbol lookup.
 
-use crate::commands::{clip, jout, PathFilter, LIMIT_TRAILER};
-use crate::fuzzy;
+use crate::commands::{clip, fuzzy_symbols, jout, PathFilter, LIMIT_TRAILER};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -107,45 +106,7 @@ pub fn cmd_find_fuzzy(
     kind: Option<&str>,
     json: bool,
 ) -> Result<(String, i64)> {
-    struct Hit {
-        path: String,
-        kind: String,
-        qualified: String,
-        start: i64,
-        end: i64,
-        sig: String,
-    }
-    let mut stmt = conn.prepare(
-        "SELECT f.path, s.kind, s.qualified, s.start_line, s.end_line, s.signature, s.name
-         FROM symbols s JOIN files f ON f.id = s.file_id",
-    )?;
-    let candidates: Vec<(Hit, String)> = stmt
-        .query_map([], |r| {
-            let hit = Hit {
-                path: r.get(0)?,
-                kind: r.get(1)?,
-                qualified: r.get(2)?,
-                start: r.get(3)?,
-                end: r.get(4)?,
-                sig: r.get(5)?,
-            };
-            let bare: String = r.get(6)?;
-            Ok((hit, bare))
-        })?
-        .flatten()
-        .filter(|(hit, _)| kind.map(|k| hit.kind == k).unwrap_or(true))
-        .collect();
-    let scored: Vec<(i64, &Hit)> = fuzzy::rank(
-        name,
-        candidates
-            .iter()
-            .enumerate()
-            .map(|(i, (h, bare))| (i, bare.as_str(), h.qualified.as_str())),
-        10,
-    )
-    .into_iter()
-    .map(|(s, i)| (s, &candidates[i].0))
-    .collect();
+    let scored = fuzzy_symbols(conn, name, kind, 10)?;
     if scored.is_empty() {
         return Ok((format!("no match for '{name}'\n"), 0));
     }
@@ -153,7 +114,7 @@ pub fn cmd_find_fuzzy(
     if json {
         let items: Vec<_> = scored
             .iter()
-            .map(|(_, h)| {
+            .map(|h| {
                 serde_json::json!({"file": h.path, "kind": h.kind, "symbol": h.qualified,
                     "start": h.start, "end": h.end, "sig": h.sig, "fuzzy": true})
             })
@@ -161,7 +122,7 @@ pub fn cmd_find_fuzzy(
         return jout(&items, baseline);
     }
     let mut out = format!("no exact match for '{name}' — closest:\n");
-    for (_, h) in scored {
+    for h in scored {
         out.push_str(&format!(
             "{} {}  {}:{}-{}  {}\n",
             h.kind, h.qualified, h.path, h.start, h.end, h.sig

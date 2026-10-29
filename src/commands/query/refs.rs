@@ -111,7 +111,16 @@ pub fn cmd_refs(
         return jout(&items, baseline);
     }
     let mut out = String::new();
-    if shape != RefsShape::Lines && !hits.is_empty() {
+    if shape == RefsShape::Lines {
+        let mut current = "";
+        for (f, l, t) in &hits {
+            if f.as_str() != current {
+                out.push_str(&format!("{f}\n"));
+                current = f;
+            }
+            out.push_str(&format!("  {l}: {t}\n"));
+        }
+    } else {
         // Same rows as grep -l/-c. Folded test sites stay folded (their count
         // line below), so `refs -c` still answers "who uses this in prod".
         let mut per_file: Vec<(&str, usize)> = Vec::new();
@@ -128,14 +137,6 @@ pub fn cmd_refs(
                 format!("{f}\n")
             });
         }
-    }
-    let mut current = "";
-    for (f, l, t) in hits.iter().filter(|_| shape == RefsShape::Lines) {
-        if f.as_str() != current {
-            out.push_str(&format!("{f}\n"));
-            current = f;
-        }
-        out.push_str(&format!("  {l}: {t}\n"));
     }
     if truncated {
         out.push_str(LIMIT_TRAILER);

@@ -16,12 +16,6 @@ pub fn cmd_outline(
     show_sig: bool,
     json: bool,
 ) -> Result<(String, i64)> {
-    // suffix match only at a path-separator boundary (`db.rs` must not pull in
-    // `gitdb.rs`), with LIKE metacharacters escaped so `_`/`%` in names stay literal
-    let escaped = file
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
     let mut stmt = conn.prepare(
         "SELECT f.path, s.kind, s.qualified, s.start_line, s.end_line, s.signature, f.size
          FROM symbols s JOIN files f ON f.id = s.file_id
@@ -29,7 +23,7 @@ pub fn cmd_outline(
          ORDER BY f.path, s.start_line",
     )?;
     // reused after a refresh replaces the rows below
-    let like = format!("%/{escaped}");
+    let like = crate::commands::suffix_like(file);
     let mut fetch = || -> Result<Vec<OutlineRow>> {
         Ok(stmt
             .query_map(rusqlite::params![file, like], |r| {
@@ -54,7 +48,7 @@ pub fn cmd_outline(
             || conn
                 .query_row(
                     "SELECT 1 FROM files WHERE path LIKE ?1 ESCAPE '\\' LIMIT 1",
-                    [format!("{escaped}/%")],
+                    [format!("{}/%", crate::commands::like_escape(file))],
                     |_| Ok(()),
                 )
                 .is_ok();
@@ -63,14 +57,7 @@ pub fn cmd_outline(
         }
         // Distinguish the remaining causes — each has a different next step,
         // and a hook-redirected agent must not be stranded by a dead end.
-        let in_index = conn
-            .query_row(
-                "SELECT 1 FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' LIMIT 1",
-                rusqlite::params![file, like],
-                |_| Ok(()),
-            )
-            .is_ok();
-        if in_index {
+        if !crate::commands::files_named(conn, file).is_empty() {
             bail!(
                 "'{file}' is indexed but has no extractable symbols — read it directly, \
                  or search it with `cona grep <pattern> --path {file}`"
@@ -79,7 +66,7 @@ pub fn cmd_outline(
         if root.join(file).is_file() {
             bail!("'{file}' exists but is not in the index — run `cona index`, then retry");
         }
-        let near = crate::commands::did_you_mean(&crate::commands::similar_files(conn, file));
+        let near = crate::commands::did_you_mean_file(conn, file);
         if !near.is_empty() {
             bail!("no file '{file}' in the index{near}");
         }

@@ -114,7 +114,7 @@ fn line_range(root: &Path, conn: &Connection, arg: &str) -> Result<Option<(Strin
     match crate::commands::files_named(conn, file).as_slice() {
         [one] => Ok(Some((one.clone(), start, end))),
         [] => {
-            let near = crate::commands::did_you_mean(&crate::commands::similar_files(conn, file));
+            let near = crate::commands::did_you_mean_file(conn, file);
             anyhow::bail!("no file '{file}'{near}")
         }
         many => anyhow::bail!(

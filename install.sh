@@ -157,12 +157,13 @@ esac
 if [ -z "${CONA_NO_SETUP:-}" ] && [ -t 1 ] && (: </dev/tty) 2>/dev/null; then
     top="$(git rev-parse --show-toplevel 2>/dev/null || :)"
     if [ -n "$top" ] && [ "$top" != "$HOME" ]; then
-        echo; echo "running: cona setup  (in $top)"
-        "$BIN_DIR/cona" setup </dev/tty || echo "note: setup did not finish — re-run: cona setup"
+        scope=""; why="in $top"
     else
-        echo; echo "running: cona setup global  (not in a project — run \`cona setup\` inside one to index it)"
-        "$BIN_DIR/cona" setup global </dev/tty || echo "note: setup did not finish — re-run: cona setup global"
+        scope="global"; why="not in a project — run \`cona setup\` inside one to index it"
     fi
+    echo; echo "running: cona setup${scope:+ $scope}  ($why)"
+    # $scope unquoted on purpose: empty = no argument
+    "$BIN_DIR/cona" setup $scope </dev/tty || echo "note: setup did not finish — re-run: cona setup${scope:+ $scope}"
     exit 0
 fi
 
