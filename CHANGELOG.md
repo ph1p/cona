@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/ph1p/cona/compare/v0.1.1...v0.1.2) - 2026-10-29
+
+### Added
+
+- recover from common agent slips seen in transcripts
+- *(plugin)* install the cona binary on first session
+
 ## [0.1.1](https://github.com/ph1p/cona/compare/v0.1.0...v0.1.1) - 2026-10-21
 
 ### Added
