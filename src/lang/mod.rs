@@ -247,9 +247,48 @@ fn parse(lang: &str, src: &str) -> anyhow::Result<tree_sitter::Tree> {
         language_for(lang).ok_or_else(|| anyhow::anyhow!("unsupported language: {lang}"))?;
     let mut parser = Parser::new();
     parser.set_language(&language)?;
+    let src = if lang == "swift" {
+        blank_swift_directives(src)
+    } else {
+        std::borrow::Cow::Borrowed(src)
+    };
     parser
-        .parse(src, None)
+        .parse(src.as_ref(), None)
         .ok_or_else(|| anyhow::anyhow!("parse failed"))
+}
+
+/// tree-sitter-swift closes a type body at an `#if`/`#endif` inside it, so
+/// every member after the block lands at file scope (`ProcessIcon.themeColor`
+/// indexed as a free `themeColor`). Blanking the directive lines — same byte
+/// length, so every node position still indexes the ORIGINAL source — lets
+/// the body parse whole; both branches' declarations stay visible.
+fn blank_swift_directives(src: &str) -> std::borrow::Cow<'_, str> {
+    let is_directive = |line: &str| {
+        let t = line.trim_start();
+        ["#if", "#elseif", "#else", "#endif"].iter().any(|d| {
+            t.strip_prefix(d)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
+    };
+    if !src.lines().any(is_directive) {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    let mut out = String::with_capacity(src.len());
+    for line in src.split_inclusive('\n') {
+        if is_directive(line) {
+            // byte-wise, so a multibyte char becomes that many spaces
+            out.extend(line.bytes().map(|b| {
+                if b == b'\n' || b == b'\r' {
+                    b as char
+                } else {
+                    ' '
+                }
+            }));
+        } else {
+            out.push_str(line);
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Kind taxonomy over `classify()` labels. Which kinds are types or callable

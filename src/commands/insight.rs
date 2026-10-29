@@ -579,7 +579,16 @@ pub fn cmd_impact(
     let (path, _, _, q) = locate_fresh(root, conn, symbol, None)?;
     // refs match identifier tokens — a qualified `Parent.name` never occurs in
     // source, so scan for the bare name (q stays for calls/tests/blame)
-    let (refs, b_refs) = query::cmd_refs(root, conn, db::name_tail(&q), 100, None, true, false)?;
+    let (refs, b_refs) = query::cmd_refs(
+        root,
+        conn,
+        db::name_tail(&q),
+        100,
+        None,
+        true,
+        query::RefsShape::Lines,
+        false,
+    )?;
     let (callers, _) = callgraph::cmd_calls(root, conn, &q, 1, true, false)
         .unwrap_or_else(|_| ("(not in call graph)\n".to_string(), 0));
     let (tests, _) = cmd_tests(root, conn, &q, false)?;

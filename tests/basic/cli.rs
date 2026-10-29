@@ -512,3 +512,78 @@ fn notes_follow_rename_and_stay_on_their_symbol() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// Recurring agent slips mined from transcripts: each must answer (or name the
+// fix) instead of erroring into a dead end.
+#[test]
+fn agent_slips_recover() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("cona-slip-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(
+        dir.join("a.rs"),
+        "pub fn alpha() {}\npub fn beta() { alpha(); }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("sub/b.rs"), "fn gamma() { crate::alpha(); }\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let run = |args: &[&str]| -> (String, bool) {
+        let o = Command::new(bin)
+            .args(args)
+            .env("CONA_DATA_DIR", dir.join(".cona-data"))
+            .env("CONA_NO_STATS", "1")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+        s.push_str(&String::from_utf8_lossy(&o.stderr));
+        (s, o.status.success())
+    };
+    run(&["index"]);
+
+    // line range on a basename / path suffix
+    let (out, ok) = run(&["show", "b.rs:1"]);
+    assert!(
+        ok && out.contains("sub/b.rs:1-1") && out.contains("gamma"),
+        "{out}"
+    );
+    // wrong directory → did-you-mean, not "symbol '1' not found"
+    let (out, ok) = run(&["show", "lib/b.rs:1"]);
+    assert!(!ok && out.contains("did you mean sub/b.rs"), "{out}");
+    let (out, ok) = run(&["outline", "lib/b.rs"]);
+    assert!(!ok && out.contains("did you mean sub/b.rs"), "{out}");
+
+    // symbol misses inline their closest names
+    let (out, ok) = run(&["show", "alph"]);
+    assert!(
+        !ok && out.contains("closest:") && out.contains("alpha  a.rs:1"),
+        "{out}"
+    );
+    let (out, _) = run(&["show", "Nope.gamma"]);
+    assert!(out.contains("gamma  sub/b.rs:1"), "{out}");
+
+    // regex syntax under the literal default retries as a regex, and says so
+    let (out, ok) = run(&["grep", r"\balpha\b", "-l"]);
+    assert!(
+        ok && out.contains("as a regex") && out.contains("a.rs"),
+        "{out}"
+    );
+    // grep's positional paths and a no-op `-n`
+    let (out, ok) = run(&["grep", "alpha", "sub", "-n"]);
+    assert!(
+        ok && out.contains("sub/b.rs") && !out.contains("a.rs:1"),
+        "{out}"
+    );
+
+    // refs takes several names and -l/-c shapes
+    let (out, ok) = run(&["refs", "-c", "alpha", "gamma"]);
+    assert!(
+        ok && out.contains("── alpha") && out.contains("── gamma"),
+        "{out}"
+    );
+    let (out, ok) = run(&["refs", "-l", "alpha"]);
+    assert!(ok && out.lines().any(|l| l == "sub/b.rs"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

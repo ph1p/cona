@@ -79,6 +79,10 @@ pub fn cmd_outline(
         if root.join(file).is_file() {
             bail!("'{file}' exists but is not in the index — run `cona index`, then retry");
         }
+        let near = crate::commands::did_you_mean(&crate::commands::similar_files(conn, file));
+        if !near.is_empty() {
+            bail!("no file '{file}' in the index{near}");
+        }
         bail!("no file '{file}' in the index — `cona find <name>` locates symbols by name");
     }
     // Baseline: sum each matched file's size once (rows are path-ordered).

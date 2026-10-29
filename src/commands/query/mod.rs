@@ -17,6 +17,6 @@ pub use find::{cmd_find, cmd_find_fuzzy};
 pub use grep::cmd_grep;
 pub(crate) use grep::{prefilter_indexed, Matcher};
 pub use outline::cmd_outline;
-pub use refs::cmd_refs;
+pub use refs::{cmd_refs, RefsShape};
 pub use show::cmd_show;
 pub use tree::{cmd_tree, cmd_tree_rank};

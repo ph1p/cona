@@ -205,6 +205,55 @@ fn swift_declaration_kinds_and_members() {
 }
 
 #[test]
+fn swift_if_blocks_keep_members_in_their_type() {
+    // tree-sitter-swift ends the body at `#endif` unless directives are blanked
+    let src = "enum P {
+  static func a() {}
+  #if canImport(AppKit)
+  static func b() {}
+  #else
+                 static func c() {}
+  #endif
+  static func d() {}
+}
+";
+    let syms = lang::extract_symbols("swift", src).unwrap();
+    let span = |q: &str| {
+        syms.iter()
+            .find(|s| s.qualified == q)
+            .map(|s| (s.start_line, s.end_line))
+    };
+    assert_eq!(span("P"), Some((1, 9)), "{syms:?}");
+    for q in ["P.a", "P.b", "P.c", "P.d"] {
+        assert!(span(q).is_some(), "{q} missing: {syms:?}");
+    }
+    // positions still index the original source
+    assert_eq!(span("P.d"), Some((8, 8)), "{syms:?}");
+}
+
+#[test]
+fn swift_static_properties_are_type_scoped_symbols() {
+    let src = "enum Paths {
+  static let configDir = \"x\"
+  private static var cache: [Int] = []
+                 let instance = 1
+  static func f() { let local = 2 }
+}
+let top = 3
+";
+    let syms = lang::extract_symbols("swift", src).unwrap();
+    let kind_of = |q: &str| syms.iter().find(|s| s.qualified == q).map(|s| s.kind);
+    assert_eq!(kind_of("Paths.configDir"), Some("const"), "{syms:?}");
+    assert_eq!(kind_of("Paths.cache"), Some("var"), "{syms:?}");
+    for name in ["instance", "local", "top"] {
+        assert!(
+            !syms.iter().any(|s| s.name == name),
+            "{name} indexed: {syms:?}"
+        );
+    }
+}
+
+#[test]
 fn ts_function_valued_consts_are_indexed() {
     let src = "export const handler = async (req: Request) => {\n  return null\n}\n\
                const legacy = function () {}\n\

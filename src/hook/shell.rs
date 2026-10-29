@@ -64,6 +64,28 @@ pub fn shell_words(cmd: &str) -> Option<Vec<String>> {
                     quote = Some(c);
                     had = true;
                 }
+                // `2>/dev/null`, `2>&1`: stderr only — stdout (the content
+                // the agent reads) is untouched, so the command keeps its meaning.
+                '>' if cur == "2" && !had => {
+                    if chars.peek() == Some(&'>') {
+                        chars.next();
+                    }
+                    while chars.peek().is_some_and(|c| *c == ' ') {
+                        chars.next();
+                    }
+                    let mut target = String::new();
+                    while let Some(&n) = chars.peek() {
+                        if n.is_whitespace() || matches!(n, ';' | '|') {
+                            break;
+                        }
+                        target.push(n);
+                        chars.next();
+                    }
+                    if target != "/dev/null" && target != "&1" {
+                        return None;
+                    }
+                    cur.clear();
+                }
                 ';' | '|' | '&' | '>' | '<' | '`' | '\n' => return None,
                 '$' if chars.peek() == Some(&'(') => return None,
                 '\\' => return None,
@@ -126,6 +148,8 @@ pub fn split_pipeline(cmd: &str) -> Option<Vec<(String, bool)>> {
                     out.push((std::mem::take(&mut cur), piped));
                     piped = false;
                 }
+                // `2>&1` / `&>f`: the `&` belongs to a redirect, not a separator
+                '&' if cur.ends_with(['>', '<']) || chars.peek() == Some(&'>') => cur.push(c),
                 '&' | '|' => {
                     // `&&`/`||` collapse to one separator; a bare `&`
                     // (background) or `|` (pipe) separates just the same.
@@ -355,7 +379,20 @@ pub fn classify_command(cmd: &str) -> ShellIntent {
                 .is_some_and(|(k, _)| !k.is_empty() && !k.starts_with('-'))
         })
         .unwrap_or(words.len());
-    let Some((prog, args)) = words[start..].split_first() else {
+    let mut words = &words[start..];
+    // `command grep`, `rtk grep`, `rtk proxy grep`: transparent wrappers that
+    // run the same program — classify what they run.
+    loop {
+        match words {
+            [w, rest @ ..] if w == "command" && !rest.is_empty() => words = rest,
+            [w, p, rest @ ..] if w == "rtk" && p == "proxy" && !rest.is_empty() => words = rest,
+            [w, rest @ ..] if w == "rtk" && !rest.is_empty() && !rest[0].starts_with('-') => {
+                words = rest
+            }
+            _ => break,
+        }
+    }
+    let Some((prog, args)) = words.split_first() else {
         return ShellIntent::Other;
     };
     // `/bin/cat` and `cat` are the same program.
@@ -378,7 +415,9 @@ pub fn classify_command(cmd: &str) -> ShellIntent {
         },
         // Metadata probes pull no content and routinely accompany a read
         // (`wc -l f && sed -n '1,500p' f`); harmless, so they cannot poison it.
-        "wc" | "ls" | "pwd" | "file" | "stat" | "basename" | "dirname" | "echo" => {
+        // `cona` reads through the index — the very thing the hook steers
+        // toward — so a `cona show X; cat f` line is judged by its `cat`.
+        "wc" | "ls" | "pwd" | "file" | "stat" | "basename" | "dirname" | "echo" | "cona" => {
             ShellIntent::PartialRead { path: None }
         }
         // `sed -n '<range>p' FILE`; `1,$p` / `1,99999p` is "read it all".

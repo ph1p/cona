@@ -7,6 +7,15 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
 
+/// How `refs` renders its sites: every line, or one row per file (`-l`/`-c`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RefsShape {
+    Lines,
+    Files,
+    Counts,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_refs(
     root: &Path,
     conn: &Connection,
@@ -14,8 +23,15 @@ pub fn cmd_refs(
     limit: usize,
     path_filter: Option<&str>,
     tests: bool,
+    shape: RefsShape,
     json: bool,
 ) -> Result<(String, i64)> {
+    // -l/-c summarize every site: a limit would make the counts lie.
+    let limit = if shape == RefsShape::Lines {
+        limit
+    } else {
+        usize::MAX
+    };
     // Test sites are kept apart: on a hot symbol they outnumber production
     // sites ~5:1 and eat the limit. They are folded into one count line unless
     // asked for (`tests`), the caller scoped with --path, or they are all there is.
@@ -95,8 +111,26 @@ pub fn cmd_refs(
         return jout(&items, baseline);
     }
     let mut out = String::new();
+    if shape != RefsShape::Lines && !hits.is_empty() {
+        // Same rows as grep -l/-c. Folded test sites stay folded (their count
+        // line below), so `refs -c` still answers "who uses this in prod".
+        let mut per_file: Vec<(&str, usize)> = Vec::new();
+        for (f, _, _) in &hits {
+            match per_file.last_mut() {
+                Some((pf, n)) if *pf == f.as_str() => *n += 1,
+                _ => per_file.push((f, 1)),
+            }
+        }
+        for (f, n) in per_file {
+            out.push_str(&if shape == RefsShape::Counts {
+                format!("{f}:{n}\n")
+            } else {
+                format!("{f}\n")
+            });
+        }
+    }
     let mut current = "";
-    for (f, l, t) in &hits {
+    for (f, l, t) in hits.iter().filter(|_| shape == RefsShape::Lines) {
         if f.as_str() != current {
             out.push_str(&format!("{f}\n"));
             current = f;

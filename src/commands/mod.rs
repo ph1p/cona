@@ -352,6 +352,52 @@ pub(crate) fn path_matches_dir(rel: &str, filter: &str, dir_filter: bool) -> boo
 
 /// A `--path` filter with the directory question answered ONCE.
 ///
+/// `%/{f}` for LIKE: a `/`-guarded suffix (`db.rs` must not pull in
+/// `gitdb.rs`), LIKE metacharacters escaped so `_`/`%` in names stay literal.
+pub(crate) fn suffix_like(f: &str) -> String {
+    let escaped = f
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%/{escaped}")
+}
+
+/// Indexed paths `f` names: the exact path when indexed, else every
+/// `/`-guarded suffix match (`deploy.ts` → `src/cli/commands/deploy.ts`).
+pub(crate) fn files_named(conn: &Connection, f: &str) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT path FROM files WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' ORDER BY path",
+    ) else {
+        return Vec::new();
+    };
+    let rows: Vec<String> = stmt
+        .query_map(rusqlite::params![f, suffix_like(f)], |r| r.get(0))
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default();
+    if rows.iter().any(|p| p == f) {
+        return vec![f.to_string()];
+    }
+    rows
+}
+
+/// The "did you mean" for a path that isn't indexed: up to 3 indexed files
+/// with the same file name (`src/cli/commands/tunnel.ts` → `src/core/tunnel.ts`).
+/// Agents misremember the directory far more often than the name.
+pub(crate) fn similar_files(conn: &Connection, f: &str) -> Vec<String> {
+    let base = f.rsplit('/').next().unwrap_or(f);
+    let mut hits = files_named(conn, base);
+    hits.truncate(3);
+    hits
+}
+
+/// `" — did you mean a, b?"`, or empty when nothing is close.
+pub(crate) fn did_you_mean(cands: &[String]) -> String {
+    if cands.is_empty() {
+        return String::new();
+    }
+    format!(" — did you mean {}?", cands.join(", "))
+}
+
 /// The dir-vs-prefix reading is loop-invariant, but the filter runs per row
 /// (up to thousands); resolving it up front keeps the hot path a pure string
 /// compare. A struct, not a closure, so it doesn't pin a caller's scope alive.
@@ -637,9 +683,62 @@ fn locate_rows(
                 at.join("\n")
             );
         }
-        bail!("symbol '{symbol}'{hint} not found — try `cona find {symbol}`");
+        let mut near = closest_symbols(conn, symbol, kind, 3);
+        if near.is_empty() {
+            // `Parent.Name` whose parent the index lost or never had (Swift
+            // members after an `#if`, free fns guessed as methods): list the
+            // bare name's definitions instead of a dead end.
+            if let Some(tail) = symbol
+                .rsplit(['.', ':'])
+                .next()
+                .filter(|t| *t != symbol && !t.is_empty())
+            {
+                near = closest_symbols(conn, tail, kind, 3);
+            }
+        }
+        if near.is_empty() {
+            bail!("symbol '{symbol}'{hint} not found — try `cona find {symbol}`");
+        }
+        // Inline the fuzzy top hits: agents rarely run the suggested `find`
+        // after a miss, but they do retry with a name they can see.
+        bail!(
+            "symbol '{symbol}'{hint} not found — closest:\n{}",
+            near.join("\n")
+        );
     }
     Ok((rows, symbol.to_string()))
+}
+
+/// Up to `n` fuzzy-closest symbols as `  qualified  path:line` rows — the
+/// same ranking `find` falls back to, so a miss names its likely target.
+fn closest_symbols(conn: &Connection, symbol: &str, kind: Option<&str>, n: usize) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT f.path, s.start_line, s.qualified, s.name
+         FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE (?1 IS NULL OR s.kind = ?1)",
+    ) else {
+        return Vec::new();
+    };
+    let cands: Vec<(String, i64, String, String)> = stmt
+        .query_map(rusqlite::params![kind], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .map(|it| it.flatten().collect())
+        .unwrap_or_default();
+    crate::fuzzy::rank(
+        symbol,
+        cands
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.3.as_str(), c.2.as_str())),
+        n,
+    )
+    .into_iter()
+    .map(|(_, i)| {
+        let (p, l, q, _) = &cands[i];
+        format!("  {q}  {p}:{l}")
+    })
+    .collect()
 }
 
 /// Like `locate_symbol`, optionally narrowed to a kind (`--kind struct` splits

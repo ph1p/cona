@@ -203,13 +203,41 @@ fn run() -> Result<()> {
         }
         Cmd::Nav(Nav::Refs(a)) | Cmd::Refs(a) => {
             let RefsArgs {
-                name,
+                names,
                 limit,
                 path,
                 tests,
+                files_with_matches,
+                count,
             } = a;
-            queried(&root, t0, "refs", name, |conn| {
-                cmd_refs(&root, conn, name, *limit, path.as_deref(), *tests, cli.json)
+            let shape = match (*files_with_matches, *count) {
+                (true, _) => RefsShape::Files,
+                (_, true) => RefsShape::Counts,
+                _ => RefsShape::Lines,
+            };
+            queried(&root, t0, "refs", &names.join(" "), |conn| {
+                // a batch of bare site lists can't tell whose sites they are
+                let label = names.len() > 1 && !cli.json;
+                each(&root, "refs", names, cli.json, |name| {
+                    let (o, b) = cmd_refs(
+                        &root,
+                        conn,
+                        name,
+                        *limit,
+                        path.as_deref(),
+                        *tests,
+                        shape,
+                        cli.json,
+                    )?;
+                    Ok((
+                        if label {
+                            format!("── {name}\n{o}")
+                        } else {
+                            o
+                        },
+                        b,
+                    ))
+                })
             })?;
         }
         Cmd::Inspect(Inspect::Context(a)) | Cmd::ContextFlat(a) => {
@@ -241,25 +269,55 @@ fn run() -> Result<()> {
                 before,
                 files_with_matches,
                 count,
+                paths,
+                line_number: _,
             } = a;
+            // `grep pat dir1 dir2` and repeated --path: one search per scope,
+            // concatenated like a batch, each with its own limit.
+            let scopes: Vec<Option<&str>> = if path.is_empty() && paths.is_empty() {
+                vec![None]
+            } else {
+                path.iter().chain(paths).map(|p| Some(p.as_str())).collect()
+            };
             queried(&root, t0, "grep", pattern, |conn| {
-                cmd_grep(
-                    &root,
-                    conn,
-                    pattern,
-                    GrepOpts {
-                        ignore_case: *ignore_case,
-                        regex: *regex,
-                        limit: *limit,
-                        path: path.as_deref(),
-                        include_deps: *include_deps,
-                        before: before.or(*context).unwrap_or(0),
-                        after: after.or(*context).unwrap_or(0),
-                        files_only: *files_with_matches,
-                        count: *count,
-                    },
-                    cli.json,
-                )
+                let mut out = String::new();
+                let mut baseline = 0i64;
+                for scope in &scopes {
+                    let (o, b) = cmd_grep(
+                        &root,
+                        conn,
+                        pattern,
+                        GrepOpts {
+                            ignore_case: *ignore_case,
+                            regex: *regex,
+                            limit: *limit,
+                            path: *scope,
+                            include_deps: *include_deps,
+                            before: before.or(*context).unwrap_or(0),
+                            after: after.or(*context).unwrap_or(0),
+                            files_only: *files_with_matches,
+                            count: *count,
+                        },
+                        cli.json,
+                    )?;
+                    if cli.json && scopes.len() > 1 {
+                        // one JSON array per scope → merge into one array
+                        let o = o.trim();
+                        let items = o.strip_prefix('[').and_then(|o| o.strip_suffix(']'));
+                        let items = items.unwrap_or(o).trim();
+                        if !items.is_empty() {
+                            out.push_str(if out.is_empty() { "[" } else { "," });
+                            out.push_str(items);
+                        }
+                    } else {
+                        out.push_str(&o);
+                    }
+                    baseline += b;
+                }
+                if cli.json && scopes.len() > 1 {
+                    out.push_str(if out.is_empty() { "[]\n" } else { "]\n" });
+                }
+                Ok((out, baseline))
             })?;
         }
         Cmd::Edit(EditCmd::Edit(a)) | Cmd::EditFlat(a) => {

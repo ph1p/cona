@@ -30,8 +30,9 @@ pub fn cmd_grep(
         files_only,
         count,
     } = opts;
-    let matcher = Matcher::new(pattern, ignore_case, regex)?;
+    let mut matcher = Matcher::new(pattern, ignore_case, regex)?;
     let pf = PathFilter::new(root, path_filter);
+    let mut fell_back = false;
     let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let mut files: Vec<String> = stmt.query_map([], |r| r.get(0))?.flatten().collect();
     if include_deps {
@@ -59,10 +60,34 @@ pub fn cmd_grep(
         files.retain(|f| pf.ok(f));
     } else {
         files.retain(|f| pf.ok(f));
+        let all = files.clone();
         files = prefilter_indexed(root, files, &matcher);
+        // `\bstate\b`, `\.alarm`, `a|b`: grep habits that match nothing
+        // verbatim. Agents rarely retry an empty answer — they conclude the code
+        // doesn't exist — so a zero-hit literal that compiles as a regex is
+        // answered as one, with a note saying which reading produced the hits.
+        if files.is_empty() && !regex && regexish_literal(pattern).is_some() {
+            if let Ok(re) = Matcher::new(pattern, ignore_case, true) {
+                let hits = prefilter_indexed(root, all, &re);
+                if !hits.is_empty() {
+                    matcher = re;
+                    files = hits;
+                    fell_back = true;
+                }
+            }
+        }
     }
+    let note = if fell_back && !json {
+        format!(
+            "note: no literal match — searched '{}' as a regex (literal is the default; --regex skips this)\n",
+            matcher.source(pattern)
+        )
+    } else {
+        String::new()
+    };
     if files_only || count {
-        return grep_files(root, conn, pattern, &matcher, files, opts, json);
+        let (out, saved) = grep_files(root, conn, pattern, &matcher, files, opts, json)?;
+        return Ok((note + &out, saved));
     }
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     let mut hits: Vec<(String, usize, String, String)> = Vec::new();
@@ -129,7 +154,7 @@ pub fn cmd_grep(
             .collect();
         return jout(&items, baseline);
     }
-    let mut out = String::new();
+    let mut out = note;
     if !ctx.is_empty() {
         render_with_context(&mut out, &hits, &ctx, &matcher);
     }
@@ -144,7 +169,7 @@ pub fn cmd_grep(
         out.push_str(LIMIT_TRAILER);
     }
     if hits.is_empty() {
-        out.push_str(&no_matches(root, conn, pattern, &matcher, opts)?);
+        out.push_str(&no_matches(root, conn, pattern, opts)?);
     }
     Ok((out, baseline))
 }
@@ -195,7 +220,7 @@ fn grep_files(
         out.push_str(LIMIT_TRAILER);
     }
     if found.is_empty() {
-        out.push_str(&no_matches(root, conn, pattern, matcher, opts)?);
+        out.push_str(&no_matches(root, conn, pattern, opts)?);
     }
     Ok((out, 0))
 }
@@ -203,27 +228,28 @@ fn grep_files(
 /// The zero-hit message. Under `--path` it searches the rest of the repo
 /// itself and shows what is there — a "try without --path" hint only costs the
 /// agent a second call to learn the same thing.
-fn no_matches(
-    root: &Path,
-    conn: &Connection,
-    pattern: &str,
-    matcher: &Matcher,
-    opts: GrepOpts<'_>,
-) -> Result<String> {
+fn no_matches(root: &Path, conn: &Connection, pattern: &str, opts: GrepOpts<'_>) -> Result<String> {
     let mut out = String::new();
     let path_filter = opts.path;
     out.push_str(&format!("no matches for '{pattern}'"));
-    // A regex-looking pattern with zero literal hits is the worst failure
-    // mode — the agent concludes the code doesn't exist. Name the flag.
-    if let Some(literal) =
-        regexish_literal(pattern).filter(|_| matches!(matcher, Matcher::Literal { .. }))
-    {
-        out.push_str(&format!(
-            "\n  note: matching is literal by default — '{pattern}' was searched verbatim.\
-             \n  try `cona grep {pattern} --regex`"
-        ));
-        if !literal.is_empty() {
-            out.push_str(&format!(" — or the literal part: `cona grep {literal}`"));
+    // A regex-looking pattern with zero hits is the worst failure mode — the
+    // agent concludes the code doesn't exist. cmd_grep already retried it as a
+    // regex, so say both readings came up empty and offer the plain word in it.
+    // Only for an index-wide search: under --path the elsewhere-search below
+    // answers more than a hint could.
+    let literal = regexish_literal(pattern).filter(|_| !opts.regex && path_filter.is_none());
+    if let Some(literal) = literal {
+        let tried = if Matcher::new(pattern, opts.ignore_case, true).is_ok() {
+            "verbatim or as a regex"
+        } else {
+            "verbatim (it is not a valid regex)"
+        };
+        out.push_str(&format!(" — searched {tried}"));
+        if !literal.is_empty() && literal != pattern {
+            out.push_str(&format!(
+                "\n  try the plain part: `cona grep {}`",
+                shell_quote(&literal)
+            ));
         }
     } else if let Some(scope) = path_filter {
         let wide = GrepOpts {
@@ -328,6 +354,16 @@ impl Matcher {
         // either branch: literals stay literal; under --regex it becomes `|`
         // (a literal pipe there is `[|]`).
         if pattern.contains("\\|") {
+            // A branch holding another escape (`run\b\|\.alarm`) is grep BRE
+            // through and through — escaping it again would hunt for a literal
+            // backslash. Read the whole pattern as the regex it was written as.
+            // If it doesn't compile that way, the branches stay literal.
+            let bre = pattern.split("\\|").any(|b| b.contains('\\'));
+            if bre && !regex {
+                if let Ok(m) = Self::new(&pattern.replace("\\|", "|"), ignore_case, true) {
+                    return Ok(m);
+                }
+            }
             let alt = if regex {
                 pattern.replace("\\|", "|")
             } else {
@@ -411,14 +447,38 @@ fn regexish_literal(pattern: &str) -> Option<String> {
     if !pattern.contains(|c| META.contains(&c)) {
         return None;
     }
-    // e.g. `tokens_(out|saved)` → `tokens_`
+    // e.g. `tokens_(out|saved)` → `tokens_`. An escape like `\b` or `\s` is
+    // one token, not a `\` plus the word it prefixes (`\bstate` → `state`).
+    let mut plain = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            chars.next();
+            plain.push('\0');
+        } else if META.contains(&c) || matches!(c, '.' | '{' | '}' | ' ') {
+            plain.push('\0');
+        } else {
+            plain.push(c);
+        }
+    }
     Some(
-        pattern
-            .split(|c| META.contains(&c) || c == '.' || c == '{' || c == '}')
+        plain
+            .split('\0')
             .max_by_key(|s| s.len())
             .unwrap_or("")
             .to_string(),
     )
+}
+
+/// Single-quoted for a POSIX shell, so a suggested command runs as printed —
+/// an unquoted `a|b` would be a pipe.
+fn shell_quote(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | '/' | ':'))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// The indexed `files` that could hold a match, order kept. Replaces the rg
@@ -578,6 +638,15 @@ mod tests {
         let r = Matcher::new(r"tok_(out\|saved)", false, true).unwrap();
         assert!(r.is_match("tok_saved"));
         assert!(Matcher::new(r"A\|b", true, false).unwrap().is_match("a"));
+        // escapes beyond `\|` mean the whole pattern was written as BRE
+        let b = Matcher::new(r"run\.alarm\b\|\.stage", false, false).unwrap();
+        assert!(b.is_match("x.stage = 1"));
+        assert!(b.is_match("run.alarm;"));
+        assert!(!b.is_match("run.alarms"));
+        // ...unless it doesn't compile as one: then each branch stays literal
+        assert!(Matcher::new(r"f(\|\.x", false, false)
+            .unwrap()
+            .is_match("f("));
     }
 
     #[test]
@@ -631,6 +700,16 @@ mod tests {
             regexish_literal("tokens_(out|saved)").as_deref(),
             Some("tokens_")
         );
+        // `\b` is one escape, not `\` + a `b` glued onto the word
+        assert_eq!(regexish_literal(r"\bstate\b").as_deref(), Some("state"));
+        assert_eq!(regexish_literal(r"\.alarm").as_deref(), Some("alarm"));
+    }
+
+    #[test]
+    fn shell_quote_keeps_suggestions_runnable() {
+        assert_eq!(shell_quote("state"), "state");
+        assert_eq!(shell_quote("a|b"), "'a|b'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 }
 

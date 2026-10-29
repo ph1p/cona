@@ -56,9 +56,15 @@ src/commands/    cmd_* implementations, split by concern:
                           --include-deps, where prefilter_flag keeps them
                           reading the pattern the SAME way — a disagreeing
                           prefilter drops files holding real matches. Invalid regex = error, never a
-                          silent literal fallback. Zero hits on a metachar
-                          pattern in literal mode names `--regex` + the longest
-                          literal run
+                          silent literal fallback. Zero LITERAL hits on a
+                          regex-looking pattern (`\b`, `.*`, `a|b`) retry it
+                          as a regex in-process and say so in a `note:` line
+                          — agents rarely retry an empty grep themselves;
+                          literal hits always win, so no existing query
+                          changes meaning. Still zero → names the plain part
+                          (`regexish_literal`, shell-quoted). BRE `a\|b` whose
+                          branches carry other escapes compiles as a regex
+                          (`\.x\|\by`), else stays literal branches
                  mutate.rs edit / edit --range / insert (--before/--after <Sym>
                           OR --at <file> <line>, incl. new/empty file) / note /
                           rename. write_verified = THE shared syntax-verify +
@@ -267,13 +273,21 @@ src/hook/        PreToolUse + PostToolUse + PreCompact hooks
                  the line Other (blocking it would block that segment too —
                  `sed -n … f && cargo build` is a build); among recognised
                  segments the strongest intent wins (rank). Metadata probes
-                 (wc/ls/file/stat/echo/…) are PartialRead{path:None}, not Other,
+                 (wc/ls/file/stat/echo/…, and `cona` itself) are
+                 PartialRead{path:None}, not Other,
                  because an agent routinely pairs one with the read it is about
                  to do — they carry no path because they pull no content into
                  context and so are not slices of anything. A PartialRead that
                  DOES name one file (sed range, head/tail with a sole operand)
                  outranks a pathless probe, so `wc -l f && sed -n '40,80p' f` is
                  judged on the slice regardless of segment order.
+                 Stderr-only redirects (`2>/dev/null`, `2>&1`) are dropped —
+                 stdout, the content, is unchanged; any other redirect stays
+                 Other (`cat f > g` is a copy). `command X`, `rtk X` and
+                 `rtk proxy X` classify as X. Measured on 43k transcript lines
+                 (2026-10-29): these four cut read/grep lines lost to Other by
+                 ~9.6k; what still poisons is real work (git, sed -i, heredoc
+                 scripts) and stays fail-open.
                  `sed -n '1,N p'` is Read{upto:N}, NOT PartialRead: that is
                  exactly how a shell-only harness spells "read the whole file"
                  (it picks an N it expects to exceed the length). The bound is

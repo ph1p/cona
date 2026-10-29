@@ -155,7 +155,9 @@ pub struct ShowArgs {
 
 #[derive(clap::Args)]
 pub struct RefsArgs {
-    pub name: String,
+    /// One or more names — each searched in turn
+    #[arg(required = true)]
+    pub names: Vec<String>,
     #[arg(long, default_value_t = defaults::REFS_LIMIT)]
     pub limit: usize,
     /// Only references in files under this path prefix (file or directory)
@@ -164,6 +166,12 @@ pub struct RefsArgs {
     /// List test-file sites too (default: folded into one count line)
     #[arg(long)]
     pub tests: bool,
+    /// Only the files with references, one per line (like grep -l)
+    #[arg(short = 'l', long)]
+    pub files_with_matches: bool,
+    /// References per file, `path:N` (like grep -c)
+    #[arg(short = 'c', long, conflicts_with = "files_with_matches")]
+    pub count: bool,
 }
 
 #[derive(clap::Args)]
@@ -188,8 +196,12 @@ pub struct DiffArgs {
 #[derive(clap::Args)]
 pub struct GrepArgs {
     /// Substring to search for — literal unless --regex. `a\|b` (grep's
-    /// alternation) matches either literal in both modes
+    /// alternation) matches either literal in both modes. A literal with no
+    /// hits that compiles as a regex (`\bx\b`, `a|b`) is retried as one
     pub pattern: String,
+    /// Paths to search, as with grep — same as --path
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<String>,
     /// Case-insensitive match
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
@@ -198,9 +210,12 @@ pub struct GrepArgs {
     pub regex: bool,
     #[arg(long, default_value_t = defaults::GREP_LIMIT)]
     pub limit: usize,
-    /// Only search files under this path prefix (file or directory)
+    /// Only search files under this path prefix (file or directory); repeatable
     #[arg(long)]
-    pub path: Option<String>,
+    pub path: Vec<String>,
+    /// Accepted for grep compatibility — hits always carry line numbers
+    #[arg(short = 'n', long = "line-number", hide = true)]
+    pub line_number: bool,
     /// Also search dependency dirs (node_modules, vendor, target, .venv, …),
     /// which are excluded from the index and hidden by default
     #[arg(long)]

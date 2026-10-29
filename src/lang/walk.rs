@@ -91,6 +91,53 @@ fn top_level_consts<'a>(decl: Node<'a>, src: &str) -> Vec<(String, Node<'a>)> {
         .collect()
 }
 
+/// Swift type-level `static`/`class` properties (`BooPaths.configDir`) as
+/// `const` (let) / `var` symbols — the type-scoped constants agents look up by
+/// name. Instance stored properties stay unindexed: they are fields, read with
+/// their type, and would flood `find`/`refs` with every `let x`.
+fn swift_static_property(lang: &str, node: Node, src: &str) -> Option<(String, &'static str)> {
+    if lang != "swift" || node.kind() != "property_declaration" {
+        return None;
+    }
+    let in_type_body = node
+        .parent()
+        .is_some_and(|p| p.kind().ends_with("class_body"));
+    let mut c = node.walk();
+    let children: Vec<Node> = node.children(&mut c).collect();
+    let is_static = children
+        .iter()
+        .filter(|n| n.kind() == "modifiers")
+        .any(|m| {
+            let mut mc = m.walk();
+            let found = m.children(&mut mc).any(|k| {
+                k.kind() == "property_modifier"
+                    && matches!(k.utf8_text(src.as_bytes()), Ok("static" | "class"))
+            });
+            found
+        });
+    if !in_type_body || !is_static {
+        return None;
+    }
+    let label = match children
+        .iter()
+        .find(|n| n.kind() == "value_binding_pattern")
+    {
+        Some(b)
+            if b.utf8_text(src.as_bytes())
+                .is_ok_and(|t| t.starts_with("var")) =>
+        {
+            "var"
+        }
+        _ => "const",
+    };
+    let name = node
+        .child_by_field_name("name")?
+        .child_by_field_name("bound_identifier")?
+        .utf8_text(src.as_bytes())
+        .ok()?;
+    Some((name.to_string(), label))
+}
+
 pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out: &mut Vec<Sym>) {
     use std::rc::Rc;
     // Explicit worklist, NOT recursion: generated/minified files nest
@@ -206,6 +253,22 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
         }
         if lang == "go" && child.kind() == "var_spec" && !at_file_scope(child) {
             push_children(&mut stack, child, parent);
+            continue;
+        }
+        if let (Some(owner), Some((name, label))) =
+            (&parent, swift_static_property(lang, child, src))
+        {
+            let qualified = format!("{owner}.{name}");
+            out.push(Sym {
+                name,
+                qualified: qualified.clone(),
+                kind: label,
+                parent: Some(owner.to_string()),
+                start_line: child.start_position().row + 1,
+                end_line: child.end_position().row + 1,
+                signature: first_line_sig(child, src),
+            });
+            push_children(&mut stack, child, Some(Rc::from(qualified)));
             continue;
         }
         if let Some((label, _is_container, name_field)) = classify(lang, child.kind()) {

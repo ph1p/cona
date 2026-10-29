@@ -20,8 +20,8 @@ pub fn cmd_show(
     let ShowOpts { kind, sig, all, .. } = opts;
     // `file:120-160` / `file:120` — a line range, for the code between symbols
     // (file headers, one block of a long body) that `sed -n` would otherwise read
-    if let Some((file, start, end)) = line_range(root, symbol) {
-        return show_lines(root, file, start, end, opts.context, json);
+    if let Some((file, start, end)) = line_range(root, conn, symbol)? {
+        return show_lines(root, &file, start, end, opts.context, json);
     }
     // A path means "map this file" → outline (directories reach its
     // `tree --path` redirect). The filesystem decides; `split_locator` only
@@ -94,15 +94,39 @@ pub fn cmd_show(
     show_one(root, conn, symbol, opts, json, true)
 }
 
-/// `path:N-M` or `path:N` naming an existing file → (path, N, M).
-fn line_range<'a>(root: &Path, arg: &'a str) -> Option<(&'a str, usize, usize)> {
-    let (file, range) = arg.rsplit_once(':')?;
+/// `path:N-M` or `path:N` → (path, N, M). The path is a file on disk or —
+/// like `file.rs:Name` — an indexed path suffix (`deploy.ts:300-325`). A range
+/// on a path that names nothing is an error, not a symbol lookup for `300-325`.
+fn line_range(root: &Path, conn: &Connection, arg: &str) -> Result<Option<(String, usize, usize)>> {
+    let Some((file, range)) = arg.rsplit_once(':') else {
+        return Ok(None);
+    };
     let (a, b) = range.split_once('-').unwrap_or((range, range));
-    let (start, end) = (
-        a.trim().parse::<usize>().ok()?,
-        b.trim().parse::<usize>().ok()?,
-    );
-    (start >= 1 && end >= start && root.join(file).is_file()).then_some((file, start, end))
+    let (Ok(start), Ok(end)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>()) else {
+        return Ok(None);
+    };
+    if start < 1 || end < start {
+        return Ok(None);
+    }
+    if root.join(file).is_file() {
+        return Ok(Some((file.to_string(), start, end)));
+    }
+    match crate::commands::files_named(conn, file).as_slice() {
+        [one] => Ok(Some((one.clone(), start, end))),
+        [] => {
+            let near = crate::commands::did_you_mean(&crate::commands::similar_files(conn, file));
+            anyhow::bail!("no file '{file}'{near}")
+        }
+        many => anyhow::bail!(
+            "'{file}' is ambiguous — {} files end with it:\n{}",
+            many.len(),
+            many.iter()
+                .take(8)
+                .map(|p| format!("  {p}:{range}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    }
 }
 
 fn show_lines(

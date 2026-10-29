@@ -329,6 +329,7 @@ fn mcp_call(
                 uint("limit", defaults::REFS_LIMIT),
                 opt("path"),
                 flag("tests"),
+                RefsShape::Lines,
                 false,
             )?;
             (o, b, n.to_string())

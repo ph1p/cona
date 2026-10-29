@@ -547,6 +547,37 @@ fn one_unrecognised_segment_passes_the_whole_line() {
 }
 
 #[test]
+fn stderr_redirects_do_not_poison_a_read() {
+    // `2>&1` used to split at its `&`; `2>/dev/null` failed shell_words.
+    for cmd in [
+        "cat a.rs 2>/dev/null",
+        "cat a.rs 2> /dev/null; ls src 2>/dev/null",
+        "cat a.rs 2>&1 | head -50",
+    ] {
+        assert!(read_of(cmd).is_some_and(|(p, _)| p == "a.rs"), "{cmd}");
+    }
+    // stdout redirected = a copy, not a read
+    assert_eq!(classify_shell("cat a.rs > b.rs"), ShellIntent::Other);
+    assert_eq!(classify_shell("cat a.rs 2>err.log"), ShellIntent::Other);
+}
+
+#[test]
+fn cona_and_transparent_wrappers_are_seen_through() {
+    // a cona query beside a read neither hides the read nor is one
+    assert_eq!(
+        read_of("cona show X; cat a.rs"),
+        Some(("a.rs".into(), None))
+    );
+    assert!(matches!(
+        classify_shell("cona show X"),
+        ShellIntent::PartialRead { path: None }
+    ));
+    for cmd in ["command cat a.rs", "rtk cat a.rs", "rtk proxy cat a.rs"] {
+        assert_eq!(read_of(cmd), Some(("a.rs".into(), None)), "{cmd}");
+    }
+}
+
+#[test]
 fn leading_env_assignments_are_skipped() {
     assert_eq!(
         classify_shell("LC_ALL=C grep -rn UserService src"),
