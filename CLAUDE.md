@@ -188,6 +188,12 @@ dispatcher matches on, so matcher and dispatcher cannot disagree. The installer
 is the one hand-written copy, pinned by
 `plugin_hook_matcher_matches_the_installer`. Reinstall reconciles a drifted
 matcher, so widening it self-heals existing installs.
+**The plugin installs the binary itself**: SessionStart and the `.mcp.json`
+`sh -c` launcher both run install.sh (`CONA_NO_SETUP=1` — a hook must never
+prompt; output to stderr — stdout is model context / JSON-RPC) when `cona` is
+missing, unless `CONA_NO_AUTO_INSTALL`; every hook prepends `~/.local/bin` to
+PATH. Pinned by `plugin_bootstraps_the_binary`. install.sh on a TTY chains into
+`cona setup` (repo) / `setup global` (elsewhere); setup skips indexing $HOME.
 Codex specifics that bite: a `local` source is COPIED into
 `~/.codex/plugins/cache/<mkt>/<plugin>/<version>/`, so editing the checkout does
 nothing until `codex plugin add` runs again (silent — old hooks keep firing);
@@ -259,7 +265,9 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
   zero cost: it was already in `Cargo.lock` via `tree-sitter` (`cargo tree -i
   regex`), so it adds no crates and ~32 KB of binary. A regex is matched
   in-process by the `regex` crate; under `--include-deps` rg/grep get the
-  matching flag so their file list agrees.
+  matching flag so their file list agrees. Exception that keeps the default:
+  ZERO literal hits on a regex-looking pattern retry once as a regex, with a
+  `note:` line — 30% of empty greps were `\b`/`\.`/`.*` written for a regex.
 - `rename` semantic (identifier positions) but name-based: collision guard +
   syntax verify + all-or-nothing rollback; unparsable files only with --force.
 - `deps`: internal imports → edges; external packages counted + listed but not

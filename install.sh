@@ -12,6 +12,7 @@
 # Env overrides (binary mode):
 #   BIN_DIR=DIR        install dir   (default: ~/.local/bin)
 #   CONA_VERSION=X  pin a version (default: latest release)
+#   CONA_NO_SETUP=1    install the binary only; skip the chained `cona setup`
 set -eu
 
 REPO="ph1p/cona"
@@ -147,6 +148,23 @@ case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *) echo "note: $BIN_DIR is not on PATH — add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
+
+# One step, not two: an interactive install goes straight into `cona setup`.
+# `curl | sh` feeds the script on stdin, so the prompts read /dev/tty. Inside a
+# repo that is the full checklist; elsewhere (e.g. $HOME) only the home configs
+# — indexing $HOME is never what you want. CONA_NO_SETUP=1 skips it (the plugin
+# bootstrap sets it: a hook must never block on a prompt).
+if [ -z "${CONA_NO_SETUP:-}" ] && [ -t 1 ] && (: </dev/tty) 2>/dev/null; then
+    top="$(git rev-parse --show-toplevel 2>/dev/null || :)"
+    if [ -n "$top" ] && [ "$top" != "$HOME" ]; then
+        echo; echo "running: cona setup  (in $top)"
+        "$BIN_DIR/cona" setup </dev/tty || echo "note: setup did not finish — re-run: cona setup"
+    else
+        echo; echo "running: cona setup global  (not in a project — run \`cona setup\` inside one to index it)"
+        "$BIN_DIR/cona" setup global </dev/tty || echo "note: setup did not finish — re-run: cona setup global"
+    fi
+    exit 0
+fi
 
 # git-hook wiring is source-only; `cona setup` records install_path + wires agents.
 cat <<EOF

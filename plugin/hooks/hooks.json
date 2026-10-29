@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v cona >/dev/null 2>&1 && cona index --quiet --session-start || :"
+            "command": "PATH=\"$PATH:$HOME/.local/bin\"; command -v cona >/dev/null 2>&1 || [ -n \"${CONA_NO_AUTO_INSTALL:-}\" ] || curl -fsSL https://raw.githubusercontent.com/ph1p/cona/main/install.sh | CONA_NO_SETUP=1 sh >&2; command -v cona >/dev/null 2>&1 && cona index --quiet --session-start || :"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v cona >/dev/null 2>&1 && cona hook PreCompact || :"
+            "command": "PATH=\"$PATH:$HOME/.local/bin\"; command -v cona >/dev/null 2>&1 && cona hook PreCompact || :"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v cona >/dev/null 2>&1 && cona hook PreToolUse || :"
+            "command": "PATH=\"$PATH:$HOME/.local/bin\"; command -v cona >/dev/null 2>&1 && cona hook PreToolUse || :"
           }
         ]
       }
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v cona >/dev/null 2>&1 && cona index --quiet || :"
+            "command": "PATH=\"$PATH:$HOME/.local/bin\"; command -v cona >/dev/null 2>&1 && cona index --quiet || :"
           }
         ]
       },
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${CONA_RENUDGE_EVERY:-0}\" -gt 0 ] 2>/dev/null && cona hook PostToolUse || :"
+            "command": "PATH=\"$PATH:$HOME/.local/bin\"; [ \"${CONA_RENUDGE_EVERY:-0}\" -gt 0 ] 2>/dev/null && cona hook PostToolUse || :"
           }
         ]
       }

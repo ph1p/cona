@@ -116,7 +116,9 @@ without its group (`cona show Foo` = `cona nav show Foo`).
 The install script downloads a prebuilt binary (no Rust needed) and verifies its
 sha256 checksum. `CONA_VERIFY_ATTESTATION=1` also checks the SLSA build
 provenance via `gh`; `CONA_SKIP_VERIFY=1` skips verification (e.g. an offline
-mirror); `CONA_VERSION=x.y.z` pins a version.
+mirror); `CONA_VERSION=x.y.z` pins a version. On a terminal it then runs
+`cona setup` (inside a repo) or `cona setup global` (elsewhere);
+`CONA_NO_SETUP=1` stops after the binary.
 
 cona **updates itself**: at most once a day a command checks for a new release
 in the background. `cona upgrade` forces it and refreshes your agent configs.
@@ -149,7 +151,9 @@ never touched, and re-running is safe.
 ### Plugin (Claude Code, Codex)
 
 Instead of `cona agents install`, both harnesses can load cona as a plugin
-(skill + hooks + MCP server). The binary is still required.
+(skill + hooks + MCP server). No separate binary install: if `cona` is missing,
+the first session installs it to `~/.local/bin` (checksum-verified;
+`CONA_NO_AUTO_INSTALL=1` forbids it) and indexes the repo.
 
 ```sh
 # Claude Code

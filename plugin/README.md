@@ -9,19 +9,18 @@ This one directory is a plugin for **both** harnesses. Claude Code reads
 payload underneath — `skills/`, `.mcp.json`, `hooks/hooks.json` — is shared
 byte-identically. There is nothing to keep in sync between the two.
 
-## Prerequisite
+## The binary
 
-The plugin drives the `cona` binary; install it first so it is on `PATH`:
+The plugin drives the `cona` binary and installs it itself: if `cona` is not
+found, the first session (SessionStart hook or MCP server, whichever starts
+first) runs the checksum-verified `install.sh` into `~/.local/bin`. Every hook
+also looks there, so a harness launched without `~/.local/bin` on `PATH` still
+finds it. Already installed (`cargo install cona`, the install script)? Then
+nothing is downloaded.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/ph1p/cona/main/install.sh | sh
-# or
-cargo install cona
-```
-
-Every hook is guarded with `command -v cona`, so if the binary is missing the
-plugin stays inert rather than erroring on each tool call. Nothing else breaks —
-but you also get no savings until it is installed.
+Set `CONA_NO_AUTO_INSTALL=1` to forbid the download. The plugin then stays
+inert until you install the binary yourself — every hook is guarded with
+`command -v cona`, so nothing errors.
 
 ## Install
 
@@ -41,11 +40,8 @@ codex plugin marketplace add ./cona
 codex plugin add cona@cona
 ```
 
-Then index the repo once:
-
-```sh
-cona index
-```
+That is the whole install: the next session fetches the binary (first time
+only) and indexes the repo.
 
 Two Codex specifics worth knowing:
 
@@ -116,6 +112,7 @@ silently: cona errors with the candidate list and the exact requalify syntax.
 | `CONA_HOOK_DISABLE`   | Set to anything — turns every hook off without uninstalling  |
 | `CONA_RENUDGE_EVERY`  | `>0` enables the periodic re-nudge (off by default)         |
 | `CONA_ADVISE_MIN_LINES` | Threshold for the mid-size read advisory                 |
+| `CONA_NO_AUTO_INSTALL` | Never download the binary from the plugin              |
 | `CONA_NO_FETCH_HELPER` | Skip lazily fetching the semantic-resolution helper       |
 
 ## Note on overlap with `cona agents install`

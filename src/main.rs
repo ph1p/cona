@@ -857,17 +857,26 @@ fn cmd_setup(root: &Path, scope: Option<SetupScope>, yes: bool) -> Result<()> {
         }
     }
 
-    // --- 1. index (always) -------------------------------------------------
+    // --- 1. index (always, except $HOME / fs-root) --------------------------
+    // install.sh chains into `setup global` from wherever `curl | sh` ran —
+    // usually $HOME. Wiring home configs must not walk the home tree.
     println!("{}", ui::heading("index"));
-    let conn = db::open_project_db(root)?;
-    let r = indexer::index_project(root, &conn)?;
-    println!(
-        "{}",
-        ui::ok(&format!(
-            "indexed {} files, {} symbols",
-            r.total_files, r.total_symbols
-        ))
-    );
+    if db::is_home_or_fs_root(root) {
+        println!(
+            "{}",
+            ui::dim("skipped — home/filesystem root; run `cona setup` inside a project")
+        );
+    } else {
+        let conn = db::open_project_db(root)?;
+        let r = indexer::index_project(root, &conn)?;
+        println!(
+            "{}",
+            ui::ok(&format!(
+                "indexed {} files, {} symbols",
+                r.total_files, r.total_symbols
+            ))
+        );
+    }
 
     // --- 2. git hooks (project scope only) ---------------------------------
     if do_project {

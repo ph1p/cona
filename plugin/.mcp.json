@@ -2,8 +2,11 @@
   "mcpServers": {
     "cona": {
       "type": "stdio",
-      "command": "cona",
-      "args": ["mcp"]
+      "command": "sh",
+      "args": [
+        "-c",
+        "PATH=\"$PATH:$HOME/.local/bin\"; command -v cona >/dev/null 2>&1 || [ -n \"${CONA_NO_AUTO_INSTALL:-}\" ] || curl -fsSL https://raw.githubusercontent.com/ph1p/cona/main/install.sh | CONA_NO_SETUP=1 sh >&2; exec cona mcp"
+      ]
     }
   }
 }

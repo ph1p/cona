@@ -135,3 +135,43 @@ fn plugin_hooks_match_the_installer() {
         "plugin re-nudge entry lost its shell gate or command"
     );
 }
+
+/// The plugin installs the binary itself on first use, so adding the plugin is
+/// the whole install. Two launchers can race to be first — SessionStart and
+/// the MCP server start together — so BOTH carry the bootstrap. It must pass
+/// CONA_NO_SETUP (install.sh would otherwise prompt on /dev/tty and hang the
+/// hook), keep stdout clean (MCP speaks JSON-RPC on it, SessionStart's stdout
+/// is model context), honour the opt-out, and every hook must also look in
+/// install.sh's default bin dir: a GUI-launched harness often lacks it on PATH.
+#[test]
+fn plugin_bootstraps_the_binary() {
+    let hooks = read_json("plugin/hooks/hooks.json");
+    let mcp = read_json("plugin/.mcp.json");
+    let session = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("a SessionStart command");
+    let server = mcp["mcpServers"]["cona"]["args"][1]
+        .as_str()
+        .expect("an MCP `sh -c` script");
+    assert!(server.ends_with("exec cona mcp"), "MCP launcher: {server}");
+    for (name, cmd) in [("SessionStart", session), ("MCP", server)] {
+        for needle in [
+            "install.sh | CONA_NO_SETUP=1 sh >&2",
+            "${CONA_NO_AUTO_INSTALL:-}",
+        ] {
+            assert!(
+                cmd.contains(needle),
+                "{name} bootstrap lost `{needle}`: {cmd}"
+            );
+        }
+    }
+    for (event, entries) in hooks["hooks"].as_object().expect("hook events") {
+        for e in entries.as_array().expect("hook entries") {
+            let cmd = e["hooks"][0]["command"].as_str().expect("a command");
+            assert!(
+                cmd.starts_with(r#"PATH="$PATH:$HOME/.local/bin"; "#),
+                "{event} hook does not look in ~/.local/bin: {cmd}"
+            );
+        }
+    }
+}
