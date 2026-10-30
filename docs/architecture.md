@@ -41,7 +41,8 @@ src/commands/    cmd_* implementations, split by concern:
                           elsewhere says so instead of falling through to fuzzy)/
                           show (multi-symbol; --sig = index-only signature peek,
                           no body read; --all = all candidates; a file arg
-                          outlines it)/refs/context (--no-tests filters at
+                          outlines it — a bare name/suffix too, via
+                          files_named, ambiguity listed never picked)/refs/context (--no-tests filters at
                           COLLECTION time — the caller cap is first-come, so
                           post-filtering would let test fns crowd out real
                           callers; hidden count disclosed)/diff/grep.
@@ -109,6 +110,13 @@ src/lang/        Language detection + tree-sitter symbol extraction: mod.rs
                  Vue+Dockerfile grammars vendored (vendor/*, build.rs + cc) —
                  their crates.io crates pin an incompatible tree-sitter runtime
                  (C symbol collision); bound via extern "C".
+                 Swift properties: static/class ones and computed instance
+                 ones (`var x: T { … }`) are `Type.name` symbols; stored
+                 instance properties stay fields (swift_type_property).
+                 Swift sources are masked length-preserving before parse:
+                 `#if` lines blanked; on a broken parse only, `open.x`
+                 receivers retried as `_pen.x` (grammar reads `open` as the
+                 access modifier and ERRORs the whole file).
                  Kotlin/Swift: interface/struct/enum collapse to
                  class_declaration → label "class". C/C++: node_name drills into
                  nested declarators; needs_body filters bare struct refs.

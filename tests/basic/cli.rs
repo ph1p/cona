@@ -585,5 +585,23 @@ fn agent_slips_recover() {
     );
     let (out, ok) = run(&["refs", "-l", "alpha"]);
     assert!(ok && out.lines().any(|l| l == "sub/b.rs"), "{out}");
+
+    // a bare file name outlines the one indexed file ending in it
+    let (out, ok) = run(&["show", "b.rs"]);
+    assert!(
+        ok && out.starts_with("sub/b.rs") && out.contains("gamma"),
+        "{out}"
+    );
+    // call / Swift-selector syntax resolves to the bare symbol
+    let (out, ok) = run(&["show", "alpha()"]);
+    assert!(ok && out.contains("a.rs:1"), "{out}");
+    let (out, ok) = run(&["show", "a.rs:beta(x:)"]);
+    assert!(ok && out.contains("pub fn beta"), "{out}");
+    // `grep a b` with b no path: either name, with a note
+    let (out, ok) = run(&["grep", "beta", "gamma"]);
+    assert!(
+        ok && out.contains("a.rs:2") && out.contains("sub/b.rs:1") && out.contains("note:"),
+        "{out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

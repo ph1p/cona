@@ -26,8 +26,22 @@ pub fn cmd_show(
     // A path means "map this file" → outline (directories reach its
     // `tree --path` redirect). The filesystem decides; `split_locator` only
     // keeps a `file.rs:Name` locator from being mistaken for a path.
-    if crate::commands::split_locator(symbol).is_none() && root.join(symbol).exists() {
-        return cmd_outline(root, conn, symbol, sig, json);
+    if crate::commands::split_locator(symbol).is_none() {
+        if root.join(symbol).exists() {
+            return cmd_outline(root, conn, symbol, sig, json);
+        }
+        // A bare file name (`MainWindowController+Tmux.swift`, `query/grep.rs`)
+        // resolves like `file:N-M` does: one indexed path ending in it → outline.
+        // No symbol name holds a `/`-guarded file suffix, so this cannot shadow
+        // one. Gated on a known extension: `Type.method` must not pay the
+        // unindexed `LIKE '%/…'` scan.
+        if crate::lang::detect_lang(symbol).is_some() {
+            match crate::commands::files_named(conn, symbol).as_slice() {
+                [] => {}
+                [one] => return cmd_outline(root, conn, one, sig, json),
+                many => return Err(ambiguous_file(symbol, many, "")),
+            }
+        }
     }
     // Without --all, a SMALL ambiguity pool is auto-expanded: 2–3 short
     // definitions beat a retry round-trip. Big pools (or bodies) still raise
@@ -117,16 +131,22 @@ fn line_range(root: &Path, conn: &Connection, arg: &str) -> Result<Option<(Strin
             let near = crate::commands::did_you_mean_file(conn, file);
             anyhow::bail!("no file '{file}'{near}")
         }
-        many => anyhow::bail!(
-            "'{file}' is ambiguous — {} files end with it:\n{}",
-            many.len(),
-            many.iter()
-                .take(8)
-                .map(|p| format!("  {p}:{range}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
+        many => Err(ambiguous_file(file, many, &format!(":{range}"))),
     }
+}
+
+/// `'f' is ambiguous` + up to 8 candidate paths, each with `suffix` appended
+/// (the `:N-M` of a line range) so it can be copied back as a fix.
+fn ambiguous_file(name: &str, many: &[String], suffix: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "'{name}' is ambiguous — {} files end with it:\n{}",
+        many.len(),
+        many.iter()
+            .take(8)
+            .map(|p| format!("  {p}{suffix}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 fn show_lines(

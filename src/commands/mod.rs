@@ -617,6 +617,16 @@ fn locate_candidates(conn: &Connection, symbol: &str, kind: Option<&str>) -> Res
     Ok(pool)
 }
 
+/// `run()`, `theme(named:)` (Swift selector), `f(a, b)` → the bare name.
+/// Agents write symbols the way they are called; no indexed name holds a `(`,
+/// and left in, the selector's `:` split it as `path:Name` and looked up `)`.
+pub(crate) fn strip_call_suffix(symbol: &str) -> &str {
+    match symbol.split_once('(') {
+        Some((name, _)) if symbol.ends_with(')') && !name.is_empty() => name,
+        _ => symbol,
+    }
+}
+
 /// THE `file.rs:Name` locator grammar: `Some((path, name))` for a
 /// path-qualified symbol, `None` for a plain one. Shared so the resolver and
 /// `show`'s path sniffing can't disagree.
@@ -649,6 +659,7 @@ fn locate_rows(
     symbol: &str,
     kind: Option<&str>,
 ) -> Result<(Vec<Located>, String)> {
+    let symbol = strip_call_suffix(symbol);
     // `path:Name` narrows to that file (exact path or `/`-guarded suffix) —
     // exactly the shape the ambiguity listing prints.
     let (file_filter, symbol) = match split_locator(symbol) {
@@ -740,6 +751,8 @@ fn miss_error(conn: &Connection, symbol: &str, kind: Option<&str>) -> anyhow::Er
     let hint = kind
         .map(|k| format!(" with kind '{k}'"))
         .unwrap_or_default();
+    // same normalization as locate_rows, or `a.swift:f(x:)` splits at `x:`
+    let symbol = strip_call_suffix(symbol);
     let (file_filter, symbol) = match split_locator(symbol) {
         Some((f, n)) => (Some(f), n),
         None => (None, symbol),
@@ -844,6 +857,14 @@ mod tests {
         // a directory locator is a locator too
         assert_eq!(split_locator("web/src:day"), Some(("web/src", "day")));
         assert_eq!(split_locator("Parent.Name"), None);
+        assert_eq!(
+            strip_call_suffix("AppSettings.theme(named:)"),
+            "AppSettings.theme"
+        );
+        assert_eq!(strip_call_suffix("run()"), "run");
+        assert_eq!(strip_call_suffix("a.swift:f(x:y:)"), "a.swift:f");
+        assert_eq!(strip_call_suffix("Name"), "Name");
+        assert_eq!(strip_call_suffix("(x)"), "(x)");
     }
 
     #[test]

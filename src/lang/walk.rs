@@ -93,9 +93,11 @@ fn top_level_consts<'a>(decl: Node<'a>, src: &str) -> Vec<(String, Node<'a>)> {
 
 /// Swift type-level `static`/`class` properties (`BooPaths.configDir`) as
 /// `const` (let) / `var` symbols — the type-scoped constants agents look up by
-/// name. Instance stored properties stay unindexed: they are fields, read with
-/// their type, and would flood `find`/`refs` with every `let x`.
-fn swift_static_property(lang: &str, node: Node, src: &str) -> Option<(String, &'static str)> {
+/// name — plus computed instance properties (`var cellHeight: CGFloat { … }`):
+/// those carry a body, so agents `show` them like methods. Instance stored
+/// properties stay unindexed: they are fields, read with their type, and would
+/// flood `find`/`refs` with every `let x`.
+fn swift_type_property(lang: &str, node: Node, src: &str) -> Option<(String, &'static str)> {
     if lang != "swift" || node.kind() != "property_declaration" {
         return None;
     }
@@ -115,7 +117,8 @@ fn swift_static_property(lang: &str, node: Node, src: &str) -> Option<(String, &
             });
             found
         });
-    if !in_type_body || !is_static {
+    let computed = node.child_by_field_name("computed_value").is_some();
+    if !in_type_body || !(is_static || computed) {
         return None;
     }
     let label = match children
@@ -255,8 +258,7 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
             push_children(&mut stack, child, parent);
             continue;
         }
-        if let (Some(owner), Some((name, label))) =
-            (&parent, swift_static_property(lang, child, src))
+        if let (Some(owner), Some((name, label))) = (&parent, swift_type_property(lang, child, src))
         {
             let qualified = format!("{owner}.{name}");
             out.push(Sym {

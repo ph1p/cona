@@ -252,9 +252,45 @@ fn parse(lang: &str, src: &str) -> anyhow::Result<tree_sitter::Tree> {
     } else {
         std::borrow::Cow::Borrowed(src)
     };
-    parser
+    let tree = parser
         .parse(src.as_ref(), None)
-        .ok_or_else(|| anyhow::anyhow!("parse failed"))
+        .ok_or_else(|| anyhow::anyhow!("parse failed"))?;
+    if lang == "swift" && tree.root_node().has_error() {
+        // Only a broken parse pays for the retry, and it is kept only if it
+        // is clean or at least keeps the file's types (root no longer ERROR).
+        if let Some(masked) = mask_swift_open_receivers(&src) {
+            if let Some(retry) = parser.parse(&masked, None) {
+                let r = retry.root_node();
+                if !r.has_error() || (tree.root_node().is_error() && !r.is_error()) {
+                    return Ok(retry);
+                }
+            }
+        }
+    }
+    Ok(tree)
+}
+
+/// tree-sitter-swift 0.7 reads `open` as the access modifier even where it is
+/// a variable: a statement starting `open.x` after another statement in a
+/// `case` (`if var open = block { … open.reply?(…) }`) turns the whole file
+/// into one ERROR node and drops every type in it. Rename such receivers to
+/// `_pen` — same length, so positions and the names read from the ORIGINAL
+/// source stay right. `x.open` and `open(` are left alone. None = no change.
+fn mask_swift_open_receivers(src: &str) -> Option<String> {
+    let b = src.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    // allocated on the first hit: most `open`s are `open class`/`open func`
+    let mut out: Option<Vec<u8>> = None;
+    let mut i = 0;
+    while let Some(off) = src[i..].find("open") {
+        let at = i + off;
+        i = at + 4;
+        let before_ok = at == 0 || !(ident(b[at - 1]) || b[at - 1] == b'.');
+        if before_ok && (b[i..].starts_with(b".") || b[i..].starts_with(b"?.")) {
+            out.get_or_insert_with(|| b.to_vec())[at] = b'_';
+        }
+    }
+    out.map(|o| String::from_utf8(o).expect("ASCII-for-ASCII swap"))
 }
 
 /// tree-sitter-swift closes a type body at an `#if`/`#endif` inside it, so

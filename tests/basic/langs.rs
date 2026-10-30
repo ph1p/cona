@@ -254,6 +254,67 @@ let top = 3
 }
 
 #[test]
+fn swift_computed_instance_properties_are_indexed() {
+    let src = "struct GhosttyView {
+  var cellHeight: CGFloat { font.height + 2 }
+  var gridSize: Size {
+    get { size }
+    set { size = newValue }
+  }
+  var stored = 2
+  let fixed: Int
+  var observed: Int = 0 { didSet { redraw() } }
+}
+extension GhosttyView {
+  var area: Int { 4 }
+}
+";
+    let syms = lang::extract_symbols("swift", src).unwrap();
+    let has = |q: &str| syms.iter().any(|s| s.qualified == q);
+    for q in [
+        "GhosttyView.cellHeight",
+        "GhosttyView.gridSize",
+        "GhosttyView.area",
+    ] {
+        assert!(has(q), "{q} missing: {syms:?}");
+    }
+    for name in ["stored", "fixed", "observed"] {
+        assert!(
+            !syms.iter().any(|s| s.name == name),
+            "{name} indexed: {syms:?}"
+        );
+    }
+}
+
+#[test]
+fn swift_open_variable_keeps_its_type() {
+    // `open.reply` after a statement in a case parses as the `open` modifier
+    // in tree-sitter-swift 0.7 and used to swallow the whole class
+    let src = "final class Client {
+  func handle() {
+    if var open = block {
+      switch line {
+      case .end:
+        block = nil
+        open.reply?(1)
+      default:
+        open.lines.append(raw)
+      }
+    }
+  }
+  func other() {}
+}
+";
+    let syms = lang::extract_symbols("swift", src).unwrap();
+    for q in ["Client", "Client.handle", "Client.other"] {
+        assert!(
+            syms.iter().any(|s| s.qualified == q),
+            "{q} missing: {syms:?}"
+        );
+    }
+}
+
+#[test]
 fn ts_function_valued_consts_are_indexed() {
     let src = "export const handler = async (req: Request) => {\n  return null\n}\n\
                const legacy = function () {}\n\

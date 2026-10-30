@@ -284,6 +284,21 @@ fn no_matches(root: &Path, conn: &Connection, pattern: &str, opts: GrepOpts<'_>)
     Ok(out)
 }
 
+/// Split `grep A B…` positionals into real paths and extra patterns. Agents
+/// write `cona grep onCommandEnd onCommandStart` meaning EITHER name; read as a
+/// path, B scoped the search to a directory that does not exist. A positional
+/// that is a bare identifier (no `/`, no `.`) AND names nothing on disk — under
+/// the cwd or the root — is a pattern; everything else stays a path, so a
+/// prefix filter like `src/comm` keeps working.
+pub fn split_positionals<'a>(root: &Path, args: &'a [String]) -> (Vec<&'a str>, Vec<&'a str>) {
+    args.iter().map(String::as_str).partition(|a| {
+        !a.is_empty()
+            && a.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !Path::new(a).exists()
+            && !root.join(a).exists()
+    })
+}
+
 /// One identifier (or a dotted path) — something `find` could resolve. Text
 /// with spaces, quotes or punctuation never names a symbol.
 fn looks_like_name(pattern: &str) -> bool {
@@ -696,6 +711,20 @@ mod tests {
         // `\b` is one escape, not `\` + a `b` glued onto the word
         assert_eq!(regexish_literal(r"\bstate\b").as_deref(), Some("state"));
         assert_eq!(regexish_literal(r"\.alarm").as_deref(), Some("alarm"));
+    }
+
+    #[test]
+    fn bare_names_that_are_not_paths_become_patterns() {
+        let dir = std::env::temp_dir().join(format!("cona-split-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let args: Vec<String> = ["onCommandStart", "src", "lib/x", "a.rs"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (patterns, paths) = split_positionals(&dir, &args);
+        assert_eq!(patterns, ["onCommandStart"]);
+        assert_eq!(paths, ["src", "lib/x", "a.rs"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

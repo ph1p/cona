@@ -14,7 +14,7 @@ mod tree;
 pub use context::cmd_context;
 pub use diff::cmd_diff;
 pub use find::{cmd_find, cmd_find_fuzzy};
-pub use grep::cmd_grep;
+pub use grep::{cmd_grep, split_positionals};
 pub(crate) use grep::{prefilter_indexed, Matcher};
 pub use outline::cmd_outline;
 pub use refs::{cmd_refs, RefsShape};

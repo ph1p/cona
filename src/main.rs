@@ -272,12 +272,22 @@ fn run() -> Result<()> {
                 paths,
                 line_number: _,
             } = a;
+            // `grep a b` where b is no path: search either name (`a\|b`).
+            let (extra, paths) = split_positionals(&root, paths);
+            let pattern = &std::iter::once(pattern.as_str())
+                .chain(extra.iter().copied())
+                .collect::<Vec<_>>()
+                .join("\\|");
             // `grep pat dir1 dir2` and repeated --path: one search per scope,
             // concatenated like a batch, each with its own limit.
             let scopes: Vec<Option<&str>> = if path.is_empty() && paths.is_empty() {
                 vec![None]
             } else {
-                path.iter().chain(paths).map(|p| Some(p.as_str())).collect()
+                path.iter()
+                    .map(String::as_str)
+                    .chain(paths)
+                    .map(Some)
+                    .collect()
             };
             let opts = GrepOpts {
                 ignore_case: *ignore_case,
@@ -315,6 +325,12 @@ fn run() -> Result<()> {
                 }
                 if cli.json && scopes.len() > 1 {
                     out.push_str(if out.is_empty() { "[]\n" } else { "]\n" });
+                }
+                if !extra.is_empty() && !cli.json {
+                    out.push_str(&format!(
+                        "note: {} not a path — searched as `{pattern}`\n",
+                        extra.join(", ")
+                    ));
                 }
                 Ok((out, baseline))
             })?;

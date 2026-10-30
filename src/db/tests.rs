@@ -170,6 +170,14 @@ fn outcomes_classified() {
     assert_eq!(outcome_of_output("fn foo  a.rs:1-3\n"), "");
     assert_eq!(outcome_of_output("no match for 'x'\n"), "empty");
     assert_eq!(outcome_of_output("  no references to Foo\n"), "empty");
+    assert_eq!(
+        outcome_of_output("no matches for 'x' under 'src/a' — elsewhere:\nsrc/b.rs:3: x\n"),
+        ""
+    );
+    assert_eq!(
+        outcome_of_output("no matches for 'x' anywhere in the repo\n"),
+        "empty"
+    );
     assert_eq!(outcome_of_error("symbol 'Foo' not found"), "miss");
     assert_eq!(
         outcome_of_error("ambiguous 'run' — 3 candidates"),

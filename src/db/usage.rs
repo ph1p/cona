@@ -72,7 +72,13 @@ pub fn log_usage_outcome(
 pub fn outcome_of_output(out: &str) -> &'static str {
     let first = out.trim_start();
     let empty = ["no match", "no references to", "no symbols indexed"];
-    if empty.iter().any(|p| first.starts_with(p)) {
+    // A scoped grep miss that lists hits outside the scope answered the query
+    // (the agent narrowed `--path` too far) — not a failure.
+    let answered_elsewhere = first
+        .lines()
+        .next()
+        .is_some_and(|l| l.ends_with("— elsewhere:"));
+    if empty.iter().any(|p| first.starts_with(p)) && !answered_elsewhere {
         "empty"
     } else {
         ""

@@ -220,7 +220,9 @@ pub fn open_project_db(root: &Path) -> Result<Connection> {
 /// 1: Go methods qualified by receiver type; JS/TS/Go top-level constants.
 /// 2: JS/TS signatures keep their `export` prefix.
 /// 3: Swift `#if` blocks no longer cut type bodies; Swift static properties.
-const EXTRACT_VERSION: i64 = 3;
+/// 4: Swift computed instance properties; `open.x` receivers no longer
+///    swallow the file (mask_swift_open_receivers).
+const EXTRACT_VERSION: i64 = 4;
 
 /// Open an already-built project index without creating files or migrating.
 /// Prefers durable storage, but also checks the sandbox fallback so

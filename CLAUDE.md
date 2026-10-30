@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 303 tests: unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
+cargo test                   # 306 tests (AR=/usr/bin/ar if Homebrew binutils' GNU ar is on PATH — it breaks the build.rs archives): unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -105,7 +105,9 @@ src/db/          SQLite: per-project DB + global.db (registry/usage/meta).
 3. `edit` refuses to write on syntax errors (tree-sitter re-parse) except with
    `--force`. On error the file stays unchanged.
 4. `locate_symbol` throws on ambiguity with a candidate list — never silently
-   picks. Escape hatches: `Parent.Name`, `--kind`, `file.rs:Name` (path or
+   picks. Call/selector syntax (`run()`, Swift `theme(named:)`) is stripped
+   first (`strip_call_suffix`) — no indexed name holds a `(`. Escape
+   hatches: `Parent.Name`, `--kind`, `file.rs:Name` (path or
    `/`-guarded path suffix — the exact shape the candidate list prints).
    `cmd_show` auto-renders SMALL ambiguities (≤3 candidates, ≤400 total lines,
    `defaults::AUTO_ALL_*`) with an ambiguity banner — showing every candidate
@@ -268,6 +270,8 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
   matching flag so their file list agrees. Exception that keeps the default:
   ZERO literal hits on a regex-looking pattern retry once as a regex, with a
   `note:` line — 30% of empty greps were `\b`/`\.`/`.*` written for a regex.
+  `grep A B` where B is a bare identifier naming nothing on disk searches
+  `A\|B` (`split_positionals`, `note:` line) — agents mean either name.
 - `rename` semantic (identifier positions) but name-based: collision guard +
   syntax verify + all-or-nothing rollback; unparsable files only with --force.
 - `deps`: internal imports → edges; external packages counted + listed but not
@@ -352,14 +356,15 @@ erroring. `cona grep` matches literally (`a\|b` = either); `--regex` for a
 real regex; `-C 3` prints context lines, so `cona grep X --path f -C 3`
 replaces `grep -n X f` + `sed -n` range reads; `cona show f:40-80` prints a
 line range. `-l`/`-c` list matching files / counts. Batch: `show A B`,
-`outline f1 f2`, `find A B`. Go methods are `Type.Method`.
+`refs A B`, `outline f1 f2`, `find A B`. Go methods are `Type.Method`.
 
 Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
 `insert` `rename` `note` `check` — is listed in `cona --help`, with details per
 group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).
 <!-- cona:end -->
 `outcome` ('' ok / `empty` / `miss` / `ambiguous` / `error`, guarded
-migration, index `usage_project_ts`) feeds `stats`' failed column and
+migration, index `usage_project_ts`; a scoped grep miss that lists hits
+`— elsewhere:` answered → '') feeds `stats`' failed column and
 `cona learn` (recurring failures + closest name / qualified forms; ≥2× in
 30d with a concrete fix → ≤3 lines in the SessionStart context). The same
 log feeds `hot_symbols`: answered show/context/refs on ≥2 distinct days in
