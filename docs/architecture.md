@@ -87,6 +87,29 @@ src/commands/    cmd_* implementations, split by concern:
                           OR --at <file> <line>, incl. new/empty file) / note /
                           rename. write_verified = THE shared syntax-verify +
                           write gate for all edit paths (invariant 3)
+                          and verify_source supplies rename's same syntax rule.
+                          Mutations exclusively create short sibling stages
+                          (create_new, bounded retries); guards delete only owned,
+                          unconsumed stages. Existing permissions are preserved;
+                          stage writes/permission failures leave sources intact.
+                          Rename validates indexed paths/readability before
+                          refresh_candidate_files, then resolves identity and
+                          collisions against refreshed indexed candidates (not
+                          newly created unindexed files). Force bypasses collision,
+                          syntax and textual-fallback refusal, never I/O safety.
+                          commit_changes stages replacements AND recovery copies
+                          before any swap, compares live bytes with planned
+                          originals, then atomically replaces one sibling at a
+                          time. All commit errors use best-effort recovery of
+                          earlier swaps; the failing swap never truncates its
+                          source. Failed recovery retains/names original backups
+                          and reports actual restoration counts. Observed edits
+                          during commit/recovery are refused, but checks are
+                          optimistic, not cross-process locking or protection
+                          against hostile parent-directory replacement. This is
+                          NOT crash-atomic across files. Notes and reindex run
+                          after source commit; their failures explicitly report
+                          already committed sources rather than promise rollback.
                  insight.rs entries/tests/shape/deps/check/impact (check =
                           syntax_errors as command; impact = refs+callers+tests+
                           blame in ONE pack)

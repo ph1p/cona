@@ -589,6 +589,7 @@ pub(crate) fn locate_fresh(
 /// fresh" is not enough — one reindex is cheap next to a mis-spliced edit.
 pub(crate) fn locate_for_write(root: &Path, conn: &Connection, symbol: &str) -> Result<Located> {
     let (path0, ..) = locate_symbol(conn, symbol)?;
+    mutate::project_path(root, &path0)?;
     indexer::reindex_file(root, conn, &path0)?;
     locate_symbol(conn, symbol)
 }
