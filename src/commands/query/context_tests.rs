@@ -53,6 +53,25 @@ impl Drop for Fixture {
 const SMALL: &str = "struct Config { value: i32 }\nconst LIMIT: i32 = 3;\nfn helper(x: i32) -> i32 { x + LIMIT }\nfn target(c: Config) -> i32 {\n    helper(c.value) + helper(LIMIT)\n}\nfn caller() { target(Config { value: 1 }); }\n#[test]\nfn test_target() { caller(); }\n";
 
 #[test]
+fn editing_context_preserves_overloaded_callers_and_tests() {
+    let f = Fixture::new(&[(
+        "code.cpp",
+        "void target() {}\n\
+void caller() { target(); target(); }\n\
+void caller(int a) { target(); }\n\
+void test_overload() { target(); }\n\
+void test_overload(int a) { target(); }\n",
+    )]);
+    let out = f.edit(5000, true).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let callers = value["related"].as_array().unwrap();
+    assert_eq!(callers.len(), 2, "{out}");
+    assert_eq!(callers[0]["start"], 2);
+    assert_eq!(callers[1]["start"], 3);
+    assert_eq!(value["tests"].as_array().unwrap().len(), 2, "{out}");
+}
+
+#[test]
 fn editing_context_has_atomic_body_types_helpers_callers_and_test_evidence() {
     let f = Fixture::new(&[("lib.rs", SMALL)]);
     let out = f.edit(5000, true).unwrap();

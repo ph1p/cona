@@ -1,20 +1,33 @@
 //! Tiny ANSI styling layer — zero deps, honors NO_COLOR / CLICOLOR_FORCE /
 //! TERM=dumb, colors only real terminals, so piped output (agents!) stays plain.
 
+use std::ffi::OsStr;
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
 fn detect() -> bool {
-    if std::env::var_os("NO_COLOR").is_some() {
+    let no_color = std::env::var_os("NO_COLOR");
+    let force = std::env::var_os("CLICOLOR_FORCE");
+    let term = std::env::var("TERM").ok();
+    color_policy(
+        no_color.is_some(),
+        force.as_deref(),
+        term.as_deref(),
+        std::io::stdout().is_terminal(),
+    )
+}
+
+fn color_policy(no_color: bool, force: Option<&OsStr>, term: Option<&str>, terminal: bool) -> bool {
+    if no_color {
         return false;
     }
-    if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| v != "0") {
+    if force.is_some_and(|v| v != "0") {
         return true;
     }
-    if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false) {
+    if term == Some("dumb") {
         return false;
     }
-    std::io::stdout().is_terminal()
+    terminal
 }
 
 /// Whether styled output is active for this process (cached).
@@ -24,7 +37,11 @@ pub fn enabled() -> bool {
 }
 
 fn paint(code: &str, s: &str) -> String {
-    if enabled() {
+    paint_with_enabled(code, s, enabled())
+}
+
+fn paint_with_enabled(code: &str, s: &str, enabled: bool) -> String {
+    if enabled {
         format!("\x1b[{code}m{s}\x1b[0m")
     } else {
         s.to_string()
@@ -76,7 +93,11 @@ pub fn plural(n: usize, noun: &str) -> String {
 }
 /// Green check bullet
 pub fn ok(s: &str) -> String {
-    format!("{} {}", green("✓"), s)
+    ok_with_enabled(s, enabled())
+}
+
+fn ok_with_enabled(s: &str, enabled: bool) -> String {
+    format!("{} {}", paint_with_enabled("32", "✓", enabled), s)
 }
 /// Yellow warning bullet
 pub fn warn(s: &str) -> String {
@@ -319,11 +340,54 @@ pub fn multiselect(title: &str, rows: &[Row<'_>]) -> anyhow::Result<Option<Vec<u
 
 #[cfg(test)]
 mod tests {
-    // In tests stdout is piped, so paint() styling is off and strings pass
-    // through unchanged.
+    use super::{color_policy, ok_with_enabled, paint_with_enabled};
+    use std::ffi::OsStr;
+
     #[test]
-    fn plain_when_not_a_terminal() {
-        assert_eq!(super::bold("x"), "x");
-        assert_eq!(super::ok("done"), "✓ done");
+    fn color_override_precedence() {
+        // Exercise both terminal states without probing or changing the host.
+        for terminal in [false, true] {
+            assert_eq!(color_policy(false, None, None, terminal), terminal);
+            assert_eq!(color_policy(false, None, Some("xterm"), terminal), terminal);
+            assert!(!color_policy(false, None, Some("dumb"), terminal));
+
+            for term in [None, Some("xterm"), Some("dumb")] {
+                for force in [None, Some("0"), Some("1"), Some(""), Some("false")] {
+                    let force = force.map(OsStr::new);
+                    assert!(!color_policy(true, force, term, terminal));
+                    let expected = match force {
+                        Some(value) if value != "0" => true,
+                        _ => terminal && term != Some("dumb"),
+                    };
+                    assert_eq!(
+                        color_policy(false, force, term, terminal),
+                        expected,
+                        "force={force:?}, term={term:?}, terminal={terminal}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_force_is_not_zero() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let force = OsStr::from_bytes(b"\xff");
+        assert!(color_policy(false, Some(force), Some("dumb"), false));
+        assert!(!color_policy(true, Some(force), None, true));
+    }
+
+    #[test]
+    fn plain_paint_and_success_marker() {
+        assert_eq!(paint_with_enabled("1", "x", false), "x");
+        assert_eq!(ok_with_enabled("done", false), "✓ done");
+    }
+
+    #[test]
+    fn styled_paint_and_success_marker() {
+        assert_eq!(paint_with_enabled("1", "x", true), "\x1b[1mx\x1b[0m");
+        assert_eq!(ok_with_enabled("done", true), "\x1b[32m✓\x1b[0m done");
     }
 }

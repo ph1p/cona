@@ -128,6 +128,47 @@ pub fn decode_packet(frame: &[u8]) -> usize { frame.len() }
         assert!(value["results"].is_array(), "{value}");
         value
     }
+
+    fn assert_baseline(&self, query: &str, limit: usize) {
+        let root = self.root.canonicalize().unwrap();
+        // Use the index the CLI created, not a hash of a differently spelled
+        // root: Windows canonicalization can add an extended-length prefix.
+        let databases: Vec<_> = std::fs::read_dir(self.data.join("projects"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
+            .collect();
+        assert_eq!(databases.len(), 1, "fixture project indexes: {databases:?}");
+        let conn = rusqlite::Connection::open_with_flags(
+            &databases[0],
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let (text, baseline) =
+            cona::commands::cmd_search(&conn, &root, query, limit, None, true).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let mut sites = std::collections::BTreeMap::<&str, Vec<usize>>::new();
+        for row in rows(&value) {
+            sites
+                .entry(row["file"].as_str().unwrap())
+                .or_default()
+                .push(row["excerpt"]["line"].as_u64().unwrap() as usize);
+        }
+        // Reference the old baseline rule: source lengths grouped by final
+        // displayed file/site, not one independent window per candidate.
+        let expected: i64 = sites
+            .iter()
+            .map(|(file, lines)| {
+                let source = std::fs::read_to_string(root.join(file)).unwrap();
+                let lengths: Vec<_> = source.lines().map(str::len).collect();
+                cona::db::baseline_tokens(&lengths, lines)
+            })
+            .sum();
+        assert_eq!(baseline, expected, "query={query:?}, limit={limit}");
+        if rows(&value).is_empty() {
+            assert_eq!(baseline, 0);
+        }
+    }
 }
 
 impl Drop for Fixture {
@@ -238,6 +279,17 @@ fn search_limits_scope_and_stable_ties() {
     let zero = fixture.search("tieprobe", &["--limit", "0"]);
     assert!(rows(&zero).is_empty());
     assert_eq!(zero["truncated"], true);
+    for limit in [1, 10, 13, 14, 15, 100, 101] {
+        let result = fixture.search("tieprobe", &["--limit", &limit.to_string()]);
+        assert_eq!(rows(&result), &rows(&all)[..limit.min(14)]);
+        assert_eq!(result["truncated"], limit < 14);
+    }
+    let text = fixture.ok(&["search", "tieprobe", "--limit", "14"]);
+    let positions: Vec<_> = rows(&all)
+        .iter()
+        .map(|row| text.find(row["selector"].as_str().unwrap()).unwrap())
+        .collect();
+    assert!(positions.windows(2).all(|p| p[0] < p[1]), "{text}");
 
     let scoped = fixture.search("scopeprobe", &["--path", "src"]);
     assert_eq!(rows(&scoped).len(), 1, "{scoped}");
@@ -257,6 +309,9 @@ fn search_empty_unicode_and_nested_hits() {
         let result = fixture.search(query, &[]);
         assert!(rows(&result).is_empty(), "{query:?}: {result}");
         assert_eq!(result["truncated"], false);
+        let zero = fixture.search(query, &["--limit", "0"]);
+        assert!(rows(&zero).is_empty(), "{query:?}: {zero}");
+        assert_eq!(zero["truncated"], false);
     }
     assert_eq!(first_symbol(&fixture.search("café", &[])), "café");
     assert_eq!(first_symbol(&fixture.search("crème brûlée", &[])), "café");
@@ -280,6 +335,14 @@ fn search_empty_unicode_and_nested_hits() {
         }),
         "{nested}"
     );
+    fixture.write("stopword.rs", "fn the() {}\n");
+    fixture.ok(&["index"]);
+    let stopword = fixture.search("the", &["--limit", "1"]);
+    assert_eq!(first_symbol(&stopword), "the");
+    assert_eq!(stopword["truncated"], false);
+    let zero = fixture.search("the", &["--limit", "0"]);
+    assert!(rows(&zero).is_empty());
+    assert_eq!(zero["truncated"], true);
 }
 
 #[test]
@@ -295,6 +358,15 @@ fn search_refreshes_changed_bodies_signatures_and_ranges() {
         "src/engine.rs",
         "// shifted\n// shifted again\npub fn replacement(payload: &str, retries: u32) {\n    let _ = (payload, retries, \"freshneedle\");\n}\n",
     );
+    let stale_zero = fixture.run(&["--read-only", "search", "freshneedle", "--limit", "0"]);
+    assert!(!stale_zero.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale_zero.stderr).contains("changed since it was indexed"),
+        "{stale_zero:?}"
+    );
+    let zero = fixture.search("freshneedle", &["--limit", "0"]);
+    assert!(rows(&zero).is_empty());
+    assert_eq!(zero["truncated"], true);
     let fresh = fixture.search("freshneedle", &[]);
     assert_eq!(first_symbol(&fresh), "replacement", "{fresh}");
     assert_eq!(rows(&fresh)[0]["start"], 3, "{fresh}");
@@ -322,6 +394,13 @@ fn overloaded_selectors_show_each_intended_body() {
     fixture.ok(&["index"]);
     let result = fixture.search("convert", &["--path", "overloads.cpp"]);
     assert_eq!(rows(&result).len(), 2, "{result}");
+    let one = fixture.search("convert", &["--path", "overloads.cpp", "--limit", "1"]);
+    assert_eq!(rows(&one), &rows(&result)[..1]);
+    assert_eq!(one["truncated"], true);
+    // A nonmatching overload still makes the surviving name ambiguous.
+    let filtered = fixture.search("double", &["--path", "overloads.cpp", "--limit", "1"]);
+    assert_eq!(rows(&filtered).len(), 1);
+    assert_eq!(rows(&filtered)[0]["selector"], "overloads.cpp:2-2");
     let mut selectors = std::collections::HashSet::new();
     for row in rows(&result) {
         assert_eq!(row["symbol"], "convert");
@@ -342,5 +421,77 @@ fn overloaded_selectors_show_each_intended_body() {
     let text = fixture.ok(&["search", "convert", "--path", "overloads.cpp"]);
     for selector in selectors {
         assert!(text.contains(selector), "{text}");
+    }
+}
+
+#[test]
+fn search_baseline_opens_the_existing_fixture_index() {
+    let fixture = Fixture::new();
+    let projects = fixture.data.join("projects");
+    let database = std::fs::read_dir(&projects)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "db"))
+        .unwrap();
+    // Model an index whose filename differs from a canonicalized-root hash,
+    // as happens when Windows adds its extended-length path prefix.
+    std::fs::rename(database, projects.join("fixture-index.db")).unwrap();
+    fixture.assert_baseline("reconcile", 10);
+    assert_eq!(
+        std::fs::read_dir(projects)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "db"))
+            .count(),
+        1,
+        "baseline verification must not create a second database"
+    );
+}
+
+#[test]
+fn search_display_guard_follows_capped_prefix_without_backfill() {
+    let fixture = Fixture::new();
+    for n in (0..120).rev() {
+        fixture.write(
+            &format!("many/f{n:03}.rs"),
+            "fn candidate() { let _ = \"manyneedle\"; }\n",
+        );
+    }
+    fixture.ok(&["index"]);
+    let ten = fixture.search("manyneedle", &["--limit", "10"]);
+    assert_eq!(rows(&ten).len(), 10);
+    for (n, row) in rows(&ten).iter().enumerate() {
+        assert_eq!(row["file"], format!("many/f{n:03}.rs"));
+    }
+    let hundred = fixture.search("manyneedle", &["--limit", "100"]);
+    assert_eq!(hundred["truncated"], true);
+    let mut bytes = 0;
+    let keep = (0..100)
+        .take_while(|n| {
+            bytes += (format!("many/f{n:03}.rs").len()
+                + "candidate".len()
+                + rows(&ten)[0]["kind"].as_str().unwrap().len())
+                * 12
+                + 16_000;
+            bytes <= 512_000
+        })
+        .count();
+    assert_eq!(rows(&hundred).len(), keep);
+    assert_eq!(rows(&ten), &rows(&hundred)[..10]);
+    assert_eq!(fixture.search("manyneedle", &["--limit", "1000"]), hundred);
+    for (n, row) in rows(&hundred).iter().enumerate() {
+        assert_eq!(row["file"], format!("many/f{n:03}.rs"));
+    }
+    for query in [
+        "manyneedle",
+        "duplicate",
+        "convert",
+        "",
+        "the and of",
+        "absentneedle",
+    ] {
+        for limit in [0, 1, 10, 100, 1000] {
+            fixture.assert_baseline(query, limit);
+        }
     }
 }

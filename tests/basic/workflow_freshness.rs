@@ -99,6 +99,66 @@ fn read_only_workflows_refuse_stale_indirect_test_evidence() {
 }
 
 #[test]
+fn overloaded_test_selectors_show_only_the_intended_definition_and_reject_stale_evidence() {
+    let dir = std::env::temp_dir().join(format!("cona-overload-workflow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cona = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_cona"))
+            .args(args)
+            .env("CONA_DATA_DIR", dir.join(".cona-data"))
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+    };
+    let source = "void target() {}\n\
+void test_overload() {\n target(); // zero\n target();\n}\n\
+void test_overload(int a) {\n target(); // one\n}\n\
+void test_overload(int a, int b) {\n target(); // two\n}\n\
+void test_overload(int a, int b, int c) {\n target(); // three\n}\n";
+    std::fs::write(dir.join("code.cpp"), source).unwrap();
+    assert!(cona(&["index"]).status.success());
+    let output = cona(&["--read-only", "--json", "tests", "target"]);
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = value["tests"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "{value}");
+    let mut selectors = std::collections::HashSet::new();
+    for (row, marker) in rows.iter().zip(["zero", "one", "two", "three"]) {
+        let selector = row["selector"].as_str().unwrap();
+        assert!(selectors.insert(selector), "{value}");
+        assert!(
+            row.get("identity").is_none(),
+            "private metadata leaked: {value}"
+        );
+        let shown = cona(&["--read-only", "show", selector]);
+        assert!(shown.status.success(), "{shown:?}");
+        let text = String::from_utf8_lossy(&shown.stdout);
+        assert_eq!(text.matches("void test_overload(").count(), 1, "{text}");
+        for other in ["zero", "one", "two", "three"] {
+            assert_eq!(
+                text.contains(&format!("// {other}")),
+                marker == other,
+                "{text}"
+            );
+        }
+    }
+    // Moving the definitions invalidates the snapshot identity. Read-only test
+    // selection must refuse it, not combine current references and old ranges.
+    std::fs::write(dir.join("code.cpp"), format!("// moved\n\n{source}")).unwrap();
+    let before = snapshot(&dir);
+    let stale = cona(&["--read-only", "--json", "tests", "target"]);
+    assert!(!stale.status.success(), "{stale:?}");
+    let error = String::from_utf8_lossy(&stale.stderr);
+    assert!(
+        error.contains("code.cpp") && error.contains("cannot refresh indexed candidates"),
+        "{error}"
+    );
+    assert_eq!(snapshot(&dir), before);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn impact_handles_a_whole_deleted_file_still_in_the_index() {
     let dir = std::env::temp_dir().join(format!("cona-deleted-workflow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

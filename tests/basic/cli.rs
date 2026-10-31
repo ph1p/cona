@@ -1,5 +1,105 @@
 //! Drive the real binary against real temp repos (CLI contract tests).
 
+#[test]
+fn mutations_preserve_bytes_permissions_and_unowned_temps() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let dir = std::env::temp_dir().join(format!("cona-it-safe-mutations-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = |args: &[&str], input: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_cona"))
+            .args(args)
+            .env("CONA_DATA_DIR", dir.join(".cona-data"))
+            .env("CONA_NO_STATS", "1")
+            .env("CONA_NO_AUTO_UPDATE", "1")
+            .current_dir(&dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        (
+            output.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )
+    };
+    let source = dir.join("a.rs");
+    std::fs::write(&source, "fn old() {}\r\nfn caller() { old(); }").unwrap();
+    std::fs::write(dir.join("a.rs.cona-tmp"), "sentinel").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o751)).unwrap();
+    }
+    let (ok, output) = run(&["index"], "");
+    assert!(ok, "{output}");
+    for (args, input) in [
+        (vec!["edit", "old"], "fn old() { let _ = 1; }\n"),
+        (vec!["edit", "a.rs", "--range", "1-1"], "fn old() {}\n"),
+        (vec!["insert", "--at", "a.rs", "1"], "fn inserted() {}\n"),
+        (vec!["rename", "old", "renamed"], ""),
+    ] {
+        let (ok, output) = run(&args, input);
+        assert!(ok, "{output}");
+        let bytes = std::fs::read(&source).unwrap();
+        assert!(!bytes.ends_with(b"\n"));
+        assert!(bytes.windows(2).any(|w| w == b"\r\n"));
+        assert!(bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| *b != b'\n' || i > 0 && bytes[i - 1] == b'\r'));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.rs.cona-tmp")).unwrap(),
+            "sentinel"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&source).unwrap().permissions().mode() & 0o777,
+                0o751
+            );
+        }
+        assert!(std::fs::read_dir(&dir).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            !(name.starts_with(".cona-") && name.ends_with(".tmp"))
+        }));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&source).unwrap(),
+        "fn renamed() {}\r\nfn inserted() {}\r\nfn caller() { renamed(); }"
+    );
+    let before = std::fs::read(&source).unwrap();
+    for args in [
+        vec!["edit", "renamed"],
+        vec!["edit", "a.rs", "--range", "1-1"],
+        vec!["insert", "--at", "a.rs", "0"],
+    ] {
+        let (ok, output) = run(&args, "fn {");
+        assert!(!ok && output.contains("syntax error"), "{output}");
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+    }
+    // Collision introduced after indexing is rejected by the real CLI too.
+    std::fs::write(&source, "fn renamed() {}\r\nfn collision() {}").unwrap();
+    let before = std::fs::read(&source).unwrap();
+    let (ok, output) = run(&["rename", "renamed", "collision"], "");
+    assert!(!ok && output.contains("already defined"), "{output}");
+    assert_eq!(std::fs::read(&source).unwrap(), before);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 // Real IO, like the recovery-bug tests: edit --range, insert --after, and
 // the syntax-verify rollback they share.
 #[test]

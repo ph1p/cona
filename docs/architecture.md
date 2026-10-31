@@ -87,6 +87,29 @@ src/commands/    cmd_* implementations, split by concern:
                           OR --at <file> <line>, incl. new/empty file) / note /
                           rename. write_verified = THE shared syntax-verify +
                           write gate for all edit paths (invariant 3)
+                          and verify_source supplies rename's same syntax rule.
+                          Mutations exclusively create short sibling stages
+                          (create_new, bounded retries); guards delete only owned,
+                          unconsumed stages. Existing permissions are preserved;
+                          stage writes/permission failures leave sources intact.
+                          Rename validates indexed paths/readability before
+                          refresh_candidate_files, then resolves identity and
+                          collisions against refreshed indexed candidates (not
+                          newly created unindexed files). Force bypasses collision,
+                          syntax and textual-fallback refusal, never I/O safety.
+                          commit_changes stages replacements AND recovery copies
+                          before any swap, compares live bytes with planned
+                          originals, then atomically replaces one sibling at a
+                          time. All commit errors use best-effort recovery of
+                          earlier swaps; the failing swap never truncates its
+                          source. Failed recovery retains/names original backups
+                          and reports actual restoration counts. Observed edits
+                          during commit/recovery are refused, but checks are
+                          optimistic, not cross-process locking or protection
+                          against hostile parent-directory replacement. This is
+                          NOT crash-atomic across files. Notes and reindex run
+                          after source commit; their failures explicitly report
+                          already committed sources rather than promise rollback.
                  insight.rs entries/tests/shape/deps/check/impact (check =
                           syntax_errors as command; impact = refs+callers+tests+
                           blame in ONE pack)
@@ -196,7 +219,15 @@ src/graph.rs     In-memory call graph (one pass over all files): callers_of/
                  count == declared param count; methods minus implicit receiver,
                  first_param_is_receiver in lang/mod.rs) — each rule fires ONLY on
                  exactly one survivor, never guessing among equals. Signals in
-                 struct Candidate; arg count via call_node_of/arg_count_of
+                 struct Candidate; first_unique is the shared ordered policy.
+                 Reverse references summarize parent/file/directory groups once
+                 per name's ORIGINAL definition pool, borrowing snapshot keys.
+                 Unique winners avoid per-use candidate scans/clones; failed
+                 rules still consult the full pool, and unresolved ambiguity
+                 retains every eligible edge. Summaries live only during one
+                 reverse adjacency build, never across queries. Arity is unknown
+                 for reverse references; callee pools keep generic narrowing.
+                 Arg count via call_node_of/arg_count_of
                  (lang/idents.rs), param count via param_count. Callee EDGES only from
                  call positions (fn call/method call/macro) — locals create no
                  false edges. `uses` (caller side) keeps ALL occurrences (types,
@@ -226,8 +257,15 @@ src/search.rs    Pure lexical behavior ranking: Unicode alphanumeric tokens spli
                  query/search.rs reads indexed files once each after freshness
                  checks, assigns nested body lines to the smallest symbol span,
                  and reads up to24 contiguous leading comment lines as docs
-                 (heuristic). Stable ties use file/start/qualified/end. Ranking
-                 scans scoped indexed source, not a persistent full-text index;
+                 (heuristic). Stable ties use file/start/qualified/end, then
+                 encounter order for identical keys. A worst-first heap retains
+                 only limit.min(100) hits; selectors/excerpt evidence are built
+                 only for candidates entering that prefix. File line lengths
+                 are shared by retained hits plus the active scanned file and
+                 freed when its last hit is displaced; savings still merge the
+                 final displayed sites per file. Limit0 retains nothing but
+                 still scans/refreshes and reports whether any match existed.
+                 Ranking scans scoped indexed source, not a persistent full-text index;
                  cost scales with source bytes and overlapping symbol spans.
                  Excerpts/signatures/reasons cap at240 characters, results at100
                  plus a conservative512KB aggregate display-size guard. Selectors

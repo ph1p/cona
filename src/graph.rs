@@ -20,6 +20,83 @@ pub struct Candidate {
     pub is_method: bool,
 }
 
+enum ScopeRule<'a> {
+    Parent(&'a str),
+    File(&'a str),
+    Directory(&'a str),
+    Arity(usize),
+}
+
+/// The single ordered first-exactly-one policy. Each provider summarizes a
+/// group from the ORIGINAL pool: a failed rule never narrows later rules.
+fn first_unique(
+    my_scope: Option<&str>,
+    my_file: &str,
+    argc: Option<usize>,
+    mut unique_in: impl FnMut(ScopeRule<'_>) -> Option<usize>,
+) -> Option<usize> {
+    [
+        my_scope.map(ScopeRule::Parent),
+        Some(ScopeRule::File(my_file)),
+        Some(ScopeRule::Directory(dir_of(my_file))),
+        argc.map(ScopeRule::Arity),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(&mut unique_in)
+}
+
+fn only_one(mut ids: impl Iterator<Item = usize>) -> Option<usize> {
+    let first = ids.next()?;
+    ids.next().is_none().then_some(first)
+}
+
+/// Borrowed, snapshot-local summaries for ONE name's original definition pool.
+/// Some(id) means exactly one candidate; None means multiple, not an empty group.
+#[derive(Default)]
+struct ScopeGroups<'a> {
+    parents: HashMap<&'a str, Option<usize>>,
+    files: HashMap<&'a str, Option<usize>>,
+    directories: HashMap<&'a str, Option<usize>>,
+}
+
+impl<'a> ScopeGroups<'a> {
+    fn new(syms: &'a [SymNode], defs: &[usize]) -> Self {
+        let mut groups = Self::default();
+        for &id in defs {
+            let sym = &syms[id];
+            if let Some(parent) = scope_parent(&sym.qualified) {
+                Self::add(&mut groups.parents, parent, id);
+            }
+            Self::add(&mut groups.files, &sym.file, id);
+            Self::add(&mut groups.directories, dir_of(&sym.file), id);
+        }
+        groups
+    }
+
+    fn add(group: &mut HashMap<&'a str, Option<usize>>, key: &'a str, id: usize) {
+        group
+            .entry(key)
+            .and_modify(|v| *v = None)
+            .or_insert(Some(id));
+    }
+
+    fn winner(&self, caller: &SymNode) -> Option<usize> {
+        // Reverse references have no call arity, including type/callback uses.
+        first_unique(
+            scope_parent(&caller.qualified),
+            &caller.file,
+            None,
+            |rule| match rule {
+                ScopeRule::Parent(parent) => self.parents.get(parent).copied().flatten(),
+                ScopeRule::File(file) => self.files.get(file).copied().flatten(),
+                ScopeRule::Directory(dir) => self.directories.get(dir).copied().flatten(),
+                ScopeRule::Arity(_) => None,
+            },
+        )
+    }
+}
+
 /// THE scope-preference disambiguation policy (name-based, no type
 /// resolution), shared by `Graph::prefer_scope` and `context`. Among same-named
 /// defs prefer (1) the caller's parent scope (`self.x()` / `this.x()`), then
@@ -36,42 +113,28 @@ pub fn narrow_by_scope<T>(
     if cands.len() <= 1 {
         return cands;
     }
-    let my_dir = dir_of(my_file);
     // derive signals ONCE — `key` may re-parse a signature (see cmd_context)
     let derived: Vec<Candidate> = cands.iter().map(&key).collect();
-    let survives = |cand: &Candidate, rule: usize| -> bool {
-        match rule {
-            0 => my_scope.is_some() && cand.scope.as_deref() == my_scope,
-            1 => cand.file == my_file,
-            // same directory: weak but false-positive-light
-            2 => dir_of(&cand.file) == my_dir,
-            // arity: declared params (minus a method's receiver) == call args
-            _ => match (cand.params, argc) {
-                (Some(p), Some(a)) => {
+    let winner = first_unique(my_scope, my_file, argc, |rule| {
+        only_one(derived.iter().enumerate().filter_map(|(i, cand)| {
+            let survives = match rule {
+                ScopeRule::Parent(parent) => cand.scope.as_deref() == Some(parent),
+                ScopeRule::File(file) => cand.file == file,
+                ScopeRule::Directory(dir) => dir_of(&cand.file) == dir,
+                ScopeRule::Arity(args) => cand.params.is_some_and(|p| {
                     let effective = if cand.is_method {
                         p.saturating_sub(1)
                     } else {
                         p
                     };
-                    effective == a
-                }
-                _ => false,
-            },
-        }
-    };
-    for rule in [0, 1, 2, 3] {
-        // the arity rule can't fire without a known call-site arg count
-        if rule == 3 && argc.is_none() {
-            break;
-        }
-        if derived.iter().filter(|c| survives(c, rule)).count() == 1 {
-            return cands
-                .into_iter()
-                .zip(&derived)
-                .filter(|(_, c)| survives(c, rule))
-                .map(|(t, _)| t)
-                .collect();
-        }
+                    effective == args
+                }),
+            };
+            survives.then_some(i)
+        }))
+    });
+    if let Some(i) = winner {
+        return cands.into_iter().nth(i).into_iter().collect();
     }
     cands
 }
@@ -212,10 +275,12 @@ impl Graph {
             let Some(defs) = self.by_name.get(name) else {
                 continue;
             };
+            let groups = (defs.len() > 1).then(|| ScopeGroups::new(&self.syms, defs));
             for &(caller, line) in uses {
-                let candidates = self.prefer_scope(caller, defs.clone(), None);
+                let winner = groups.as_ref().and_then(|g| g.winner(&self.syms[caller]));
+                let candidates = winner.as_ref().map(std::slice::from_ref).unwrap_or(defs);
                 let ambiguous = candidates.len() > 1;
-                for target in candidates {
+                for &target in candidates {
                     if target != caller {
                         reverse[target].push((caller, line, ambiguous));
                     }
@@ -353,6 +418,131 @@ mod tests {
     }
 
     const SRC: &str = "fn low() {}\nfn mid() { low(); }\nfn high() { mid(); }\nfn other() {}\n";
+
+    // Deliberately retain the pre-index implementation as an edge-level oracle.
+    fn reverse_reference_oracle(g: &Graph) -> Vec<Vec<(usize, i64, bool)>> {
+        let mut reverse = vec![Vec::new(); g.syms.len()];
+        for (name, uses) in &g.uses {
+            let Some(defs) = g.by_name.get(name) else {
+                continue;
+            };
+            for &(caller, line) in uses {
+                let candidates = g.prefer_scope(caller, defs.clone(), None);
+                let ambiguous = candidates.len() > 1;
+                for target in candidates {
+                    if target != caller {
+                        reverse[target].push((caller, line, ambiguous));
+                    }
+                }
+            }
+        }
+        for edges in &mut reverse {
+            edges.sort_unstable();
+            edges.dedup_by_key(|e| e.0);
+        }
+        reverse
+    }
+
+    #[test]
+    fn reverse_references_match_original_pool_oracle() {
+        // Enumerate scope/file/directory combinations, including root directory,
+        // overloaded definitions, self references, and repeated reference lines.
+        let locations = [
+            ("A.helper", "near/a.rs"),
+            ("A.helper", "far/a.rs"),
+            ("B.helper", "near/caller.rs"),
+            ("B.helper", "near/b.rs"),
+            ("helper", "root.rs"),
+            ("helper", "other.rs"),
+        ];
+        for mask in 1usize..(1 << locations.len()) {
+            let mut syms = Vec::new();
+            for (i, (qualified, file)) in locations.iter().enumerate() {
+                if mask & (1 << i) != 0 {
+                    syms.push(SymNode {
+                        qualified: (*qualified).into(),
+                        name: "helper".into(),
+                        kind: "fn".into(),
+                        file: (*file).into(),
+                        start: i as i64 + 1,
+                        end: i as i64 + 1,
+                        params: Some(i),
+                        recv: i % 2 == 0,
+                    });
+                }
+            }
+            let defs: Vec<_> = (0..syms.len()).collect();
+            for (qualified, file) in [
+                ("A.run", "near/caller.rs"),
+                ("C.run", "near/caller.rs"),
+                ("run", "caller.rs"),
+                ("run", "absent/caller.rs"),
+            ] {
+                syms.push(SymNode {
+                    qualified: qualified.into(),
+                    name: "run".into(),
+                    kind: "fn".into(),
+                    file: file.into(),
+                    start: 10,
+                    end: 30,
+                    params: None,
+                    recv: false,
+                });
+            }
+            let uses = (0..syms.len())
+                .flat_map(|i| [(i, 23), (i, 12), (i, 23)])
+                .collect();
+            let g = Graph {
+                calls: vec![Vec::new(); syms.len()],
+                syms,
+                by_name: HashMap::from([("helper".into(), defs)]),
+                uses: HashMap::from([("helper".into(), uses)]),
+            };
+            assert_eq!(
+                g.reverse_references(),
+                reverse_reference_oracle(&g),
+                "candidate mask {mask}"
+            );
+            if mask == 0b000111 {
+                // A's scope matches TWO candidates; same-file must consider
+                // the ORIGINAL pool and select B.helper, not intersect it.
+                let caller = 3;
+                assert_eq!(g.prefer_scope(caller, vec![0, 1, 2], None), vec![2]);
+            }
+            if mask == 0b110000 {
+                // The root directory shared by many candidates cannot win.
+                assert_eq!(g.prefer_scope(4, vec![0, 1], None), vec![0, 1]);
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_references_preserve_types_callbacks_and_overloads() {
+        let g = Graph::build(&[
+            nodes(
+                "near/a.rs",
+                "rust",
+                "struct Item;\nfn helper() {}\nfn worker(x: Item) {\n helper();\n let callback = helper;\n helper();\n worker(x);\n}\n",
+            ),
+            nodes("far/b.rs", "rust", "struct Item;\nfn helper(x: i32) {}\n"),
+            nodes(
+                "tests.ts",
+                "typescript",
+                "function test_target() { helper(); }\nfunction test_target(x) { helper(x); }\n",
+            ),
+        ]);
+        let reverse = g.reverse_references();
+        assert_eq!(reverse, reverse_reference_oracle(&g));
+        let worker = g.find("worker")[0];
+        let helper = g.find("helper")[0];
+        let item = g.find("Item")[0];
+        assert_eq!(reverse[helper][0], (worker, 4, false));
+        assert_eq!(reverse[item], vec![(worker, 3, false)]);
+        assert!(reverse[worker].is_empty(), "self edge is excluded");
+        for test in g.find("test_target") {
+            assert!(reverse[helper].iter().any(|e| e.0 == test && e.2));
+        }
+    }
 
     #[test]
     fn callers_and_callees_direct() {

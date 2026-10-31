@@ -1,6 +1,6 @@
 //! Static test-reference evidence, shared by tests, editing context and diff.
 //! Paths are relationships, never a claim of runtime coverage.
-use super::{callgraph::build_graph, locate_fresh, scan_ref_sites};
+use super::{callgraph::build_graph, locate_fresh, scan_ref_sites_identified, DefinitionIdentity};
 use crate::{db, entries, graph::Graph};
 use anyhow::{bail, Result};
 use rusqlite::Connection;
@@ -33,6 +33,8 @@ pub struct TestEvidence {
     pub depth: usize,
     pub ambiguous: bool,
     pub path: Vec<EvidenceEdge>,
+    #[serde(skip)]
+    pub(crate) identity: DefinitionIdentity,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,13 +128,15 @@ impl<'a> TestSelector<'a> {
         let mut seen_files = HashSet::new();
         let mut seen_tests = HashSet::new();
         let mut seeds = Vec::new();
-        scan_ref_sites(
+        scan_ref_sites_identified(
             self.root,
             self.conn,
             &name,
             None,
             None,
-            |file, line, enclosing, _, source| {
+            |identity, line, source| {
+                let file = identity.file.as_str();
+                let enclosing = identity.qualified.as_str();
                 if seen_files.insert(file.to_string()) {
                     result.baseline += db::est_tokens(source.len());
                 }
@@ -141,13 +145,9 @@ impl<'a> TestSelector<'a> {
                     && line <= end
                     && db::name_tail(enclosing) == name
                 {
-                    return true;
+                    return Ok(true);
                 }
-                let selector = if enclosing.is_empty() {
-                    format!("{file}:{line}-{line}")
-                } else {
-                    format!("{file}:{enclosing}")
-                };
+                let selector = identity.selector(self.conn)?;
                 let edge = EvidenceEdge {
                     from: selector.clone(),
                     to: target.clone(),
@@ -155,9 +155,9 @@ impl<'a> TestSelector<'a> {
                     line,
                     ambiguous: name_only || defs > 1,
                 };
-                seeds.push((file.to_string(), enclosing.to_string(), vec![edge.clone()]));
+                seeds.push((identity.clone(), vec![edge.clone()]));
                 if entries::is_test_path(file) || entries::is_test_symbol(enclosing) {
-                    if seen_tests.insert((file.to_string(), enclosing.to_string())) {
+                    if seen_tests.insert(identity.clone()) {
                         result.tests.push(TestEvidence {
                             file: file.to_string(),
                             line,
@@ -166,12 +166,13 @@ impl<'a> TestSelector<'a> {
                             depth: 1,
                             ambiguous: edge.ambiguous,
                             path: vec![edge],
+                            identity,
                         });
                     }
                 } else {
                     result.non_test_refs += 1;
                 }
-                true
+                Ok(true)
             },
         )?;
         if let Some(graph) = &self.graph {
@@ -179,16 +180,22 @@ impl<'a> TestSelector<'a> {
             let mut visited = HashSet::new();
             // Never walk back into the target, including through a cycle.
             for (i, s) in graph.syms.iter().enumerate() {
-                if s.file == def_file && s.qualified == qualified {
+                if s.file == def_file
+                    && s.qualified == qualified
+                    && s.start == start
+                    && s.end == end
+                {
                     visited.insert(i);
                 }
             }
-            for (file, enclosing, path) in seeds {
-                if let Some(i) = graph
-                    .syms
-                    .iter()
-                    .position(|s| s.file == file && s.qualified == enclosing)
-                {
+            for (identity, path) in seeds {
+                if let Some(i) = graph.syms.iter().position(|s| {
+                    s.file == identity.file
+                        && s.qualified == identity.qualified
+                        && s.kind == identity.kind
+                        && s.start == identity.start
+                        && s.end == identity.end
+                }) {
                     if visited.insert(i) {
                         queue.push_back((i, path));
                     }
@@ -204,17 +211,18 @@ impl<'a> TestSelector<'a> {
                     }
                     let s = &graph.syms[caller];
                     let callee = &graph.syms[current];
-                    let selector = format!("{}:{}", s.file, s.qualified);
+                    let identity = DefinitionIdentity::from(s);
+                    let selector = identity.selector(self.conn)?;
                     let mut next = path.clone();
                     next.push(EvidenceEdge {
                         from: selector.clone(),
-                        to: format!("{}:{}", callee.file, callee.qualified),
+                        to: DefinitionIdentity::from(callee).selector(self.conn)?,
                         file: s.file.clone(),
                         line,
                         ambiguous,
                     });
                     if (entries::is_test_path(&s.file) || entries::is_test_symbol(&s.qualified))
-                        && seen_tests.insert((s.file.clone(), s.qualified.clone()))
+                        && seen_tests.insert(identity.clone())
                     {
                         result.tests.push(TestEvidence {
                             file: s.file.clone(),
@@ -224,6 +232,7 @@ impl<'a> TestSelector<'a> {
                             depth: next.len(),
                             ambiguous: next.iter().any(|e| e.ambiguous),
                             path: next.clone(),
+                            identity,
                         });
                     }
                     queue.push_back((caller, next));
