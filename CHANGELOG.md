@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/ph1p/cona/compare/v0.1.5...v0.1.6) - 2026-10-31
+
+### Fixed
+
+- harden mutations and optimize investigation workflows
+- retain overloaded test definition identities
+- stage source mutations and report recovery failures
+
+### Other
+
+- index scope candidates for reverse references
+- isolate color policy from terminal state
+- retain only bounded search candidates
+- index unique definition pairs for impact diff
+
 ## [0.1.5](https://github.com/ph1p/cona/compare/v0.1.4...v0.1.5) - 2026-10-31
 
 ### Added
