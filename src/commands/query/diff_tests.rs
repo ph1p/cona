@@ -77,6 +77,38 @@ impl Drop for Repository {
 }
 
 #[test]
+fn impact_keeps_overloaded_rows_while_aggregating_changed_targets() {
+    let repo = Repository::new();
+    let old = "void a() {}\nvoid b() {}\n\
+void bridge() { a(); b(); }\n\
+void bridge(int x) { a(); b(); }\n\
+void test_overload() { a(); b(); a(); }\n\
+void test_overload(int x) { a(); b(); }\n";
+    repo.write("code.cpp", old);
+    repo.commit();
+    repo.write("code.cpp", &old.replace("() {}", "() { int changed = 1; }"));
+    let conn = repo.index();
+    let (json, _) = cmd_diff_impact(&repo.0, &conn, "HEAD", 8000, true).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let callers = value["callers"].as_array().unwrap();
+    assert_eq!(callers.len(), 4, "{json}");
+    let tests = value["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 2, "{json}");
+    for row in callers.iter().chain(tests) {
+        assert_eq!(
+            row["changed_symbols"].as_array().unwrap().len(),
+            2,
+            "{json}"
+        );
+    }
+    let selectors: HashSet<_> = callers
+        .iter()
+        .map(|r| r["selector"].as_str().unwrap())
+        .collect();
+    assert_eq!(selectors.len(), 4);
+}
+
+#[test]
 fn impact_git_old_signatures_deletions_and_module_changes() {
     let repo = Repository::new();
     repo.write(

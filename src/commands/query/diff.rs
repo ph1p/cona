@@ -394,7 +394,7 @@ fn assemble_impact(
     }
     let selection = TestSelector::new(root, conn, 2)?;
     let graph = selection.graph().expect("depth two constructs a graph");
-    let mut callers: BTreeMap<(String, String), ImpactCaller> = BTreeMap::new();
+    let mut callers = BTreeMap::new();
     let mut tests = BTreeMap::new();
     let mut omitted = false;
     let mut seen_targets = HashSet::new();
@@ -414,7 +414,8 @@ fn assemble_impact(
         }
         for (id, line) in graph.callers_of(name, &HashSet::new()) {
             let node = &graph.syms[id];
-            let key = (node.file.clone(), node.qualified.clone());
+            let key = crate::commands::DefinitionIdentity::from(node);
+            let selector = key.selector(conn)?;
             if !callers.contains_key(&key) && callers.len() >= 100 {
                 omitted = true;
                 continue;
@@ -423,7 +424,7 @@ fn assemble_impact(
                 file: node.file.clone(),
                 line,
                 symbol: node.qualified.clone(),
-                selector: format!("{}:{}", node.file, node.qualified),
+                selector,
                 changed_symbols: Vec::new(),
                 uncertain: true,
             });
@@ -439,7 +440,7 @@ fn assemble_impact(
             selection.select_name(name)?
         };
         for test in evidence.tests {
-            let key = (test.file.clone(), test.enclosing.clone());
+            let key = test.identity.clone();
             if !tests.contains_key(&key) && tests.len() >= 100 {
                 omitted = true;
                 continue;

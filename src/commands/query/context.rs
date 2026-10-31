@@ -1,6 +1,9 @@
 //! `context`: one budgeted pack of source + callees + call sites.
 
-use crate::commands::{jout, locate_fresh, render_symbol_body, scan_ref_sites, BudgetOut};
+use crate::commands::{
+    jout, locate_fresh, render_symbol_body, scan_ref_sites, scan_ref_sites_identified, BudgetOut,
+    DefinitionIdentity,
+};
 use crate::{db, entries, graph, lang, resolve};
 use anyhow::Result;
 use rusqlite::Connection;
@@ -367,24 +370,26 @@ pub fn cmd_context_edit(
     let mut related = edit_dependencies(root, conn, &path, &qualified, start, end, &source)?;
     let name = db::name_tail(&qualified);
     let mut seen_callers = HashSet::new();
-    scan_ref_sites(
+    scan_ref_sites_identified(
         root,
         conn,
         name,
         Some((&path, &source)),
         None,
-        |file, line, enclosing, _, src| {
+        |identity, line, src| {
+            let file = identity.file.as_str();
+            let enclosing = identity.qualified.as_str();
             if (file == path && line >= start && line <= end)
                 || enclosing.is_empty()
                 || entries::is_test_symbol(enclosing)
                 || entries::is_test_path(file)
-                || !seen_callers.insert((file.to_string(), enclosing.to_string()))
+                || !seen_callers.insert(identity.clone())
             {
-                return true;
+                return Ok(true);
             }
             // A representative reference line is explicitly an excerpt, never
             // presented as the caller's complete body or a proven call edge.
-            related.push(EditItem {
+            let item = EditItem {
                 role: "caller reference excerpt".into(),
                 file: file.into(),
                 symbol: enclosing.into(),
@@ -397,15 +402,16 @@ pub fn cmd_context_edit(
                     .lines()
                     .nth(line.saturating_sub(1) as usize)
                     .map(str::to_string),
-            });
-            seen_callers.len() < 8
+            };
+            related.push((identity, item));
+            Ok(seen_callers.len() < 8)
         },
     )?;
 
-    let mut seen = HashSet::from([(path.clone(), qualified)]);
+    let mut seen = HashSet::new();
     let mut files = HashSet::from([path]);
-    for item in related {
-        if !seen.insert((item.file.clone(), item.symbol.clone())) {
+    for (identity, item) in related {
+        if !seen.insert(identity) {
             continue;
         }
         pack.related.push(item);
@@ -539,7 +545,7 @@ fn edit_dependencies(
     start: i64,
     end: i64,
     source: &str,
-) -> Result<Vec<EditItem>> {
+) -> Result<Vec<(DefinitionIdentity, EditItem)>> {
     let mut names = HashSet::new();
     let mut result = Vec::new();
     let mut stmt = conn.prepare(
@@ -617,17 +623,27 @@ fn edit_dependencies(
             } else {
                 None
             };
-            result.push(EditItem {
-                role: if call { "helper" } else { "type/constant" }.into(),
-                file,
-                symbol: q,
+            let identity = DefinitionIdentity {
+                file: file.clone(),
+                qualified: q.clone(),
+                kind,
                 start: s,
                 end: e,
-                ambiguous,
-                signature,
-                code,
-                excerpt: None,
-            });
+            };
+            result.push((
+                identity,
+                EditItem {
+                    role: if call { "helper" } else { "type/constant" }.into(),
+                    file,
+                    symbol: q,
+                    start: s,
+                    end: e,
+                    ambiguous,
+                    signature,
+                    code,
+                    excerpt: None,
+                },
+            ));
             if result.len() >= 16 {
                 return Ok(result);
             }

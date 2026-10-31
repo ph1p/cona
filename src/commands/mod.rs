@@ -25,16 +25,56 @@ pub use stats::*;
 
 use crate::{db, indexer, lang};
 use anyhow::{anyhow, bail, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use std::time::Instant;
 
 /// Innermost indexed symbol enclosing a (file, line) — the ONE definition of
-/// "which symbol is this line in" (context/grep/tests). Columns: qualified, kind.
-pub(crate) const ENCLOSING_SYMBOL_SQL: &str =
-    "SELECT s.qualified, s.kind FROM symbols s JOIN files f ON f.id = s.file_id
+/// "which symbol is this line in" (context/grep/tests).
+/// Columns: qualified, kind, definition start, definition end.
+pub(crate) const ENCLOSING_SYMBOL_SQL: &str = "SELECT s.qualified, s.kind, s.start_line, s.end_line
+     FROM symbols s JOIN files f ON f.id = s.file_id
      WHERE f.path = ?1 AND s.start_line <= ?2 AND s.end_line >= ?2
      ORDER BY s.start_line DESC LIMIT 1";
+
+/// Snapshot identity, not a display name or an opaque database row ID.
+/// Without an enclosing definition, an explicit reference-line range is used.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct DefinitionIdentity {
+    pub file: String,
+    pub qualified: String,
+    pub kind: String,
+    pub start: i64,
+    pub end: i64,
+}
+
+impl From<&crate::graph::SymNode> for DefinitionIdentity {
+    fn from(node: &crate::graph::SymNode) -> Self {
+        Self {
+            file: node.file.clone(),
+            qualified: node.qualified.clone(),
+            kind: node.kind.clone(),
+            start: node.start,
+            end: node.end,
+        }
+    }
+}
+
+impl DefinitionIdentity {
+    pub fn selector(&self, conn: &Connection) -> Result<String> {
+        let count: i64 = conn.query_row(
+            "SELECT count(*) FROM symbols s JOIN files f ON f.id=s.file_id
+             WHERE f.path=?1 AND (s.qualified=?2 OR s.name=?2)",
+            rusqlite::params![self.file, self.qualified],
+            |r| r.get(0),
+        )?;
+        Ok(if self.qualified.is_empty() || count > 1 {
+            format!("{}:{}-{}", self.file, self.start, self.end)
+        } else {
+            format!("{}:{}", self.file, self.qualified)
+        })
+    }
+}
 
 /// Shared remedy for both read-only dead ends (missing index / empty index).
 const READ_ONLY_INDEX_HINT: &str = "in read-only mode — run `cona index` from a \
@@ -502,6 +542,33 @@ pub(crate) fn scan_ref_sites(
     path_filter: Option<&str>,
     mut visit: impl FnMut(&str, i64, &str, &str, &str) -> bool,
 ) -> Result<()> {
+    scan_ref_sites_identified(
+        root,
+        conn,
+        name,
+        preloaded,
+        path_filter,
+        |identity, line, src| {
+            Ok(visit(
+                &identity.file,
+                line,
+                &identity.qualified,
+                &identity.kind,
+                src,
+            ))
+        },
+    )
+}
+
+/// Identity-preserving variant; keeps the same innermost-symbol ordering.
+pub(crate) fn scan_ref_sites_identified(
+    root: &Path,
+    conn: &Connection,
+    name: &str,
+    preloaded: Option<(&str, &str)>,
+    path_filter: Option<&str>,
+    mut visit: impl FnMut(DefinitionIdentity, i64, &str) -> Result<bool>,
+) -> Result<()> {
     let pf = PathFilter::new(root, path_filter);
     let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let mut files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
@@ -538,12 +605,25 @@ pub(crate) fn scan_ref_sites(
             indexer::ensure_fresh(root, conn, rel);
         }
         for ln in ref_lns {
-            let (encl, kind): (String, String) = enclosing
+            let identity = enclosing
                 .query_row(rusqlite::params![rel, ln as i64], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
+                    Ok(DefinitionIdentity {
+                        file: rel.clone(),
+                        qualified: r.get(0)?,
+                        kind: r.get(1)?,
+                        start: r.get(2)?,
+                        end: r.get(3)?,
+                    })
                 })
-                .unwrap_or_default();
-            if !visit(rel, ln as i64, &encl, &kind, fsrc) {
+                .optional()?
+                .unwrap_or_else(|| DefinitionIdentity {
+                    file: rel.clone(),
+                    qualified: String::new(),
+                    kind: String::new(),
+                    start: ln as i64,
+                    end: ln as i64,
+                });
+            if !visit(identity, ln as i64, fsrc)? {
                 break 'files;
             }
         }

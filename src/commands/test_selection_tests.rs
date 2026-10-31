@@ -36,6 +36,100 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn overloaded_tests_keep_definition_identity_and_reference_lines() {
+    let f = Fixture::new(&[(
+        "code.cpp",
+        "void target() {}\n\
+void test_overload() {\n target();\n target();\n}\n\
+void test_overload(int a) {\n target();\n}\n\
+void test_overload(int a, int b) {\n target();\n}\n\
+void test_overload(int a, int b, int c) {\n target();\n}\n",
+    )]);
+    for depth in [1, 2] {
+        let selection = select_tests(&f.root, &f.conn, "target", depth).unwrap();
+        assert_eq!(selection.tests.len(), 4, "{selection:?}");
+        for (test, (start, end, reference)) in
+            selection
+                .tests
+                .iter()
+                .zip([(2, 5, 3), (6, 8, 7), (9, 11, 10), (12, 14, 13)])
+        {
+            assert_eq!(test.selector, format!("code.cpp:{start}-{end}"));
+            assert_eq!(test.line, reference);
+            assert_eq!(test.path[0].line, reference);
+            assert!(
+                !test.ambiguous,
+                "selector ambiguity is not target ambiguity"
+            );
+        }
+    }
+}
+
+#[test]
+fn indirect_overloaded_tests_keep_distinct_definition_ranges() {
+    let f = Fixture::new(&[(
+        "code.cpp",
+        "void target() {}\n\
+void bridge() { target(); }\n\
+void test_overload() {\n bridge();\n bridge();\n}\n\
+void test_overload(int a) {\n bridge();\n}\n\
+void test_overload(int a, int b) {\n bridge();\n}\n\
+void test_overload(int a, int b, int c) {\n bridge();\n}\n",
+    )]);
+    let selection = select_tests(&f.root, &f.conn, "target", 2).unwrap();
+    assert_eq!(selection.tests.len(), 4, "{selection:?}");
+    for (test, (start, end, reference)) in
+        selection
+            .tests
+            .iter()
+            .zip([(3, 6, 4), (7, 9, 8), (10, 12, 11), (13, 15, 14)])
+    {
+        assert_eq!(test.selector, format!("code.cpp:{start}-{end}"));
+        assert_eq!(test.line, reference);
+        assert_eq!(test.path[1].line, reference);
+        assert_eq!(test.depth, 2);
+        assert!(!test.ambiguous);
+    }
+}
+
+#[test]
+fn unenclosed_test_references_have_explicit_line_identity() {
+    let f = Fixture::new(&[
+        ("code.py", "def target():\n    pass\n"),
+        ("test_calls.py", "target()\ntarget()\n"),
+    ]);
+    let selection = select_tests(&f.root, &f.conn, "target", 2).unwrap();
+    assert_eq!(selection.tests.len(), 2, "{selection:?}");
+    for (test, line) in selection.tests.iter().zip([1, 2]) {
+        assert!(test.enclosing.is_empty());
+        assert_eq!(test.line, line);
+        assert_eq!(test.selector, format!("test_calls.py:{line}-{line}"));
+    }
+}
+
+#[test]
+fn overloaded_bridge_seeds_follow_the_referencing_definition() {
+    let f = Fixture::new(&[(
+        "code.cpp",
+        "void target() {}\n\
+void bridge() {}\n\
+void bridge(int a) { target(); }\n\
+void test_wrong() { bridge(); }\n\
+void test_right() { bridge(1); }\n",
+    )]);
+    let selection = select_tests(&f.root, &f.conn, "target", 2).unwrap();
+    // Reverse references are deliberately name-based, not arity resolution.
+    // Both uncertain paths must go through the actual target-referencing bridge.
+    assert_eq!(selection.tests.len(), 2, "{selection:?}");
+    for test in &selection.tests {
+        assert_eq!(test.depth, 2);
+        assert_eq!(test.path[0].from, "code.cpp:3-3");
+        assert_eq!(test.path[1].to, "code.cpp:3-3");
+        assert!(test.ambiguous);
+    }
+}
+
+#[test]
 fn direct_indirect_cycle_and_depth_boundary() {
     let f = Fixture::new(&[(
         "lib.rs",
