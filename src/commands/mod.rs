@@ -11,6 +11,7 @@ pub mod mcp_server;
 pub mod mutate;
 pub mod query;
 pub mod stats;
+pub mod test_selection;
 
 pub use callgraph::*;
 pub use discover::cmd_discover;
@@ -259,9 +260,12 @@ pub(crate) fn par_map<T: Sync, R: Send>(
 pub mod defaults {
     pub const TREE_BUDGET: i64 = 2000;
     pub const FIND_LIMIT: usize = 25;
+    pub const SEARCH_LIMIT: usize = 10;
     pub const SHOW_CONTEXT: usize = 0;
     pub const REFS_LIMIT: usize = 100;
     pub const CONTEXT_BUDGET: i64 = 3000;
+    pub const DIFF_BUDGET: usize = 3000;
+    pub const TESTS_DEPTH: usize = 1;
     pub const GREP_LIMIT: usize = 50;
     /// Hits shown from the rest of the repo when a `--path` grep finds none.
     pub const GREP_ELSEWHERE: usize = 3;
@@ -447,6 +451,41 @@ impl<'a> PathFilter<'a> {
             .filter(|_| self.dir_filter)
             .map(|f| f.trim_end_matches('/'))
     }
+}
+
+/// Refresh the complete candidate set before computing relationships or
+/// ambiguity. Filtering by a name first would miss deleted/renamed definitions.
+/// Writable queries forget confirmed missing files; read-only queries refuse
+/// stale evidence and never mutate the index.
+pub(crate) fn refresh_candidate_files(root: &Path, conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
+    let files = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for rel in files {
+        let missing = std::fs::metadata(root.join(&rel))
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if missing && !db::is_read_only() {
+            let tx = rusqlite::Transaction::new_unchecked(
+                conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            tx.execute(
+                "DELETE FROM symbols WHERE file_id IN (SELECT id FROM files WHERE path = ?1)",
+                [&rel],
+            )?;
+            tx.execute("DELETE FROM files WHERE path = ?1", [&rel])?;
+            tx.commit()?;
+            continue;
+        }
+        indexer::ensure_fresh(root, conn, &rel);
+        if indexer::is_stale(root, conn, &rel) {
+            bail!(
+                "{rel} changed since it was indexed; cannot refresh indexed candidates (run `cona index` from a writable environment)"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Walk every indexed file, find semantic references to `name` and hand each

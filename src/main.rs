@@ -149,6 +149,12 @@ fn run() -> Result<()> {
                 })
             })?;
         }
+        Cmd::Nav(Nav::Search(a)) | Cmd::Search(a) => {
+            let SearchArgs { query, limit, path } = a;
+            queried(&root, t0, "search", query, |conn| {
+                cmd_search(conn, &root, query, *limit, path.as_deref(), cli.json)
+            })?;
+        }
         Cmd::Nav(Nav::Show(a)) | Cmd::Show(a) => {
             let ShowArgs {
                 symbols,
@@ -245,15 +251,28 @@ fn run() -> Result<()> {
                 symbol,
                 budget,
                 no_tests,
+                edit,
             } = a;
             queried(&root, t0, "context", symbol, |conn| {
-                cmd_context(&root, conn, symbol, *budget, *no_tests, cli.json)
+                if *edit {
+                    cmd_context_edit(&root, conn, symbol, *budget, *no_tests, cli.json)
+                } else {
+                    cmd_context(&root, conn, symbol, *budget, *no_tests, cli.json)
+                }
             })?;
         }
         Cmd::Inspect(Inspect::Diff(a)) | Cmd::DiffFlat(a) => {
-            let DiffArgs { r#ref } = a;
+            let DiffArgs {
+                r#ref,
+                impact,
+                budget,
+            } = a;
             queried(&root, t0, "diff", r#ref, |conn| {
-                cmd_diff(&root, conn, r#ref, cli.json)
+                if *impact {
+                    cmd_diff_impact(&root, conn, r#ref, *budget, cli.json)
+                } else {
+                    cmd_diff(&root, conn, r#ref, cli.json)
+                }
             })?;
         }
         Cmd::Nav(Nav::Grep(a)) | Cmd::Grep(a) => {
@@ -412,9 +431,13 @@ fn run() -> Result<()> {
             )?;
         }
         Cmd::Inspect(Inspect::Tests(a)) | Cmd::TestsFlat(a) => {
-            let TestsArgs { symbol } = a;
+            let TestsArgs {
+                symbol,
+                depth,
+                explain,
+            } = a;
             queried(&root, t0, "tests", symbol, |conn| {
-                cmd_tests(&root, conn, symbol, cli.json)
+                cmd_tests_options(&root, conn, symbol, *depth, *explain, cli.json)
             })?;
         }
         Cmd::History(History::Blame(a)) | Cmd::BlameFlat(a) => {
@@ -743,6 +766,7 @@ fn read_only_command(cmd: &Cmd) -> bool {
             | Cmd::Tree(_)
             | Cmd::Outline(_)
             | Cmd::Find(_)
+            | Cmd::Search(_)
             | Cmd::Show(_)
             | Cmd::Refs(_)
             | Cmd::Grep(_)

@@ -27,6 +27,13 @@ fn all_tools() -> Vec<serde_json::Value> {
             read_only("Find symbol"),
         ),
         mcp_tool(
+            "search",
+            "Discover implementations by lexical matches in split identifiers, signatures, documentation and bodies. Returns ranked evidence and file-qualified selectors, not proof of semantic identity",
+            json!({"query": s("behavior description or identifiers"), "path": s("only symbols in files under this path (file, directory, or prefix)"), "limit": {"type": "integer", "minimum": 0, "description": "max results (default 10)"}}),
+            &["query"],
+            read_only("Search behavior"),
+        ),
+        mcp_tool(
             "show",
             "Print the source of one or more symbols (Name, Parent.Name or file.rs:Name). Use instead of reading a whole file to see one function/type. A file path prints that file's outline",
             json!({"symbol": s("symbol name — comma-separate several to batch; a file path yields its outline"), "kind": s("narrow to a kind (fn, struct, …)"), "context": json!({"type": "integer", "description": "extra context lines around the body (default 0)"}), "sig": json!({"type": "boolean", "description": "signature line only, no body — leanest peek"}), "all": json!({"type": "boolean", "description": "on an ambiguous name, print every candidate instead of erroring"}), "path": s("only definitions in files under this path (file or directory)")}),
@@ -64,14 +71,14 @@ fn all_tools() -> Vec<serde_json::Value> {
         mcp_tool(
             "context",
             "One pack: symbol source + callee signatures + call sites. Use instead of reading a symbol plus every file it touches",
-            json!({"symbol": s("symbol name"), "no_tests": {"type": "boolean", "description": "hide test call sites so production callers aren't crowded out"}, "budget": {"type": "integer", "description": "output token budget (default 3000)"}}),
+            json!({"symbol": s("symbol name"), "no_tests": {"type": "boolean", "description": "hide test call sites so production callers aren't crowded out"}, "edit": {"type": "boolean", "description": "opt-in editing pack with selected dependencies; budget covers whole pack"}, "budget": {"type": "integer", "description": "approximate token budget (default 3000); default mode bounds only relationship sections"}}),
             &["symbol"],
             read_only("Symbol context"),
         ),
         mcp_tool(
             "diff",
             "Changed symbols vs a git ref (incl. uncommitted/untracked)",
-            json!({"ref": s("git ref to compare against (default HEAD)")}),
+            json!({"ref": s("git ref to compare against (default HEAD)"), "impact": {"type": "boolean", "description": "include bounded caller/test evidence and old/new signatures"}, "budget": {"type": "integer", "minimum": 0, "description": "approximate token budget for impact mode (default 3000)"}}),
             &[],
             read_only("Changed symbols"),
         ),
@@ -154,8 +161,8 @@ fn all_tools() -> Vec<serde_json::Value> {
         ),
         mcp_tool(
             "tests",
-            "Which tests exercise a symbol (loud when none do)",
-            json!({"symbol": s("symbol name")}),
+            "Static test-reference evidence, not execution coverage; optionally follow bounded indirect relationships",
+            json!({"symbol": s("symbol name"), "depth": {"type": "integer", "minimum": 0, "description": "relationship depth (default 1: direct references)"}, "explain": {"type": "boolean", "description": "include evidence paths and uncertainty in text"}}),
             &["symbol"],
             read_only("Tests for symbol"),
         ),
@@ -287,6 +294,18 @@ fn mcp_call(
             })?;
             (o, b, n.to_string())
         }
+        "search" => {
+            let query = sarg("query")?;
+            let (out, baseline) = cmd_search(
+                conn,
+                root,
+                query,
+                uint("limit", defaults::SEARCH_LIMIT),
+                opt("path"),
+                false,
+            )?;
+            (out, baseline, query.to_string())
+        }
         "show" => {
             // CLI parity: batch several symbols (comma-separated) + --context
             let sym = sarg("symbol")?;
@@ -372,7 +391,12 @@ fn mcp_call(
         }
         "context" => {
             let sym = sarg("symbol")?;
-            let (o, b) = cmd_context(
+            let render = if flag("edit") {
+                cmd_context_edit
+            } else {
+                cmd_context
+            };
+            let (o, b) = render(
                 root,
                 conn,
                 sym,
@@ -384,7 +408,11 @@ fn mcp_call(
         }
         "diff" => {
             let r = opt("ref").unwrap_or("HEAD");
-            let (o, b) = cmd_diff(root, conn, r, false)?;
+            let (o, b) = if flag("impact") {
+                cmd_diff_impact(root, conn, r, uint("budget", defaults::DIFF_BUDGET), false)?
+            } else {
+                cmd_diff(root, conn, r, false)?
+            };
             (o, b, r.to_string())
         }
         "edit" => {
@@ -517,7 +545,14 @@ fn mcp_call(
         }
         "tests" => {
             let sym = sarg("symbol")?;
-            let (o, b) = cmd_tests(root, conn, sym, false)?;
+            let (o, b) = cmd_tests_options(
+                root,
+                conn,
+                sym,
+                uint("depth", defaults::TESTS_DEPTH),
+                flag("explain"),
+                false,
+            )?;
             (o, b, sym.to_string())
         }
         "note" => {

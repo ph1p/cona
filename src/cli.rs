@@ -131,6 +131,17 @@ pub struct FindArgs {
 }
 
 #[derive(clap::Args)]
+pub struct SearchArgs {
+    /// Describe behavior using words or identifiers (lexical, not semantic)
+    pub query: String,
+    #[arg(long, default_value_t = defaults::SEARCH_LIMIT)]
+    pub limit: usize,
+    /// Only symbols in files under this path (file, directory, or prefix)
+    #[arg(long)]
+    pub path: Option<String>,
+}
+
+#[derive(clap::Args)]
 pub struct ShowArgs {
     /// One or more symbol names — each printed in turn. A file path prints
     /// that file's outline instead; `file:40-80` or `file:40` prints those lines.
@@ -178,12 +189,15 @@ pub struct RefsArgs {
 pub struct ContextArgs {
     /// Symbol (Name or Parent.Name)
     pub symbol: String,
-    /// Token budget for the calls/called-by sections (the source is always printed in full)
+    /// Approximate token budget: relationship sections, or whole pack with --edit
     #[arg(long, default_value_t = defaults::CONTEXT_BUDGET)]
     pub budget: i64,
     /// Hide test call sites, so production callers aren't crowded out
     #[arg(long)]
     pub no_tests: bool,
+    /// Editing context: budget the whole pack, including selected dependencies
+    #[arg(long)]
+    pub edit: bool,
 }
 
 #[derive(clap::Args)]
@@ -191,6 +205,12 @@ pub struct DiffArgs {
     /// Git ref to compare against
     #[arg(default_value = "HEAD")]
     pub r#ref: String,
+    /// Include bounded caller/test evidence and old/new signatures
+    #[arg(long)]
+    pub impact: bool,
+    /// Approximate token budget for the impact review pack
+    #[arg(long, requires = "impact", default_value_t = defaults::DIFF_BUDGET)]
+    pub budget: usize,
 }
 
 #[derive(clap::Args)]
@@ -294,6 +314,12 @@ pub struct EntriesArgs {
 #[derive(clap::Args)]
 pub struct TestsArgs {
     pub symbol: String,
+    /// Static relationship depth (1 = direct references only)
+    #[arg(long, default_value_t = defaults::TESTS_DEPTH)]
+    pub depth: usize,
+    /// Include relationship paths and uncertainty in text output
+    #[arg(long)]
+    pub explain: bool,
 }
 
 #[derive(clap::Args)]
@@ -595,6 +621,8 @@ pub enum Nav {
     Outline(OutlineArgs),
     /// Find symbols by name (exact match first, then substring)
     Find(FindArgs),
+    /// Discover implementations by words in names, signatures, docs and bodies
+    Search(SearchArgs),
     /// Print the source code of one or more symbols (Name or Parent.Name)
     Show(ShowArgs),
     /// Find references (identifier occurrences) across indexed files
@@ -721,7 +749,7 @@ pub enum Maint {
 #[derive(Subcommand)]
 pub enum Cmd {
     // ── Canonical, grouped commands (shown in --help) ──
-    /// Navigate: locate & read symbols (tree, outline, find, show, refs, grep)
+    /// Navigate: locate & read symbols (tree, outline, find, search, show, refs, grep)
     #[command(subcommand)]
     Nav(Nav),
     /// Inspect: relationships, impact, deps, tests (context, diff, callers, …)
@@ -747,6 +775,8 @@ pub enum Cmd {
     Outline(OutlineArgs),
     #[command(hide = true)]
     Find(FindArgs),
+    #[command(hide = true)]
+    Search(SearchArgs),
     #[command(hide = true)]
     Show(ShowArgs),
     #[command(hide = true)]

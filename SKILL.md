@@ -35,11 +35,12 @@ Everything below is reference — reach for it when the four above don't cover t
 - `cona outline <file>` — every symbol in a file with exact line ranges
 - `cona find <Name>` — locate a symbol: kind, file:start-end, signature
 - `cona find <Name> --kind fn --json` — filtered / machine-readable
+- `cona search "retry timeout" [--path src] [--limit 10] [--json]` — discover an unknown implementation by lexical matches in split identifiers, signatures, documentation and bodies. Returns reasons, bounded evidence and reusable `file:qualified_name` selectors (`file:start-end` for ambiguous same-file identities). Scores are ranking weights, not semantic confidence; inspect with `show`/`context` before editing. Indexed symbols only, no synonym understanding or dependency search. Hard cap 100 plus an output-size bound; blank queries return no results, stopwords are ignored unless the whole query is an exact symbol name. MCP: call `more`, then refresh `tools/list` to discover `search`
 - `cona show <Sym> [<Sym2> …] [--context 3] [--kind struct] [--sig] [--all]` — print ONLY those symbols' source (numbered lines); pass several names to read them in one call; `--kind` resolves struct/impl same-name ambiguity; `--sig` prints just the signature line (no body — leanest peek, reads nothing off disk); `--all` prints EVERY definition of an ambiguous name instead of erroring — use it when you'd otherwise re-run with a disambiguator just to see which one you want. `cona show <file>` outlines that file; `cona show <file>:40-80` (or `<file>:40`) prints just those numbered lines — the `sed -n` replacement
 - `<Sym>` anywhere = `Name`, `Parent.Name` (methods), or `file.rs:Name` (same-named top-level symbols in different files — the shape ambiguity errors print; a `file:Name` the file only imports errors with where `Name` is defined)
 - `cona refs <Name>… [-l|-c]` — all call/usage sites as file:line (semantic: identifier nodes only, string/comment mentions don't match); test-file sites fold into one count line — `--tests` lists them. Several names = one labeled block each; `-l` = files only, `-c` = `file:count`
 - `cona grep <pattern> [PATH…] [-i] [--regex] [--limit 50] [-l|-c]` — search over code files only (`-l` = matching files only, `-c` = `file:count`); each hit shows its enclosing symbol (`file:line (in Class.method): …`) so you can jump straight to `show`. **Literal by default** — `foo.bar` matches that text, not "any char"; pass `--regex` (`-e`) for a real regular expression (Rust regex syntax). An invalid regex is an error, never a silent literal search. A literal search with zero hits whose pattern reads as a regex (`\bx\b`, `a.*b`, `a|b`) is retried once as a regex, and a `note:` line says so. Add `--include-deps` to also search dependency trees (`node_modules`, `vendor`, `target`, `.venv`) — they are never indexed, so this is the only way to read a library's source; hits there carry no symbol label unless the file parses
-- `--path <dir-or-file>` scopes `find`/`refs`/`grep` (and `tree`) to a subtree — the fix for a name with 100+ hits repo-wide. A filter naming a real directory matches only inside it; a partial name (`src/comm`) prefix-matches
+- `--path <dir-or-file>` scopes `find`/`search`/`refs`/`grep` (and `tree`) to a subtree — the fix for a name with 100+ hits repo-wide. A filter naming a real directory matches only inside it; a partial name (`src/comm`) prefix-matches
 - `cona diff [ref]` — changed SYMBOLS instead of changed lines (default vs HEAD, includes uncommitted + untracked); review a branch via `cona diff main` then `show` the touched functions
 - `cona context <Sym> [--budget 3000] [--no-tests]` — ONE context pack: the symbol's source + signatures of what it calls + where it's called from. Use this instead of chaining show + refs + more shows when working on a function. The source is always printed in full; --budget bounds only the calls/called-by sections. Callees whose name matches several definitions are marked `·ambiguous`. `--no-tests` drops test callers (heavily-tested symbols otherwise fill the caller list with test fns); the hidden count is reported
 - `cona edit <Class.method> --file new.txt` — replace a symbol's body; syntax-verified, rolls back on parse errors. Or pipe: `cat new.txt | cona edit Foo.bar`
@@ -52,7 +53,7 @@ Everything below is reference — reach for it when the four above don't cover t
 - `cona deps [path]` — file-level import graph over indexed files + most-imported + cycle warnings — the architecture view
 - `cona callers <Sym> [--depth 2]` / `cona callees <Sym>` — transitive call tree up/down. Callee edges follow only real CALL sites (local vars/types never fabricate edges); shared names flagged ·ambiguous
 - `cona path <A> <B>` — shortest call chain from A to B ("how does the request reach the DB?")
-- `cona tests <Sym>` — which tests exercise a symbol; says loudly when NOTHING does
+- `cona tests <Sym> [--depth 2] [--explain]` — candidate tests from static references (default depth 1); indirect paths are bounded and uncertain edges are labeled. These are not execution-coverage results; no match does not mean untested
 - `cona blame <Sym>` — git history of exactly that symbol's lines (who, when, why)
 - `cona hot [--since '6 months ago']` — churn hotspots among indexed files
 - `cona coupling <file>` — files that historically change together with this one (hidden dependencies)
@@ -66,13 +67,25 @@ Everything below is reference — reach for it when the four above don't cover t
 2. write replacement, then `cona edit X --file repl.txt`
 3. edit re-verifies syntax and re-indexes automatically
 
+For a richer editing pack, opt in with `cona context X --edit --budget 3000`.
+Unlike default context, its budget includes the whole rendered pack: target,
+selected referenced definitions/helpers, caller excerpts and static test evidence.
+Large bodies are omitted explicitly with a `show` selector, never sliced silently.
+Extremely small budgets return an error when even the omission notice cannot fit.
+Budgets estimate tokens from serialized bytes, not a model tokenizer.
+
+For a whole change, use `cona diff HEAD --impact --budget 3000`. This opt-in
+report adds old/new definition evidence, candidate callers and relevant tests.
+Name-based impact is not a runtime failure or a proof of coverage; additions and
+deletions are not inferred renames. Default context and diff remain unchanged.
+
 ## Rules
 - **Wanting one symbol means `show`, not Read.** `find`/`show` reach one function for a fraction of a whole-file read. This is not a preference to weigh against habit — a full Read of an indexed file you only needed one function from is a mistake, at any file size.
 - **A file already in context is never re-read.** Pasted, `@`-mentioned or Read earlier in the session — the bytes are spent; `show`/`context` the symbol instead.
 - Prefer qualified names (`UserService.login`) to disambiguate.
 - Use `--json` when you need to parse output programmatically.
 - Line numbers in the index can go stale after manual edits — `cona index` refreshes in ms (or install git hooks: `cona hooks install`).
-- `--json` works on find, outline, show, tree, refs, grep, diff, context, stats, entries, tests, blame, hot, coupling, callers, callees, path, shape, deps, check, impact.
+- `--json` works on find, search, outline, show, tree, refs, grep, diff, context, stats, entries, tests, blame, hot, coupling, callers, callees, path, shape, deps, check, impact.
 - Orientation in an unknown repo: `entries` → `tree --rank` → `deps` → `hot`. Before editing: `context`/`shape` + `tests` + `blame`. When you learn something the code does not say (an invariant, a gotcha, why it is this way), `cona note <Sym> <text…>` it before you finish — the next session gets it in its start context and in show/context.
 - `cona setup` = index + git hooks + agent integration in one shot.
 - `cona stats` (per-project + global: savings, top targets, recent) shows how many tokens you've saved.

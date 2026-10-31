@@ -81,6 +81,7 @@ cona edit open_project_db --file new.rs   # replace it, syntax-verified
 | Command                   | Does                                                           |
 | ------------------------- | -------------------------------------------------------------- |
 | `cona find <Name>`        | Locate a symbol: file, line range, signature                   |
+| `cona search "<behavior>"` | Rank lexical matches in names, signatures, docs and bodies   |
 | `cona grep <text>`        | Code-only search, hits labeled by symbol (`--regex` for regex) |
 | `cona refs <Name>`        | Every usage site; skips strings and comments, folds test sites |
 | `cona diff [ref]`         | Changed _symbols_ vs a git ref; a good start for reviews       |
@@ -94,7 +95,7 @@ cona edit open_project_db --file new.rs   # replace it, syntax-verified
 
 Handy flags:
 
-- `--path <dir>` scopes `find`/`refs`/`grep`/`tree`/`show` to a subtree.
+- `--path <dir>` scopes `find`/`search`/`refs`/`grep`/`tree`/`show` to a subtree.
 - `show <Sym> --all` prints every definition of an ambiguous name.
 - A symbol can be written as `Name`, `Parent.Name` or `file.rs:Name`.
 - `grep --include-deps` also searches `node_modules`/`vendor`/… (not indexed).
@@ -103,6 +104,59 @@ Handy flags:
 Full reference: `cona --help`, or one group at a time with
 `cona nav|inspect|code|history|project|maint --help`. Every command also works
 without its group (`cona show Foo` = `cona nav show Foo`).
+
+### Discover an implementation without its name
+
+```sh
+cona search "refuse write syntax errors" --path src --limit 5
+cona nav search "retry timeout" --json
+# Follow a returned file-qualified selector:
+cona show src/commands/mutate.rs:write_verified
+```
+
+`search` splits identifiers and ranks lexical evidence from names, signatures,
+documentation and bodies. It returns reasons, a short numbered excerpt and a
+reusable `file:qualified_name` selector, or `file:start-end` when a same-file
+identity is ambiguous (for example, overloaded functions). Exact names rank
+strongly; ties are stable.
+The default is 10 results (hard cap 100, with an additional output-size bound);
+`--limit 0` returns no rows. JSON includes
+`lexical: true`, `truncated`, and `results`; scores are ranking weights, **not
+confidence**. Blank queries return no matches; stopwords are ignored unless the
+entire query is an exact symbol name.
+
+Search reads indexed symbol-bearing files, not dependency trees or arbitrary
+unindexed prose. It does not understand synonyms or prove semantic identity:
+inspect the evidence with `show` or `context` before editing. For a known name use
+`find`; for exact text use `grep`. MCP clients discover `search` after calling
+`more` and refreshing `tools/list`.
+
+### Investigation and review
+
+```sh
+cona tests src/service.rs:process --depth 3 --explain
+cona context src/service.rs:process --edit --budget 3000
+cona diff HEAD --impact --budget 3000
+```
+
+`tests` selects candidate tests through static name-based references, not proven
+execution coverage. Depth defaults to one (direct references), is bounded at
+eight, and indirect paths can contain explicitly ambiguous relationships. No
+static match does not mean untested; cona never runs tests or guesses a test
+runner's selection syntax.
+
+`context --edit` is opt-in. It selects referenced definitions, small helpers,
+caller excerpts and test evidence under a whole-output estimated budget. The
+default context still prints the target in full and budgets only its related
+sections. Editing mode instead explicitly omits bodies that cannot fit and
+provides a reusable `show` selector. A budget too small for even that notice is
+an error, not a silently truncated success.
+
+`diff --impact` adds old/new definition evidence, candidate impacted callers and
+test evidence across changed symbols. It retains module-level changes and
+deletions rather than guessing rename identity. Impact is a static review aid,
+not a list of runtime failures. The opt-in budget includes rendered output;
+omission notices disclose incomplete reports. Both modes support `--json`.
 
 ## Install
 
@@ -205,7 +259,7 @@ To add it by hand:
 { "mcpServers": { "cona": { "type": "stdio", "command": "cona", "args": ["mcp"] } } }
 ```
 
-The server lists 8 core tools plus a `more` tool that unlocks 13 advanced ones,
+The server lists 8 core tools plus a `more` tool that unlocks 14 advanced ones,
 which keeps the per-turn schema cost low (~1.8k tokens, mostly cached). The
 benchmark above used MCP alone; where hooks are available they add the read
 redirect on top.

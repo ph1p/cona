@@ -3,3 +3,5 @@ mod cli;
 mod langs;
 mod mcp;
 mod plugin;
+mod search;
+mod workflow_freshness;

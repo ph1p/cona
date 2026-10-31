@@ -203,6 +203,32 @@ impl Graph {
         out
     }
 
+    /// Reverse reference adjacency, built once for bounded evidence traversals.
+    /// Includes callbacks/types, not only calls. Ambiguity is retained after
+    /// the shared scope policy; no semantic subprocesses or source scans.
+    pub fn reverse_references(&self) -> Vec<Vec<(usize, i64, bool)>> {
+        let mut reverse = vec![Vec::new(); self.syms.len()];
+        for (name, uses) in &self.uses {
+            let Some(defs) = self.by_name.get(name) else {
+                continue;
+            };
+            for &(caller, line) in uses {
+                let candidates = self.prefer_scope(caller, defs.clone(), None);
+                let ambiguous = candidates.len() > 1;
+                for target in candidates {
+                    if target != caller {
+                        reverse[target].push((caller, line, ambiguous));
+                    }
+                }
+            }
+        }
+        for edges in &mut reverse {
+            edges.sort_unstable();
+            edges.dedup_by_key(|e| e.0);
+        }
+        reverse
+    }
+
     /// Direct callees of sym `idx` that resolve to indexed defs: (name, defs,
     /// line). Several defs after scope narrowing = ambiguous.
     pub fn callees_of(&self, idx: usize) -> Vec<(String, Vec<usize>, i64)> {

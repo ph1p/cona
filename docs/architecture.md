@@ -66,6 +66,23 @@ src/commands/    cmd_* implementations, split by concern:
                           (`regexish_literal`, shell-quoted). BRE `a\|b` whose
                           branches carry other escapes compiles as a regex
                           (`\.x\|\by`), else stays literal branches
+                          context --edit is separate from the unchanged default
+                          renderer. Atomic bodies, selected types/constants and
+                          small helpers, representative reference excerpts and
+                          shared depth-2 test evidence pay for their entire
+                          serialized envelope. Selection caps: 96 identifiers,
+                          16 dependency blocks, 8 caller excerpts. Byte/4 is
+                          an estimate, not a tokenizer; below the minimum
+                          omission + show-selector envelope is an error.
+                          diff --impact similarly leaves default diff alone:
+                          resolves one Git revision, maps both old/new hunks
+                          against parsed sources, pairs only unique same-file
+                          qualified names/kinds, retains explicit deletions and
+                          module changes. One shared depth-2 selector/graph
+                          serves at most 32 targets and 100 callers/tests.
+                          Whole-output budgeting removes atomic evidence rows
+                          with an omission flag. No inferred rename identity or
+                          claim that an impacted name represents a failure.
                  mutate.rs edit / edit --range / insert (--before/--after <Sym>
                           OR --at <file> <line>, incl. new/empty file) / note /
                           rename. write_verified = THE shared syntax-verify +
@@ -73,6 +90,23 @@ src/commands/    cmd_* implementations, split by concern:
                  insight.rs entries/tests/shape/deps/check/impact (check =
                           syntax_errors as command; impact = refs+callers+tests+
                           blame in ONE pack)
+                 test_selection.rs shared typed static test evidence for
+                          tests/context --edit/diff --impact. Depth 1 retains
+                          direct identifier references; opt-in depths build one
+                          graph and reverse adjacency, then breadth-first walk
+                          in memory with cycle protection. Depth is capped at
+                          8. Every returned path is evidence of a name-based
+                          relationship, not execution coverage. Deleted-name
+                          lookup marks initial edges ambiguous. Batch consumers
+                          reuse TestSelector rather than rebuilding per node.
+                          refresh_candidate_files is the shared pre-selection
+                          freshness gate for tests, editing context and graphs:
+                          refresh every indexed candidate before counting or
+                          narrowing names, prune confirmed missing files only
+                          when writable, and refuse any remaining stale data.
+                          Read-only queries must error rather than combine live
+                          references with stale symbol identities. Fresh queries
+                          pay a metadata sweep, not a full parse or tree walk.
                  history.rs blame/hot/coupling
                  callgraph.rs callers/callees/path + build_graph
                  stats.rs, mcp_server.rs (mcp_tools/mcp_call/cmd_mcp)
@@ -183,6 +217,21 @@ src/deps.rs      extract_imports (line-based, fail-open; multi-line Rust use,
                  deps ──". mutual_pairs = cycle signal
 src/entries.rs   Pure heuristics for entries/tests: entry_class (main/api/test),
                  is_test_path/is_test_symbol (all-language conventions)
+src/search.rs    Pure lexical behavior ranking: Unicode alphanumeric tokens split
+                 snake/camel/acronym boundaries; query stopwords removed except
+                 whole-query exact names. Presence weights name/signature/docs/
+                 body = 80/30/20/10, distinct-term coverage bonus 200 each +
+                 500 for all terms, exact-name bonus 100000. No term frequency,
+                 stemming, synonyms or semantic identity. Query terms cap at32.
+                 query/search.rs reads indexed files once each after freshness
+                 checks, assigns nested body lines to the smallest symbol span,
+                 and reads up to24 contiguous leading comment lines as docs
+                 (heuristic). Stable ties use file/start/qualified/end. Ranking
+                 scans scoped indexed source, not a persistent full-text index;
+                 cost scales with source bytes and overlapping symbol spans.
+                 Excerpts/signatures/reasons cap at240 characters, results at100
+                 plus a conservative512KB aggregate display-size guard. Selectors
+                 are never truncated. CLI default10 is shared with disclosed MCP.
 src/fuzzy.rs     fuzzy_score — fallback ranking for find when exact+LIKE empty
 src/diffmap.rs   Pure, tested diff helpers for diff: parse_unified (git hunks →
                  line ranges), overlaps, has_uncovered (keep container when its

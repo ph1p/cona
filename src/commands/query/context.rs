@@ -297,3 +297,345 @@ pub fn cmd_context(
     let out = bo.finish("… truncated (raise --budget)\n");
     Ok((out, baseline))
 }
+
+/// Editing context is opt-in: unlike `cmd_context`, the complete serialized
+/// answer is budgeted (UTF-8 bytes / 4, an estimate, not a tokenizer).
+/// Code blocks are atomic. A budget below the smallest actionable omission
+/// returns an error rather than silently exceeding the requested budget.
+pub fn cmd_context_edit(
+    root: &Path,
+    conn: &Connection,
+    symbol: &str,
+    budget: i64,
+    no_tests: bool,
+    json: bool,
+) -> Result<(String, i64)> {
+    // Refresh the complete candidate set before narrowing names, including
+    // when test selection is disabled. Bodies alone cannot establish identity.
+    crate::commands::refresh_candidate_files(root, conn)?;
+    let (path, start, end, qualified) = locate_fresh(root, conn, symbol, None)?;
+    let source = std::fs::read_to_string(root.join(&path))?;
+    let mut target = EditItem {
+        role: "target".into(),
+        file: path.clone(),
+        symbol: qualified.clone(),
+        start,
+        end,
+        ambiguous: false,
+        signature: None,
+        code: None,
+        excerpt: None,
+    };
+    let selector = format!("{path}:{qualified}");
+    let mut pack = EditPack {
+        show: selector.clone(),
+        target: target.clone(),
+        related: Vec::new(),
+        tests: Vec::new(),
+        notes: Vec::new(),
+        body_omitted: true,
+        omitted: true,
+        evidence: if no_tests {
+            "Name-based selection, not execution coverage; tests excluded; related context is bounded."
+        } else {
+            "Name-based selection, not execution coverage; no match does not mean untested. Related context is bounded."
+        },
+    };
+    let minimal = pack.render(json)?;
+    anyhow::ensure!(
+        db::est_tokens(minimal.len()) <= budget,
+        "target body omitted; use `cona show {selector}`; editing context needs at least --budget {} (byte/4 estimate)",
+        db::est_tokens(minimal.len())
+    );
+
+    let body = edit_body(&source, start, end);
+    target.code = body;
+    pack.target = target;
+    pack.body_omitted = pack.target.code.is_none();
+    if db::est_tokens(pack.render(json)?.len()) > budget {
+        pack.target.code = None;
+        pack.body_omitted = true;
+    }
+    // Notes and every related block pay for their headings/JSON envelope too.
+    for (_, note, _) in db::notes_for(conn, &qualified).unwrap_or_default() {
+        pack.notes.push(note);
+        if db::est_tokens(pack.render(json)?.len()) > budget {
+            pack.notes.pop();
+        }
+    }
+
+    let mut related = edit_dependencies(root, conn, &path, &qualified, start, end, &source)?;
+    let name = db::name_tail(&qualified);
+    let mut seen_callers = HashSet::new();
+    scan_ref_sites(
+        root,
+        conn,
+        name,
+        Some((&path, &source)),
+        None,
+        |file, line, enclosing, _, src| {
+            if (file == path && line >= start && line <= end)
+                || enclosing.is_empty()
+                || entries::is_test_symbol(enclosing)
+                || entries::is_test_path(file)
+                || !seen_callers.insert((file.to_string(), enclosing.to_string()))
+            {
+                return true;
+            }
+            // A representative reference line is explicitly an excerpt, never
+            // presented as the caller's complete body or a proven call edge.
+            related.push(EditItem {
+                role: "caller reference excerpt".into(),
+                file: file.into(),
+                symbol: enclosing.into(),
+                start: line,
+                end: line,
+                ambiguous: true,
+                signature: None,
+                code: None,
+                excerpt: src
+                    .lines()
+                    .nth(line.saturating_sub(1) as usize)
+                    .map(str::to_string),
+            });
+            seen_callers.len() < 8
+        },
+    )?;
+
+    let mut seen = HashSet::from([(path.clone(), qualified)]);
+    let mut files = HashSet::from([path]);
+    for item in related {
+        if !seen.insert((item.file.clone(), item.symbol.clone())) {
+            continue;
+        }
+        pack.related.push(item);
+        if db::est_tokens(pack.render(json)?.len()) > budget {
+            pack.related.pop();
+        } else if let Some(item) = pack.related.last() {
+            files.insert(item.file.clone());
+        }
+    }
+    if !no_tests {
+        let selection = crate::commands::test_selection::select_tests(root, conn, symbol, 2)?;
+        for evidence in selection.tests {
+            files.insert(evidence.file.clone());
+            pack.tests.push(evidence);
+            if db::est_tokens(pack.render(json)?.len()) > budget {
+                pack.tests.pop();
+            }
+        }
+    }
+    let mut bytes = 0usize;
+    for file in files {
+        bytes += std::fs::metadata(root.join(file))
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+    }
+    Ok((pack.render(json)?, db::est_tokens(bytes)))
+}
+
+#[derive(Clone, serde::Serialize)]
+struct EditItem {
+    role: String,
+    file: String,
+    symbol: String,
+    start: i64,
+    end: i64,
+    ambiguous: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    excerpt: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct EditPack {
+    show: String,
+    target: EditItem,
+    related: Vec<EditItem>,
+    tests: Vec<crate::commands::test_selection::TestEvidence>,
+    notes: Vec<String>,
+    body_omitted: bool,
+    omitted: bool,
+    evidence: &'static str,
+}
+
+impl EditPack {
+    fn render(&self, json: bool) -> Result<String> {
+        if json {
+            return Ok(format!("{}\n", serde_json::to_string(self)?));
+        }
+        let mut out = format!("Editing context (byte/4 estimate)\n{}\n", self.evidence);
+        if self.body_omitted {
+            out.push_str(&format!("Target body omitted; cona show {}\n", self.show));
+        }
+        for item in std::iter::once(&self.target).chain(&self.related) {
+            out.push_str(&format!(
+                "── {}: {} {}:{}-{}{} ──\n",
+                item.role,
+                item.symbol,
+                item.file,
+                item.start,
+                item.end,
+                if item.ambiguous { " ·ambiguous" } else { "" }
+            ));
+            if let Some(signature) = &item.signature {
+                out.push_str(signature);
+                out.push('\n');
+            }
+            if let Some(code) = &item.code {
+                out.push_str(code);
+                out.push('\n');
+            }
+            if let Some(excerpt) = &item.excerpt {
+                out.push_str(&format!("Reference excerpt: {excerpt}\n"));
+            }
+        }
+        for note in &self.notes {
+            out.push_str(&format!("Note: {note}\n"));
+        }
+        for test in &self.tests {
+            out.push_str(&format!(
+                "── test evidence: {} {}:{} (depth {}){} ──\n",
+                test.enclosing,
+                test.file,
+                test.line,
+                test.depth,
+                if test.ambiguous { " ·ambiguous" } else { "" }
+            ));
+            for edge in &test.path {
+                out.push_str(&format!(
+                    "  {} → {} {}:{}{}\n",
+                    edge.from,
+                    edge.to,
+                    edge.file,
+                    edge.line,
+                    if edge.ambiguous { " ·ambiguous" } else { "" }
+                ));
+            }
+        }
+        if self.omitted {
+            out.push_str("Related context may be omitted; raise --budget or use refs/tests.\n");
+        }
+        Ok(out)
+    }
+}
+
+fn edit_body(source: &str, start: i64, end: i64) -> Option<String> {
+    let lines: Vec<_> = source.lines().collect();
+    if start < 1 || end < start || end as usize > lines.len() {
+        return None;
+    }
+    Some(lines[start as usize - 1..end as usize].join("\n"))
+}
+
+fn edit_dependencies(
+    root: &Path,
+    conn: &Connection,
+    path: &str,
+    qualified: &str,
+    start: i64,
+    end: i64,
+    source: &str,
+) -> Result<Vec<EditItem>> {
+    let mut names = HashSet::new();
+    let mut result = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT s.kind, s.qualified, f.path, s.start_line, s.end_line, s.signature
+         FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE s.name = ?1 ORDER BY f.path, s.start_line LIMIT 7",
+    )?;
+    for (name, line, call, argc) in
+        lang::ident_occurrences_failopen(lang::detect_lang(path), source)
+    {
+        if line < start as usize || line > end as usize || !names.insert((name.clone(), call)) {
+            continue;
+        }
+        if names.len() > 96 {
+            break;
+        }
+        let rows = stmt
+            .query_map([&name], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let capped = rows.len() > 6;
+        let rows = graph::narrow_by_scope(
+            graph::scope_parent(qualified),
+            path,
+            if call { argc } else { None },
+            rows,
+            |(_, q, p, _, _, sig)| graph::Candidate {
+                scope: graph::scope_parent(q).map(str::to_string),
+                file: p.clone(),
+                params: lang::param_count(sig),
+                is_method: lang::first_param_is_receiver(sig),
+            },
+        );
+        let ambiguous = capped || rows.len() > 1;
+        for (kind, q, file, _, _, _) in rows.into_iter().take(2) {
+            if (file == path && q == qualified)
+                || !(call
+                    || lang::TYPE_KINDS.contains(&kind.as_str())
+                    || matches!(kind.as_str(), "const" | "constant" | "static"))
+            {
+                continue;
+            }
+            // Never trust indexed ranges for a dependency body. Missing or
+            // ambiguous definitions fail open: retain the rest of the pack.
+            let Ok((file, s, e, q)) = locate_fresh(root, conn, &format!("{file}:{q}"), Some(&kind))
+            else {
+                continue;
+            };
+            if file == path && s <= end && e >= start {
+                continue; // the target already contains this nested definition
+            }
+            let code = if e - s < 12 {
+                std::fs::read_to_string(root.join(&file))
+                    .ok()
+                    .and_then(|src| edit_body(&src, s, e))
+            } else {
+                None
+            };
+            let signature = if code.is_none() {
+                conn.query_row(
+                    "SELECT s.signature FROM symbols s JOIN files f ON f.id=s.file_id
+                     WHERE f.path=?1 AND s.qualified=?2 AND s.start_line=?3",
+                    rusqlite::params![file, q, s],
+                    |r| r.get(0),
+                )
+                .ok()
+            } else {
+                None
+            };
+            result.push(EditItem {
+                role: if call { "helper" } else { "type/constant" }.into(),
+                file,
+                symbol: q,
+                start: s,
+                end: e,
+                ambiguous,
+                signature,
+                code,
+                excerpt: None,
+            });
+            if result.len() >= 16 {
+                return Ok(result);
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+#[path = "context_tests.rs"]
+mod edit_tests;

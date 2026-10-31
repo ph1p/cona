@@ -1,8 +1,6 @@
 //! Structure insight commands: entries, tests, shape, deps.
 
-use super::{
-    jout, locate_fresh, render_symbol_body, scan_ref_sites, BudgetOut, ENCLOSING_SYMBOL_SQL,
-};
+use super::{jout, locate_fresh, render_symbol_body, BudgetOut, ENCLOSING_SYMBOL_SQL};
 use crate::{db, deps, entries, indexer, lang};
 use anyhow::Result;
 use rusqlite::Connection;
@@ -143,66 +141,67 @@ pub fn cmd_tests(
     symbol: &str,
     json: bool,
 ) -> Result<(String, i64)> {
-    // resolve first (invariant 4): a typo errors with candidates instead of
-    // silently reporting "no references at all"
-    let (def_path, def_s, def_e, q) = locate_fresh(root, conn, symbol, None)?;
-    let name = db::name_tail(&q).to_string();
-    let mut test_hits: Vec<(String, i64, String)> = Vec::new(); // file, line, enclosing
-    let mut other_refs = 0usize;
-    let mut bytes = 0usize;
-    let mut seen: HashSet<(String, String)> = HashSet::new();
-    let mut counted_files: HashSet<String> = HashSet::new();
-    scan_ref_sites(root, conn, &name, None, None, |rel, ln, encl, _, fsrc| {
-        if counted_files.insert(rel.to_string()) {
-            bytes += fsrc.len();
-        }
-        // skip the definition itself by LOCATION — matching the name would also
-        // swallow recursive calls and same-named symbols elsewhere
-        if rel == def_path && ln >= def_s && ln <= def_e && db::name_tail(encl) == name {
-            return true;
-        }
-        if entries::is_test_path(rel) || entries::is_test_symbol(encl) {
-            if seen.insert((rel.to_string(), encl.to_string())) {
-                test_hits.push((rel.to_string(), ln, encl.to_string()));
-            }
-        } else {
-            other_refs += 1;
-        }
-        true
-    })?;
-    let baseline = db::est_tokens(bytes);
+    cmd_tests_options(root, conn, symbol, 1, false, json)
+}
+
+pub fn cmd_tests_options(
+    root: &Path,
+    conn: &Connection,
+    symbol: &str,
+    depth: usize,
+    explain: bool,
+    json: bool,
+) -> Result<(String, i64)> {
+    let selection = super::test_selection::select_tests(root, conn, symbol, depth)?;
+    let baseline = selection.baseline;
     if json {
-        let obj = serde_json::json!({
-            "symbol": name,
-            "tests": test_hits.iter().map(|(f, l, e)| serde_json::json!({"file": f, "line": l, "in": e})).collect::<Vec<_>>(),
-            "non_test_refs": other_refs,
-        });
-        return jout(&obj, baseline);
+        return jout(&selection, baseline);
     }
-    let mut out = String::new();
-    if test_hits.is_empty() {
-        if other_refs == 0 {
-            out.push_str(&format!(
-                "'{name}' has no references at all (unused or dynamic-only)\n"
-            ));
-        } else {
-            out.push_str(&format!(
-                "NO tests reference '{name}' — {other_refs} non-test reference(s) exist. Untested.\n"
-            ));
-        }
-    } else {
+    let mut out = format!(
+        "test references for '{}' ({}, depth {}):\n",
+        selection.symbol,
+        selection.tests.len(),
+        selection.depth
+    );
+    if selection.tests.is_empty() {
         out.push_str(&format!(
-            "tests exercising '{name}' ({}):\n",
-            test_hits.len()
+            "  No static test matches; {} non-test reference(s).\n",
+            selection.non_test_refs
         ));
-        for (f, l, e) in &test_hits {
-            if e.is_empty() {
-                out.push_str(&format!("  {f}:{l}\n"));
+    }
+    for evidence in &selection.tests {
+        let relation = if evidence.depth == 1 {
+            "direct reference"
+        } else {
+            "indirect reference"
+        };
+        out.push_str(&format!(
+            "  {}  {}:{}  [{relation}, depth {}{}]\n",
+            evidence.enclosing,
+            evidence.file,
+            evidence.line,
+            evidence.depth,
+            if evidence.ambiguous {
+                ", ambiguous"
             } else {
-                out.push_str(&format!("  {e}  {f}:{l}\n"));
+                ""
+            }
+        ));
+        if explain {
+            for edge in evidence.path.iter().rev() {
+                out.push_str(&format!(
+                    "    {} -> {} at {}:{}{}\n",
+                    edge.from,
+                    edge.to,
+                    edge.file,
+                    edge.line,
+                    if edge.ambiguous { " ·ambiguous" } else { "" }
+                ));
             }
         }
     }
+    out.push_str(selection.note);
+    out.push('\n');
     Ok((out, baseline))
 }
 

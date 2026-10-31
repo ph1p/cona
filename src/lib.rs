@@ -14,4 +14,5 @@ pub mod install;
 pub mod lang;
 pub mod mcp;
 pub mod resolve;
+pub mod search;
 pub mod ui;

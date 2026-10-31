@@ -1,8 +1,8 @@
 //! Call-graph commands: callers/callees (cmd_calls) and path.
 
-use super::{jout, locate_symbol};
-use crate::{db, graph, indexer, lang, resolve};
-use anyhow::{bail, Result};
+use super::{jout, locate_symbol, refresh_candidate_files};
+use crate::{db, graph, lang, resolve};
+use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -72,15 +72,15 @@ fn resolve_callee(
 
 /// Build the in-memory call graph from every indexed file. Stale files are
 /// reindexed first (invariant 2).
-fn build_graph(root: &Path, conn: &Connection) -> Result<(graph::Graph, HashMap<String, i64>)> {
+pub(crate) fn build_graph(
+    root: &Path,
+    conn: &Connection,
+) -> Result<(graph::Graph, HashMap<String, i64>)> {
+    refresh_candidate_files(root, conn)?;
     let mut stmt = conn.prepare("SELECT path, size FROM files ORDER BY path")?;
     let files: Vec<(String, i64)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .flatten()
-        .collect();
-    for (rel, _) in &files {
-        indexer::ensure_fresh(root, conn, rel);
-    }
+        .collect::<rusqlite::Result<_>>()?;
     let mut sym_stmt = conn.prepare(
         "SELECT s.name, s.qualified, s.kind, s.start_line, s.end_line, s.signature
          FROM symbols s JOIN files f ON f.id = s.file_id WHERE f.path = ?1 ORDER BY s.start_line",
@@ -88,9 +88,8 @@ fn build_graph(root: &Path, conn: &Connection) -> Result<(graph::Graph, HashMap<
     let mut sizes: HashMap<String, i64> = HashMap::new();
     let mut input: Vec<(String, Option<&str>, String, Vec<graph::SymNode>)> = Vec::new();
     for (rel, size) in files {
-        let Ok(src) = std::fs::read_to_string(root.join(&rel)) else {
-            continue;
-        };
+        let src = std::fs::read_to_string(root.join(&rel))
+            .with_context(|| format!("cannot read {rel} while building a fresh graph"))?;
         let syms: Vec<graph::SymNode> = sym_stmt
             .query_map([&rel], |r| {
                 let sig: String = r.get(5)?;
@@ -105,8 +104,7 @@ fn build_graph(root: &Path, conn: &Connection) -> Result<(graph::Graph, HashMap<
                     recv: lang::first_param_is_receiver(&sig),
                 })
             })?
-            .flatten()
-            .collect();
+            .collect::<rusqlite::Result<_>>()?;
         sizes.insert(rel.clone(), size);
         input.push((rel.clone(), lang::detect_lang(&rel), src, syms));
     }

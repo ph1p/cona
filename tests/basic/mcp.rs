@@ -125,6 +125,7 @@ fn mcp_stdio_handshake_and_tools_list() {
         "deps",
         "shape",
         "entries",
+        "search",
         "tests",
         "note",
     ] {
@@ -170,6 +171,7 @@ fn mcp_stdio_handshake_and_tools_list() {
         from_list.unwrap_or_else(from_more)["annotations"].clone()
     };
     assert_eq!(ann("show")["readOnlyHint"], true);
+    assert_eq!(ann("search")["readOnlyHint"], true);
     assert_eq!(ann("edit")["readOnlyHint"], false);
     assert_eq!(ann("edit")["destructiveHint"], true);
     assert_eq!(ann("insert")["destructiveHint"], false);
@@ -220,4 +222,90 @@ fn every_mcp_tool_schema_is_well_formed() {
             }
         }
     }
+}
+
+#[test]
+fn workflow_options_are_discoverable_in_their_existing_tiers() {
+    let core = cona::commands::mcp_server::mcp_tools(false);
+    let expanded = cona::commands::mcp_server::mcp_tools(true);
+    assert!(!core.iter().any(|t| t["name"] == "search"));
+    for (name, options) in [
+        ("search", &["query", "path", "limit"][..]),
+        ("tests", &["symbol", "depth", "explain"][..]),
+        ("context", &["symbol", "edit", "budget", "no_tests"][..]),
+        ("diff", &["ref", "impact", "budget"][..]),
+    ] {
+        let tool = expanded.iter().find(|t| t["name"] == name).unwrap();
+        for option in options {
+            assert!(
+                tool["inputSchema"]["properties"][option].is_object(),
+                "{name}.{option} missing from expanded tools/list"
+            );
+        }
+    }
+}
+
+#[test]
+fn disclosed_search_dispatch_matches_cli_options() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let root = std::env::temp_dir().join(format!("cona-mcp-search-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("engine.rs"),
+        "fn reconcile() { let _ = \"retry timeout\"; }\nfn distractor() {}\n",
+    )
+    .unwrap();
+    let data = root.join(".cona-data");
+    let cli = Command::new(env!("CARGO_BIN_EXE_cona"))
+        .args([
+            "search",
+            "retry timeout",
+            "--path",
+            "engine.rs",
+            "--limit",
+            "1",
+        ])
+        .env("CONA_DATA_DIR", &data)
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(cli.status.success(), "{:?}", cli.stderr);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cona"))
+        .arg("mcp")
+        .env("CONA_DATA_DIR", &data)
+        .current_dir(&root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for message in [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"more","arguments":{}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search","arguments":{"query":"retry timeout","path":"engine.rs","limit":1}}}),
+    ] {
+        writeln!(stdin, "{message}").unwrap();
+    }
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let messages: Vec<serde_json::Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let listed = messages.iter().find(|m| m["id"] == 3).unwrap();
+    assert!(listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "search"));
+    let result = messages.iter().find(|m| m["id"] == 4).unwrap();
+    assert_eq!(
+        result["result"]["content"][0]["text"].as_str().unwrap(),
+        String::from_utf8(cli.stdout).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }

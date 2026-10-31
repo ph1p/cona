@@ -136,3 +136,412 @@ pub fn cmd_diff(root: &Path, conn: &Connection, gitref: &str, json: bool) -> Res
     }
     Ok((out, baseline))
 }
+
+/// Opt-in changed-code review. The legacy renderer above deliberately remains
+/// independent: its output and defaults are a compatibility surface.
+pub fn cmd_diff_impact(
+    root: &Path,
+    conn: &Connection,
+    gitref: &str,
+    budget: usize,
+    json: bool,
+) -> Result<(String, i64)> {
+    // Resolve once: every old blob and hunk must describe the same revision.
+    let revision = gitmap::run_git(
+        root,
+        &["rev-parse", "--verify", &format!("{gitref}^{{commit}}")],
+    )?;
+    let revision = revision.trim();
+    let names = gitmap::run_git(
+        root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            revision,
+            "--",
+        ],
+    )?;
+    let untracked = gitmap::run_git(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let paths: std::collections::BTreeSet<_> = names
+        .split('\0')
+        .chain(untracked.split('\0'))
+        .filter(|p| !p.is_empty() && lang::detect_lang(p).is_some())
+        .collect();
+    let mut changes = Vec::new();
+    let mut bytes = 0;
+    for path in paths {
+        indexer::ensure_fresh(root, conn, path);
+        let old = gitmap::run_git(root, &["show", &format!("{revision}:{path}")]).ok();
+        let new = match std::fs::read_to_string(root.join(path)) {
+            Ok(source) => Some(source),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        bytes += old.as_ref().map_or(0, String::len) + new.as_ref().map_or(0, String::len);
+        let patch = gitmap::run_git(
+            root,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--unified=0",
+                revision,
+                "--",
+                path,
+            ],
+        )?;
+        let (old_ranges, new_ranges) = impact_ranges(&patch);
+        collect_changes(
+            path,
+            old.as_deref(),
+            new.as_deref(),
+            &old_ranges,
+            &new_ranges,
+            &mut changes,
+        )?;
+    }
+    let report = assemble_impact(root, conn, changes)?;
+    Ok((render_impact(&report, budget, json)?, db::est_tokens(bytes)))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ChangedDefinition {
+    file: String,
+    symbol: Option<String>,
+    status: &'static str,
+    old_signature: Option<String>,
+    new_signature: Option<String>,
+    old_start: Option<usize>,
+    new_start: Option<usize>,
+    /// Needed for deleted definitions, which have no current graph node.
+    #[serde(skip)]
+    name: Option<String>,
+}
+
+type LineRanges = Vec<(i64, i64)>;
+
+/// Unlike the default mapper, keep empty-side hunks empty. Anchoring a deletion
+/// on the next definition would falsely claim that unrelated definition changed.
+fn impact_ranges(patch: &str) -> (LineRanges, LineRanges) {
+    let mut old = Vec::new();
+    let mut new = Vec::new();
+    for line in patch.lines().filter_map(|s| s.strip_prefix("@@ ")) {
+        for (prefix, ranges) in [('-', &mut old), ('+', &mut new)] {
+            if let Some(token) = line.split_whitespace().find_map(|s| s.strip_prefix(prefix)) {
+                let (start, count) = token.split_once(',').unwrap_or((token, "1"));
+                if let (Ok(start), Ok(count)) = (start.parse::<i64>(), count.parse::<i64>()) {
+                    if count > 0 {
+                        ranges.push((start, start + count - 1));
+                    }
+                }
+            }
+        }
+    }
+    (old, new)
+}
+
+fn collect_changes(
+    path: &str,
+    old: Option<&str>,
+    new: Option<&str>,
+    old_ranges: &[(i64, i64)],
+    new_ranges: &[(i64, i64)],
+    out: &mut Vec<ChangedDefinition>,
+) -> Result<()> {
+    let language = lang::detect_lang(path).expect("filtered language");
+    let before = old
+        .map(|s| lang::extract_symbols(language, s))
+        .transpose()?
+        .unwrap_or_default();
+    let after = new
+        .map(|s| lang::extract_symbols(language, s))
+        .transpose()?
+        .unwrap_or_default();
+    let touched = |s: &lang::Sym, ranges: &[(i64, i64)], whole: bool| {
+        whole || diffmap::overlaps(s.start_line as i64, s.end_line as i64, ranges)
+    };
+    let mut paired = HashSet::new();
+    for previous in &before {
+        // A qualified name is only paired when unique on BOTH sides. No
+        // rename/move inference, and overloads remain explicit delete/add rows.
+        let candidates: Vec<_> = after
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.qualified == previous.qualified && s.kind == previous.kind)
+            .collect();
+        let unique_old = before
+            .iter()
+            .filter(|s| s.qualified == previous.qualified && s.kind == previous.kind)
+            .count()
+            == 1;
+        let current = if unique_old && candidates.len() == 1 {
+            Some(candidates[0])
+        } else {
+            None
+        };
+        if let Some((index, current)) = current {
+            paired.insert(index);
+            if touched(previous, old_ranges, new.is_none())
+                || touched(current, new_ranges, old.is_none())
+            {
+                out.push(definition_change(path, Some(previous), Some(current)));
+            }
+        } else if touched(previous, old_ranges, new.is_none()) {
+            out.push(definition_change(path, Some(previous), None));
+        }
+    }
+    for (index, current) in after.iter().enumerate() {
+        if !paired.contains(&index) && touched(current, new_ranges, old.is_none()) {
+            out.push(definition_change(path, None, Some(current)));
+        }
+    }
+    let outside =
+        |source: Option<&str>, symbols: &[lang::Sym], ranges: &[(i64, i64)], whole: bool| {
+            let covers: Vec<_> = symbols
+                .iter()
+                .map(|s| (s.start_line as i64, s.end_line as i64))
+                .collect();
+            source.is_some_and(|s| {
+                let all = [(1, s.lines().count() as i64)];
+                diffmap::has_uncovered(
+                    1,
+                    s.lines().count() as i64,
+                    if whole { &all } else { ranges },
+                    &covers,
+                )
+            })
+        };
+    if outside(old, &before, old_ranges, new.is_none())
+        || outside(new, &after, new_ranges, old.is_none())
+        || (before.is_empty() && after.is_empty())
+    {
+        out.push(ChangedDefinition {
+            file: path.into(),
+            symbol: None,
+            status: "outside_symbols",
+            old_signature: None,
+            new_signature: None,
+            old_start: None,
+            new_start: None,
+            name: None,
+        });
+    }
+    Ok(())
+}
+
+fn definition_change(
+    path: &str,
+    old: Option<&lang::Sym>,
+    new: Option<&lang::Sym>,
+) -> ChangedDefinition {
+    let symbol = new.or(old).expect("one side of a change");
+    ChangedDefinition {
+        file: path.into(),
+        symbol: Some(symbol.qualified.clone()),
+        status: match (old, new) {
+            (None, _) => "added",
+            (_, None) => "deleted",
+            _ => "modified",
+        },
+        old_signature: old.map(|s| s.signature.clone()),
+        new_signature: new.map(|s| s.signature.clone()),
+        old_start: old.map(|s| s.start_line),
+        new_start: new.map(|s| s.start_line),
+        name: Some(symbol.name.clone()),
+    }
+}
+
+const IMPACT_NOTE: &str = "Static name-based impact, not actual failures or execution coverage; no match does not mean untested. Relationships: depth 2, at most 32 changed targets and 100 callers/tests. Renames/moves are not inferred.";
+
+#[derive(serde::Serialize)]
+struct ImpactReport {
+    note: &'static str,
+    changes: Vec<ChangedDefinition>,
+    callers: Vec<ImpactCaller>,
+    tests: Vec<serde_json::Value>,
+    omitted: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ImpactCaller {
+    file: String,
+    line: i64,
+    symbol: String,
+    selector: String,
+    changed_symbols: Vec<String>,
+    uncertain: bool,
+}
+
+fn assemble_impact(
+    root: &Path,
+    conn: &Connection,
+    changes: Vec<ChangedDefinition>,
+) -> Result<ImpactReport> {
+    use crate::commands::test_selection::TestSelector;
+    use std::collections::BTreeMap;
+    if changes.is_empty() {
+        return Ok(ImpactReport {
+            note: IMPACT_NOTE,
+            changes,
+            callers: Vec::new(),
+            tests: Vec::new(),
+            omitted: false,
+        });
+    }
+    let selection = TestSelector::new(root, conn, 2)?;
+    let graph = selection.graph().expect("depth two constructs a graph");
+    let mut callers: BTreeMap<(String, String), ImpactCaller> = BTreeMap::new();
+    let mut tests = BTreeMap::new();
+    let mut omitted = false;
+    let mut seen_targets = HashSet::new();
+    for change in &changes {
+        let Some(name) = &change.name else { continue };
+        let target = format!(
+            "{}:{}",
+            change.file,
+            change.symbol.as_deref().unwrap_or(name)
+        );
+        if !seen_targets.insert(target.clone()) {
+            continue;
+        }
+        if seen_targets.len() > 32 {
+            omitted = true;
+            continue;
+        }
+        for (id, line) in graph.callers_of(name, &HashSet::new()) {
+            let node = &graph.syms[id];
+            let key = (node.file.clone(), node.qualified.clone());
+            if !callers.contains_key(&key) && callers.len() >= 100 {
+                omitted = true;
+                continue;
+            }
+            let row = callers.entry(key).or_insert_with(|| ImpactCaller {
+                file: node.file.clone(),
+                line,
+                symbol: node.qualified.clone(),
+                selector: format!("{}:{}", node.file, node.qualified),
+                changed_symbols: Vec::new(),
+                uncertain: true,
+            });
+            if !row.changed_symbols.contains(&target) {
+                row.changed_symbols.push(target.clone());
+            }
+        }
+        let evidence = if change.new_start.is_some() {
+            selection
+                .select(&target)
+                .or_else(|_| selection.select_name(name))?
+        } else {
+            selection.select_name(name)?
+        };
+        for test in evidence.tests {
+            let key = (test.file.clone(), test.enclosing.clone());
+            if !tests.contains_key(&key) && tests.len() >= 100 {
+                omitted = true;
+                continue;
+            }
+            let path = serde_json::to_value(&test.path)?;
+            let ambiguous = test.ambiguous || test.path.iter().any(|edge| edge.ambiguous);
+            let row = tests.entry(key).or_insert(serde_json::to_value(test)?);
+            let object = row.as_object_mut().expect("serialized test evidence");
+            let ambiguous = ambiguous
+                || object
+                    .get("ambiguous")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+            object.insert("ambiguous".into(), ambiguous.into());
+            let targets = object
+                .entry("changed_symbols")
+                .or_insert_with(|| serde_json::json!([]));
+            let targets = targets.as_array_mut().expect("target array");
+            if !targets.iter().any(|value| value.as_str() == Some(&target)) {
+                targets.push(target.clone().into());
+                object
+                    .entry("supporting_paths")
+                    .or_insert_with(|| serde_json::json!([]))
+                    .as_array_mut()
+                    .expect("supporting paths array")
+                    .push(serde_json::json!({"changed_symbol": target, "path": path}));
+            }
+        }
+    }
+    Ok(ImpactReport {
+        note: IMPACT_NOTE,
+        changes,
+        callers: callers.into_values().collect(),
+        tests: tests.into_values().collect(),
+        omitted,
+    })
+}
+
+/// Budget the actual serialized representation, not just source bodies. Rows
+/// are atomic: signatures and evidence paths are never silently clipped.
+fn render_impact(report: &ImpactReport, budget: usize, json: bool) -> Result<String> {
+    let mut value = serde_json::to_value(report)?;
+    loop {
+        let output = if json {
+            format!("{}\n", serde_json::to_string(&value)?)
+        } else {
+            impact_text(&value)
+        };
+        if db::est_tokens(output.len()) as usize <= budget {
+            return Ok(output);
+        }
+        value["omitted"] = true.into();
+        // Preserve changed definitions before secondary relationship evidence.
+        let removed = ["tests", "callers", "changes"].into_iter().any(|key| {
+            value[key]
+                .as_array_mut()
+                .is_some_and(|rows| rows.pop().is_some())
+        });
+        if !removed {
+            anyhow::bail!(
+                "--budget too small for diff impact metadata; increase --budget (whole-output estimate, not tokenizer-exact)"
+            );
+        }
+    }
+}
+
+fn impact_text(value: &serde_json::Value) -> String {
+    let mut output = format!("{}\n", IMPACT_NOTE);
+    for row in value["changes"].as_array().into_iter().flatten() {
+        let file = row["file"].as_str().unwrap_or("");
+        let status = row["status"].as_str().unwrap_or("");
+        if let Some(symbol) = row["symbol"].as_str() {
+            output.push_str(&format!("{file}:{symbol} ({status})\n"));
+            for (key, label) in [("old_signature", "old"), ("new_signature", "new")] {
+                if let Some(signature) = row[key].as_str() {
+                    output.push_str(&format!("  {label}: {signature}\n"));
+                }
+            }
+        } else {
+            output.push_str(&format!(
+                "{file} (changes outside indexed symbols / module-level)\n"
+            ));
+        }
+    }
+    for row in value["callers"].as_array().into_iter().flatten() {
+        output.push_str(&format!(
+            "caller? {}:{} {} <- {}\n",
+            row["file"].as_str().unwrap_or(""),
+            row["line"],
+            row["symbol"].as_str().unwrap_or(""),
+            row["changed_symbols"]
+        ));
+    }
+    for row in value["tests"].as_array().into_iter().flatten() {
+        output.push_str(&format!("test reference (not coverage): {}\n", row));
+    }
+    if value["omitted"] == true {
+        output.push_str("Evidence omitted (budget or relationship limits); increase --budget or inspect individual symbols.\n");
+    }
+    output
+}
+
+#[cfg(test)]
+#[path = "diff_tests.rs"]
+mod impact_tests;
