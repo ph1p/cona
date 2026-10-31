@@ -187,6 +187,35 @@ fn untouched() {}
 }
 
 #[test]
+fn repeated_helpers_prefer_unique_file_without_losing_ambiguous_paths() {
+    let f = Fixture::new(&[
+        (
+            "a.rs",
+            "fn target() {}\nfn helper() { target(); }\nfn test_local() { helper(); }\n",
+        ),
+        ("b.rs", "fn helper() {}\nfn test_wrong() { helper(); }\n"),
+        ("tests.rs", "fn test_uncertain() { helper(); }\n"),
+    ]);
+    let selection = select_tests(&f.root, &f.conn, "target", 2).unwrap();
+    assert_eq!(selection.tests.len(), 2, "{selection:?}");
+    let local = selection
+        .tests
+        .iter()
+        .find(|t| t.enclosing == "test_local")
+        .unwrap();
+    assert_eq!(local.depth, 2);
+    assert!(!local.ambiguous);
+    let uncertain = selection
+        .tests
+        .iter()
+        .find(|t| t.enclosing == "test_uncertain")
+        .unwrap();
+    assert_eq!(uncertain.depth, 2);
+    assert!(uncertain.ambiguous);
+    assert!(uncertain.path[1].ambiguous);
+}
+
+#[test]
 fn ambiguous_paths_and_deleted_name_are_explicit() {
     let f = Fixture::new(&[
         ("a.rs", "fn helper() {\n target();\n}\nfn target() {}\n"),

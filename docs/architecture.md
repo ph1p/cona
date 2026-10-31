@@ -219,7 +219,15 @@ src/graph.rs     In-memory call graph (one pass over all files): callers_of/
                  count == declared param count; methods minus implicit receiver,
                  first_param_is_receiver in lang/mod.rs) — each rule fires ONLY on
                  exactly one survivor, never guessing among equals. Signals in
-                 struct Candidate; arg count via call_node_of/arg_count_of
+                 struct Candidate; first_unique is the shared ordered policy.
+                 Reverse references summarize parent/file/directory groups once
+                 per name's ORIGINAL definition pool, borrowing snapshot keys.
+                 Unique winners avoid per-use candidate scans/clones; failed
+                 rules still consult the full pool, and unresolved ambiguity
+                 retains every eligible edge. Summaries live only during one
+                 reverse adjacency build, never across queries. Arity is unknown
+                 for reverse references; callee pools keep generic narrowing.
+                 Arg count via call_node_of/arg_count_of
                  (lang/idents.rs), param count via param_count. Callee EDGES only from
                  call positions (fn call/method call/macro) — locals create no
                  false edges. `uses` (caller side) keeps ALL occurrences (types,
