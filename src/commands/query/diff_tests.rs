@@ -77,6 +77,204 @@ impl Drop for Repository {
 }
 
 #[test]
+fn impact_collector_preserves_ordered_definition_pairing_contract() {
+    // Explicit serialized rows pin pairing AND source order independently of
+    // the production lookup structure. Update these if the identity rule changes.
+    let row = |file: &str,
+               symbol: Option<&str>,
+               status: &str,
+               old: Option<(usize, &str)>,
+               new: Option<(usize, &str)>| {
+        serde_json::json!({
+            "file": file, "symbol": symbol, "status": status,
+            "old_signature": old.map(|(_, signature)| signature),
+            "new_signature": new.map(|(_, signature)| signature),
+            "old_start": old.map(|(start, _)| start),
+            "new_start": new.map(|(start, _)| start),
+        })
+    };
+    let cpp = |symbol, status, old, new| row("x.cpp", Some(symbol), status, old, new);
+    let cases = [
+        (
+            "unique pairs, reordered new definitions, additions and deletions",
+            "x.cpp",
+            Some("void z() {}\nvoid removed() {}\nvoid a() {}\n"),
+            Some("void added() {}\nvoid a(int x) {}\nvoid z() {}\nvoid last() {}\n"),
+            vec![(1, 3)],
+            vec![(1, 4)],
+            vec![
+                cpp(
+                    "z",
+                    "modified",
+                    Some((1, "void z() {}")),
+                    Some((3, "void z() {}")),
+                ),
+                cpp("removed", "deleted", Some((2, "void removed() {}")), None),
+                cpp(
+                    "a",
+                    "modified",
+                    Some((3, "void a() {}")),
+                    Some((2, "void a(int x) {}")),
+                ),
+                cpp("added", "added", None, Some((1, "void added() {}"))),
+                cpp("last", "added", None, Some((4, "void last() {}"))),
+            ],
+        ),
+        (
+            "kind changes never pair",
+            "x.rs",
+            Some("fn Item() {}\n"),
+            Some("struct Item {}\n"),
+            vec![(1, 1)],
+            vec![(1, 1)],
+            vec![
+                row(
+                    "x.rs",
+                    Some("Item"),
+                    "deleted",
+                    Some((1, "fn Item() {}")),
+                    None,
+                ),
+                row(
+                    "x.rs",
+                    Some("Item"),
+                    "added",
+                    None,
+                    Some((1, "struct Item {}")),
+                ),
+            ],
+        ),
+        (
+            "same qualified name with distinct kinds pairs independently",
+            "x.rs",
+            Some("struct Item {}\nfn Item() {}\n"),
+            Some("fn Item(x: i32) {}\nstruct Item {}\n"),
+            vec![(1, 2)],
+            vec![(1, 2)],
+            vec![
+                row(
+                    "x.rs",
+                    Some("Item"),
+                    "modified",
+                    Some((1, "struct Item {}")),
+                    Some((2, "struct Item {}")),
+                ),
+                row(
+                    "x.rs",
+                    Some("Item"),
+                    "modified",
+                    Some((2, "fn Item() {}")),
+                    Some((1, "fn Item(x: i32) {}")),
+                ),
+            ],
+        ),
+        (
+            "one old definition and multiple new definitions",
+            "x.cpp",
+            Some("void run() {}\n"),
+            Some("void run() {}\nvoid run(int x) {}\n"),
+            vec![(1, 1)],
+            vec![(1, 2)],
+            vec![
+                cpp("run", "deleted", Some((1, "void run() {}")), None),
+                cpp("run", "added", None, Some((1, "void run() {}"))),
+                cpp("run", "added", None, Some((2, "void run(int x) {}"))),
+            ],
+        ),
+        (
+            "multiple old definitions and one new definition",
+            "x.cpp",
+            Some("void run() {}\nvoid run(int x) {}\n"),
+            Some("void run() {}\n"),
+            vec![(1, 2)],
+            vec![(1, 1)],
+            vec![
+                cpp("run", "deleted", Some((1, "void run() {}")), None),
+                cpp("run", "deleted", Some((2, "void run(int x) {}")), None),
+                cpp("run", "added", None, Some((1, "void run() {}"))),
+            ],
+        ),
+        (
+            "unchanged overload neighbors remain untouched",
+            "x.cpp",
+            Some("void run() {}\nvoid run(int x) {}\n"),
+            Some("void run() { int changed = 1; }\nvoid run(int x) {}\n"),
+            vec![(1, 1)],
+            vec![(1, 1)],
+            vec![
+                cpp("run", "deleted", Some((1, "void run() {}")), None),
+                cpp(
+                    "run",
+                    "added",
+                    None,
+                    Some((1, "void run() { int changed = 1; }")),
+                ),
+            ],
+        ),
+        (
+            "whole-file addition",
+            "x.cpp",
+            None,
+            Some("void z() {}\nvoid a() {}\n"),
+            vec![],
+            vec![],
+            vec![
+                cpp("z", "added", None, Some((1, "void z() {}"))),
+                cpp("a", "added", None, Some((2, "void a() {}"))),
+            ],
+        ),
+        (
+            "whole-file deletion",
+            "x.cpp",
+            Some("void z() {}\nvoid a() {}\n"),
+            None,
+            vec![],
+            vec![],
+            vec![
+                cpp("z", "deleted", Some((1, "void z() {}")), None),
+                cpp("a", "deleted", Some((2, "void a() {}")), None),
+            ],
+        ),
+        (
+            "module header and a changed definition",
+            "x.rs",
+            Some("use old::Thing;\nfn z() {}\n"),
+            Some("use new::Thing;\nfn z(x: i32) {}\n"),
+            vec![(1, 2)],
+            vec![(1, 2)],
+            vec![
+                row(
+                    "x.rs",
+                    Some("z"),
+                    "modified",
+                    Some((2, "fn z() {}")),
+                    Some((2, "fn z(x: i32) {}")),
+                ),
+                row("x.rs", None, "outside_symbols", None, None),
+            ],
+        ),
+        (
+            "no-symbol files retain module evidence",
+            "x.rs",
+            Some("// old\n"),
+            Some("// new\n"),
+            vec![(1, 1)],
+            vec![(1, 1)],
+            vec![row("x.rs", None, "outside_symbols", None, None)],
+        ),
+    ];
+    for (label, path, old, new, old_ranges, new_ranges, expected) in cases {
+        let mut actual = Vec::new();
+        collect_changes(path, old, new, &old_ranges, &new_ranges, &mut actual).unwrap();
+        assert_eq!(
+            serde_json::to_string(&actual).unwrap(),
+            serde_json::to_string(&expected).unwrap(),
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn impact_keeps_overloaded_rows_while_aggregating_changed_targets() {
     let repo = Repository::new();
     let old = "void a() {}\nvoid b() {}\n\

@@ -4,7 +4,7 @@ use crate::commands::jout;
 use crate::{db, diffmap, gitmap, indexer, lang};
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Maps `git diff --unified=0` new-side ranges onto the (fresh) symbol index
@@ -264,25 +264,29 @@ fn collect_changes(
     let touched = |s: &lang::Sym, ranges: &[(i64, i64)], whole: bool| {
         whole || diffmap::overlaps(s.start_line as i64, s.end_line as i64, ranges)
     };
+    let mut old_counts = HashMap::new();
+    for symbol in &before {
+        *old_counts
+            .entry((symbol.qualified.as_str(), symbol.kind))
+            .or_insert(0usize) += 1;
+    }
+    let mut new_matches = HashMap::new();
+    for (index, symbol) in after.iter().enumerate() {
+        let (count, _) = new_matches
+            .entry((symbol.qualified.as_str(), symbol.kind))
+            .or_insert((0usize, index));
+        *count += 1;
+    }
     let mut paired = HashSet::new();
     for previous in &before {
         // A qualified name is only paired when unique on BOTH sides. No
         // rename/move inference, and overloads remain explicit delete/add rows.
-        let candidates: Vec<_> = after
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.qualified == previous.qualified && s.kind == previous.kind)
-            .collect();
-        let unique_old = before
-            .iter()
-            .filter(|s| s.qualified == previous.qualified && s.kind == previous.kind)
-            .count()
-            == 1;
-        let current = if unique_old && candidates.len() == 1 {
-            Some(candidates[0])
-        } else {
-            None
-        };
+        // Maps only provide lookups; both output walks retain source order.
+        let key = (previous.qualified.as_str(), previous.kind);
+        let current = new_matches
+            .get(&key)
+            .filter(|(count, _)| *count == 1 && old_counts[&key] == 1)
+            .map(|(_, index)| (*index, &after[*index]));
         if let Some((index, current)) = current {
             paired.insert(index);
             if touched(previous, old_ranges, new.is_none())
