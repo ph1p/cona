@@ -249,8 +249,15 @@ src/search.rs    Pure lexical behavior ranking: Unicode alphanumeric tokens spli
                  query/search.rs reads indexed files once each after freshness
                  checks, assigns nested body lines to the smallest symbol span,
                  and reads up to24 contiguous leading comment lines as docs
-                 (heuristic). Stable ties use file/start/qualified/end. Ranking
-                 scans scoped indexed source, not a persistent full-text index;
+                 (heuristic). Stable ties use file/start/qualified/end, then
+                 encounter order for identical keys. A worst-first heap retains
+                 only limit.min(100) hits; selectors/excerpt evidence are built
+                 only for candidates entering that prefix. File line lengths
+                 are shared by retained hits plus the active scanned file and
+                 freed when its last hit is displaced; savings still merge the
+                 final displayed sites per file. Limit0 retains nothing but
+                 still scans/refreshes and reports whether any match existed.
+                 Ranking scans scoped indexed source, not a persistent full-text index;
                  cost scales with source bytes and overlapping symbol spans.
                  Excerpts/signatures/reasons cap at240 characters, results at100
                  plus a conservative512KB aggregate display-size guard. Selectors
