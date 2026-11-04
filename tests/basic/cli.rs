@@ -798,8 +798,13 @@ fn hook_lets_single_file_grep_through_even_before_the_file_exists() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/lib.rs"), "pub fn locate_fresh() {}\n").unwrap();
     // macOS temp is behind a symlink (/var -> /private/var); a harness cwd is
-    // getcwd()-canonical, so hand the hook the same form `index` hashed
-    let dir = dir.canonicalize().unwrap();
+    // getcwd()-canonical, so hand the hook the same form `index` hashed.
+    // Not on Windows: canonicalize yields a `\\?\` verbatim path there.
+    let dir = if cfg!(windows) {
+        dir
+    } else {
+        dir.canonicalize().unwrap()
+    };
     let bin = env!("CARGO_BIN_EXE_cona");
     let data = dir.join(".cona-data");
     // the hook only redirects inside a project root (a `.git`)
