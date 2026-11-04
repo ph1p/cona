@@ -81,9 +81,13 @@ pub fn cmd_show(
             if auto_all {
                 out.push_str(&format!(
                     "· '{symbol}' is ambiguous — showing all {} (narrow with \
-                     Parent.Name, file.rs:Name, or --kind)\n",
+                     Parent.Name, file.rs:Name, or --kind):\n",
                     cands.len()
                 ));
+                // where each one lives, before the bodies push it off-screen
+                for c in &cands {
+                    out.push_str(&format!("  {}:{}-{}  {}\n", c.0, c.1, c.2, c.3));
+                }
             }
             let mut baseline = 0;
             for c in &cands {

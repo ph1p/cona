@@ -3,6 +3,7 @@
 //! lives in this module root.
 
 pub mod callgraph;
+mod dead;
 mod discover;
 pub mod history;
 pub mod insight;
@@ -14,6 +15,7 @@ pub mod stats;
 pub mod test_selection;
 
 pub use callgraph::*;
+pub use dead::cmd_dead;
 pub use discover::cmd_discover;
 pub use history::*;
 pub use insight::*;
@@ -312,6 +314,7 @@ pub mod defaults {
     pub const CALLS_DEPTH: usize = 2;
     pub const SHAPE_BUDGET: i64 = 2000;
     pub const ENTRIES_LIMIT: usize = 40;
+    pub const DEAD_LIMIT: usize = 60;
     pub const BLAME_LIMIT: usize = 10;
     pub const HOT_LIMIT: usize = 20;
     pub const COUPLING_LIMIT: usize = 15;

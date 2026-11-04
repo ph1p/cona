@@ -144,6 +144,14 @@ src/commands/    cmd_* implementations, split by concern:
                           with tool_result; shell lines classified per segment
                           via hook::classify_command; full reads of callable
                           files priced against outline + median symbol span)
+                 dead.rs `dead` (candidates = callable/type kinds minus tests,
+                          generated files, main/test entries, implicit hooks
+                          (dunder, override/@objc/#[test]…), methods of trait
+                          impls/protocol extensions; uses = ident_counts_members
+                          over EVERY indexed file minus that file's own defs,
+                          + Rust `{NAME}` format args; split prod vs tests.
+                          Name-based → errs alive; bash skipped (calls are
+                          `word` nodes). CLI-only — no MCP schema cost)
 src/lang/        Language detection + tree-sitter symbol extraction: mod.rs
                  (detect_lang/language_for/parse/extract_symbols), classify.rs
                  (node-kind table), names.rs (naming heuristics), walk.rs
@@ -247,7 +255,9 @@ src/deps.rs      extract_imports (line-based, fail-open; multi-line Rust use,
                  importing file, local module names filtered → "── external
                  deps ──". mutual_pairs = cycle signal
 src/entries.rs   Pure heuristics for entries/tests: entry_class (main/api/test),
-                 is_test_path/is_test_symbol (all-language conventions)
+                 is_test_path/is_test_symbol (all-language conventions),
+                 is_generated_path (codegen/minified/lockfiles — grep folds
+                 them into a `note:`, dead skips them)
 src/search.rs    Pure lexical behavior ranking: Unicode alphanumeric tokens split
                  snake/camel/acronym boundaries; query stopwords removed except
                  whole-query exact names. Presence weights name/signature/docs/

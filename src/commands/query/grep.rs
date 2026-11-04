@@ -6,7 +6,7 @@
 use crate::commands::{
     defaults, jout, shell_quote, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL, LIMIT_TRAILER,
 };
-use crate::{db, indexer};
+use crate::{db, entries, indexer};
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
 use std::collections::HashSet;
@@ -81,7 +81,7 @@ pub fn cmd_grep(
             }
         }
     }
-    let note = if fell_back && !json {
+    let mut note = if fell_back && !json {
         format!(
             "note: no literal match — searched '{}' as a regex (literal is the default; --regex skips this)\n",
             matcher.source(pattern)
@@ -89,6 +89,24 @@ pub fn cmd_grep(
     } else {
         String::new()
     };
+    // Codegen/lockfile hits bury hand-written ones (`routeTree.gen.ts` lists
+    // every route). Fold them into one line — but only when something else
+    // matched, so a search that only generated code answers still answers.
+    if !include_deps && files.iter().any(|f| !entries::is_generated_path(f)) {
+        let (generated, kept): (Vec<String>, Vec<String>) = files
+            .into_iter()
+            .partition(|f| entries::is_generated_path(f));
+        files = kept;
+        if !generated.is_empty() && !json {
+            let shown: Vec<&str> = generated.iter().take(3).map(String::as_str).collect();
+            let more = if generated.len() > 3 { ", …" } else { "" };
+            note.push_str(&format!(
+                "note: skipped {} generated file(s): {}{more} — --path <file> searches one\n",
+                generated.len(),
+                shown.join(", ")
+            ));
+        }
+    }
     if files_only || count {
         let (out, saved) = grep_files(root, conn, pattern, &matcher, files, opts, json)?;
         return Ok((note + &out, saved));

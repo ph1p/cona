@@ -72,6 +72,14 @@ pub fn cmd_find(
         }
     }
     if rows.is_empty() {
+        // `find openai-oauth` names a FILE (kebab stem), not a symbol: point
+        // at matching files before the fuzzy symbol guess. Skipped under
+        // --kind, which asks for a symbol kind no file has.
+        if kind.is_none() {
+            if let Some(found) = find_files(conn, name, &pf, limit, json)? {
+                return Ok(found);
+            }
+        }
         return cmd_find_fuzzy(conn, name, kind, json);
     }
     let truncated = clip(&mut rows, limit);
@@ -96,6 +104,57 @@ pub fn cmd_find(
         out.push_str(LIMIT_TRAILER);
     }
     Ok((out, baseline))
+}
+
+/// Path fallback when no symbol name matches: files whose path contains
+/// `name`, with `-`/`_` interchangeable (LIKE's `_` matches any one char, so
+/// `mcp-server` finds `mcp_server.rs` and `mcp-server.ts` alike) and ASCII case
+/// ignored. Basename hits rank before directory hits. `None` = no file either.
+fn find_files(
+    conn: &Connection,
+    name: &str,
+    pf: &PathFilter,
+    limit: usize,
+    json: bool,
+) -> Result<Option<(String, i64)>> {
+    let needle = name.trim_matches('/');
+    if needle.len() < 3 || needle.contains(['%', '\\']) {
+        return Ok(None);
+    }
+    let like = format!("%{}%", needle.replace('-', "_"));
+    let mut stmt = conn.prepare(
+        "SELECT f.path, (SELECT count(*) FROM symbols s WHERE s.file_id = f.id)
+         FROM files f WHERE f.path LIKE ?1 ORDER BY length(f.path), f.path",
+    )?;
+    let mut rows: Vec<(String, i64)> = stmt
+        .query_map([&like], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .flatten()
+        .filter(|(p, _): &(String, i64)| pf.ok(p))
+        .collect();
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let norm = |s: &str| s.to_ascii_lowercase().replace('-', "_");
+    let key = norm(needle);
+    // stable: keeps the length order within each group
+    rows.sort_by_key(|(p, _)| !norm(p.rsplit('/').next().unwrap_or(p)).contains(&key));
+    let truncated = clip(&mut rows, limit);
+    if json {
+        let items: Vec<_> = rows
+            .iter()
+            .map(|(p, n)| serde_json::json!({"file": p, "kind": "file", "symbols": n}))
+            .collect();
+        return jout(&items, 0).map(Some);
+    }
+    let mut out = format!("no symbol '{name}' — files matching:\n");
+    for (p, n) in &rows {
+        out.push_str(&format!("file {p}  ({n} symbols)\n"));
+    }
+    if truncated {
+        out.push_str(LIMIT_TRAILER);
+    }
+    out.push_str("→ cona outline <file>\n");
+    Ok(Some((out, 0)))
 }
 
 /// Fallback when exact + LIKE found nothing: rank every symbol by fuzzy

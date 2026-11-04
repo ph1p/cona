@@ -430,6 +430,12 @@ fn run() -> Result<()> {
                 |conn| cmd_entries(conn, path.as_deref(), *limit, cli.json),
             )?;
         }
+        Cmd::Inspect(Inspect::Dead(a)) | Cmd::DeadFlat(a) => {
+            let DeadArgs { path, limit } = a;
+            queried(&root, t0, "dead", path.as_deref().unwrap_or(""), |conn| {
+                cmd_dead(&root, conn, path.as_deref(), *limit, cli.json)
+            })?;
+        }
         Cmd::Inspect(Inspect::Tests(a)) | Cmd::TestsFlat(a) => {
             let TestsArgs {
                 symbol,
@@ -776,6 +782,7 @@ fn read_only_command(cmd: &Cmd) -> bool {
             | Cmd::ShapeFlat(_)
             | Cmd::DepsFlat(_)
             | Cmd::EntriesFlat(_)
+            | Cmd::DeadFlat(_)
             | Cmd::TestsFlat(_)
             | Cmd::CallersFlat(_)
             | Cmd::CalleesFlat(_)

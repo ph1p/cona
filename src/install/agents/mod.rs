@@ -28,7 +28,8 @@ text, so it replaces the generic read-the-file / grep-the-tree habit:
 Whole-file reads are for files you are about to rewrite, unindexed files, and
 non-code (docs, configs, data). `cona edit <Sym>` writes syntax-verified.
 
-`<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name`. Index auto-refreshes;
+`<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name` — quote paths with `[`
+(`'app/[id]/page.tsx:Name'`), the shell globs them. Index auto-refreshes;
 `cona index` (~1s) if a repo isn't indexed yet. In a sandbox where `~/.cona`
 is not writable, cona falls back to temporary storage; set `CONA_DATA_DIR` when
 you need a persistent index. Use `--read-only` to inspect an existing index
@@ -42,8 +43,8 @@ replaces `grep -n X f` + `sed -n` range reads; `cona show f:40-80` prints a
 line range. `-l`/`-c` list matching files / counts. Batch: `show A B`,
 `refs A B`, `outline f1 f2`, `find A B`. Go methods are `Type.Method`.
 
-Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
-`insert` `rename` `note` `check` — is listed in `cona --help`, with details per
+Everything else — `context` `impact` `diff` `deps` `callers` `tests` `dead`
+`blame` `insert` `rename` `note` `check` — is listed in `cona --help`, with details per
 group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).
 "#;
 

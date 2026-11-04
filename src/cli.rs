@@ -297,6 +297,16 @@ pub struct CheckArgs {
 }
 
 #[derive(clap::Args)]
+pub struct DeadArgs {
+    /// Only symbols under this path (uses are still counted repo-wide)
+    #[arg(long)]
+    pub path: Option<String>,
+    /// Max rows per section
+    #[arg(long, default_value_t = defaults::DEAD_LIMIT)]
+    pub limit: usize,
+}
+
+#[derive(clap::Args)]
 pub struct ImpactArgs {
     pub symbol: String,
 }
@@ -646,6 +656,8 @@ pub enum Inspect {
     Deps(DepsArgs),
     /// Entry points: mains, exported/public API, tests — where execution starts
     Entries(EntriesArgs),
+    /// Dead-code candidates: symbols no code names outside their definition (name-based)
+    Dead(DeadArgs),
     /// Which tests exercise a symbol (refs filtered to test code)
     Tests(TestsArgs),
     /// Transitive callers: who reaches this symbol (name-based, ambiguity marked)
@@ -795,6 +807,8 @@ pub enum Cmd {
     DepsFlat(DepsArgs),
     #[command(name = "entries", hide = true)]
     EntriesFlat(EntriesArgs),
+    #[command(name = "dead", hide = true)]
+    DeadFlat(DeadArgs),
     #[command(name = "tests", hide = true)]
     TestsFlat(TestsArgs),
     #[command(name = "callers", hide = true)]

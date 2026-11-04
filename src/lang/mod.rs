@@ -162,8 +162,8 @@ mod tests;
 mod walk;
 
 pub use idents::{
-    extract_idents, ident_counts, ident_occurrences, ident_occurrences_failopen, ident_positions,
-    idents_in_range, ref_lines,
+    extract_idents, ident_counts, ident_counts_members, ident_occurrences,
+    ident_occurrences_failopen, ident_positions, idents_in_range, ref_lines,
 };
 
 /// Declared parameter count from a signature's FIRST `(…)` group — the cheap

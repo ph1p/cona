@@ -14,14 +14,59 @@ pub fn is_test_path(path: &str) -> bool {
         || fname.contains(".spec.")
         || fname
             .rsplit_once('.')
-            .map(|(stem, _)| stem.ends_with("_test") || stem.ends_with("_spec"))
+            // `tests.rs` / `x_tests.rs`: Rust's out-of-line `#[cfg(test)] mod tests;`
+            .map(|(stem, _)| {
+                stem == "tests"
+                    || stem.ends_with("_test")
+                    || stem.ends_with("_tests")
+                    || stem.ends_with("_spec")
+            })
             .unwrap_or(false)
 }
 
 /// True when a symbol's (qualified) name marks it a test, e.g. `tests::…`/`test_*`.
+/// Machine-written files: codegen output, minified bundles, lockfiles. Their
+/// hits are real but rarely what a search is after — `grep` folds them into
+/// one trailer line when hand-written files match too.
+pub fn is_generated_path(path: &str) -> bool {
+    let fname = path.rsplit('/').next().unwrap_or(path);
+    let lower = fname.to_ascii_lowercase();
+    [
+        ".gen.",
+        ".generated.",
+        "_generated.",
+        ".g.dart",
+        ".freezed.dart",
+        ".pb.go",
+        "_pb2.py",
+        "_pb2_grpc.py",
+        ".min.js",
+        ".min.css",
+    ]
+    .iter()
+    .any(|m| lower.contains(m))
+        || matches!(
+            lower.as_str(),
+            "package-lock.json"
+                | "pnpm-lock.yaml"
+                | "yarn.lock"
+                | "bun.lock"
+                | "cargo.lock"
+                | "composer.lock"
+                | "gemfile.lock"
+                | "poetry.lock"
+                | "uv.lock"
+                | "go.sum"
+        )
+}
+
 pub fn is_test_symbol(qualified: &str) -> bool {
     qualified.split('.').any(|seg| {
-        seg == "tests" || seg == "test" || seg.starts_with("test_") || seg.ends_with("_test")
+        seg == "tests"
+            || seg == "test"
+            || seg.starts_with("test_")
+            || seg.ends_with("_test")
+            || seg.ends_with("_tests")
     })
 }
 

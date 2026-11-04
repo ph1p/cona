@@ -80,12 +80,13 @@ cona edit open_project_db --file new.rs   # replace it, syntax-verified
 
 | Command                   | Does                                                           |
 | ------------------------- | -------------------------------------------------------------- |
-| `cona find <Name>`        | Locate a symbol: file, line range, signature                   |
+| `cona find <Name>`        | Locate a symbol: file, line range, signature (or matching files) |
 | `cona search "<behavior>"` | Rank lexical matches in names, signatures, docs and bodies   |
 | `cona grep <text>`        | Code-only search, hits labeled by symbol (`--regex` for regex) |
 | `cona refs <Name>`        | Every usage site; skips strings and comments, folds test sites |
 | `cona diff [ref]`         | Changed _symbols_ vs a git ref; a good start for reviews       |
 | `cona impact <Sym>`       | Before an edit: refs, callers, tests, history                  |
+| `cona dead`               | Dead-code candidates: symbols nothing names (name-based)       |
 | `cona insert <Sym> [--after]` | Add code before/after a symbol (stdin or `--file`), syntax-verified |
 | `cona rename <Sym> <new>` | Project-wide rename, collision-guarded, all-or-nothing         |
 | `cona stats` / `cona ui`  | Tokens saved (text / live TUI); `--daily`/`--weekly` trend     |
@@ -97,7 +98,8 @@ Handy flags:
 
 - `--path <dir>` scopes `find`/`search`/`refs`/`grep`/`tree`/`show` to a subtree.
 - `show <Sym> --all` prints every definition of an ambiguous name.
-- A symbol can be written as `Name`, `Parent.Name` or `file.rs:Name`.
+- A symbol can be written as `Name`, `Parent.Name` or `file.rs:Name`. Quote
+  paths with brackets (`'app/[id]/page.tsx:Name'`) — the shell globs them.
 - `grep --include-deps` also searches `node_modules`/`vendor`/… (not indexed).
 - `context --no-tests` keeps test callers out of the list.
 

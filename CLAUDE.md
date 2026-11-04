@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 306 tests (AR=/usr/bin/ar if Homebrew binutils' GNU ar is on PATH — it breaks the build.rs archives): unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
+cargo test                   # 386 tests (AR=/usr/bin/ar if Homebrew binutils' GNU ar is on PATH — it breaks the build.rs archives): unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -45,7 +45,8 @@ src/commands/    cmd_* impls: mod.rs (shared helpers + `defaults` = THE limits +
                  (edit/insert/note/rename + write_verified), insight.rs,
                  history.rs, callgraph.rs, stats.rs, mcp_server.rs,
                  learn.rs (failed lookups → fix; feeds SessionStart hints),
-                 discover.rs (Claude transcripts → missed cona chances)
+                 discover.rs (Claude transcripts → missed cona chances),
+                 dead.rs (name-based dead-code candidates)
 src/lang/        Language detection + tree-sitter symbol extraction. 30+ langs
                  with symbols, incl. markup (XML/HTML elements named
                  `tag#identity`); refs/grep-only for JSON/Svelte/Vue/…
@@ -344,7 +345,8 @@ text, so it replaces the generic read-the-file / grep-the-tree habit:
 Whole-file reads are for files you are about to rewrite, unindexed files, and
 non-code (docs, configs, data). `cona edit <Sym>` writes syntax-verified.
 
-`<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name`. Index auto-refreshes;
+`<Sym>` = `Name`, `Parent.Name`, or `file.rs:Name` — quote paths with `[`
+(`'app/[id]/page.tsx:Name'`), the shell globs them. Index auto-refreshes;
 `cona index` (~1s) if a repo isn't indexed yet. In a sandbox where `~/.cona`
 is not writable, cona falls back to temporary storage; set `CONA_DATA_DIR` when
 you need a persistent index. Use `--read-only` to inspect an existing index
@@ -358,8 +360,8 @@ replaces `grep -n X f` + `sed -n` range reads; `cona show f:40-80` prints a
 line range. `-l`/`-c` list matching files / counts. Batch: `show A B`,
 `refs A B`, `outline f1 f2`, `find A B`. Go methods are `Type.Method`.
 
-Everything else — `context` `impact` `diff` `deps` `callers` `tests` `blame`
-`insert` `rename` `note` `check` — is listed in `cona --help`, with details per
+Everything else — `context` `impact` `diff` `deps` `callers` `tests` `dead`
+`blame` `insert` `rename` `note` `check` — is listed in `cona --help`, with details per
 group (`cona nav --help`, `inspect`, `code`, `history`, `project`, `maint`).
 <!-- cona:end -->
 `outcome` ('' ok / `empty` / `miss` / `ambiguous` / `error`, guarded

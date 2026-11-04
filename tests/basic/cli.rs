@@ -245,6 +245,7 @@ fn grouped_and_flat_are_equivalent() {
         (vec!["outline", "s.rs"], vec!["nav", "outline", "s.rs"]),
         (vec!["deps"], vec!["inspect", "deps"]),
         (vec!["entries"], vec!["inspect", "entries"]),
+        (vec!["dead"], vec!["inspect", "dead"]),
     ] {
         assert_eq!(
             run(&flat),
@@ -703,5 +704,142 @@ fn agent_slips_recover() {
         ok && out.contains("a.rs:2") && out.contains("sub/b.rs:1") && out.contains("note:"),
         "{out}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Feedback-log fixes: `find` falls back to file paths, `dead` lists
+/// unreferenced symbols, `grep` folds generated files behind a note.
+#[test]
+fn find_files_dead_code_and_generated_grep() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("cona-dead-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/routes")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::write(
+        dir.join("src/lib.rs"),
+        "pub fn used() {}\nfn orphan() {}\nfn only_tested() {}\n\
+         const NAME: &str = \"x\";\nfn caller() -> String { used(); format!(\"{NAME}\") }\n\
+         struct S;\nimpl Drop for S { fn drop(&mut self) {} }\n\
+         fn main() { caller(); }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("tests/t.rs"), "fn t() { only_tested(); }\n").unwrap();
+    std::fs::write(
+        dir.join("src/openai_oauth.ts"),
+        "export function login() { return 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/routes/page.ts"),
+        "export const routeName = 'home'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/routeTree.gen.ts"),
+        "export const all = ['routeName']\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let run = |args: &[&str]| -> (String, bool) {
+        let o = Command::new(bin)
+            .args(args)
+            .env("CONA_DATA_DIR", dir.join(".cona-data"))
+            .env("CONA_NO_STATS", "1")
+            .env("CONA_NO_AUTO_UPDATE", "1")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let mut s = String::from_utf8_lossy(&o.stdout).to_string();
+        s.push_str(&String::from_utf8_lossy(&o.stderr));
+        (s, o.status.success())
+    };
+    run(&["index"]);
+
+    let (out, ok) = run(&["find", "openai-oauth"]);
+    assert!(ok && out.contains("file src/openai_oauth.ts"), "{out}");
+    let (out, _) = run(&["find", "--kind", "fn", "openai-oauth"]);
+    assert!(!out.contains("file src/openai_oauth.ts"), "{out}");
+
+    let (out, ok) = run(&["dead"]);
+    assert!(ok, "{out}");
+    let (unref, tests_only) = out.split_once("referenced only from tests").expect(&out);
+    assert!(unref.contains("fn orphan"), "{out}");
+    assert!(tests_only.contains("fn only_tested"), "{out}");
+    for alive in [
+        "fn used",
+        "fn caller",
+        "NAME",
+        "fn main",
+        "S.drop",
+        "fn drop",
+    ] {
+        assert!(!out.contains(alive), "{alive} wrongly dead:\n{out}");
+    }
+
+    let (out, ok) = run(&["grep", "routeName", "-l"]);
+    assert!(ok && out.contains("src/routes/page.ts"), "{out}");
+    assert!(
+        out.contains("skipped 1 generated file(s): src/routeTree.gen.ts"),
+        "{out}"
+    );
+    let (out, _) = run(&["grep", "all", "--path", "src/routeTree.gen.ts"]);
+    assert!(out.contains("routeTree.gen.ts:1"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hook_lets_single_file_grep_through_even_before_the_file_exists() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let dir = std::env::temp_dir().join(format!("cona-hookgrep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "pub fn locate_fresh() {}\n").unwrap();
+    // macOS temp is behind a symlink (/var -> /private/var); a harness cwd is
+    // getcwd()-canonical, so hand the hook the same form `index` hashed
+    let dir = dir.canonicalize().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let data = dir.join(".cona-data");
+    // the hook only redirects inside a project root (a `.git`)
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&dir)
+        .status()
+        .unwrap();
+    Command::new(bin)
+        .arg("index")
+        .env("CONA_DATA_DIR", &data)
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let hook = |cmd: &str| -> String {
+        let payload = serde_json::json!({"session_id": "t", "cwd": dir, "tool_name": "Bash",
+            "tool_input": {"command": cmd}});
+        let mut c = Command::new(bin)
+            .args(["hook", "PreToolUse"])
+            .env("CONA_DATA_DIR", &data)
+            .env("CONA_NO_STATS", "1")
+            .current_dir(&dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        String::from_utf8_lossy(&c.wait_with_output().unwrap().stdout).to_string()
+    };
+    // the diff does not exist yet (`>` runs after the hook): one file, not a tree
+    for cmd in [
+        "git diff > d.diff && grep -n locate_fresh d.diff",
+        "grep -n locate_fresh notes.txt",
+    ] {
+        assert!(!hook(cmd).contains("\"deny\""), "{cmd}");
+    }
+    assert!(hook("grep -rn locate_fresh src").contains("\"deny\""));
     let _ = std::fs::remove_dir_all(&dir);
 }

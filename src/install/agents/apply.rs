@@ -667,7 +667,8 @@ fn store_settings(path: &Path, root: &serde_json::Value, install: bool) -> Resul
 #[allow(dead_code)] // until claude_permissions is wired into `agents install`
 const READ_ONLY_CMDS: &[&str] = &[
     "tree", "outline", "find", "show", "refs", "context", "grep", "diff", "impact", "callers",
-    "callees", "path", "deps", "shape", "entries", "tests", "check", "blame", "stats", "index",
+    "callees", "path", "deps", "shape", "entries", "dead", "tests", "check", "blame", "stats",
+    "index",
 ];
 /// Prefix of every `autoMode` prose rule we write — how install reconciles and
 /// uninstall finds ours among the user's own rules.

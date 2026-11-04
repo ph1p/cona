@@ -111,11 +111,29 @@ pub fn ident_counts(
     src: &str,
     names: &std::collections::HashSet<&str>,
 ) -> std::collections::HashMap<String, i64> {
-    let mut counts = std::collections::HashMap::new();
     // Callers count uses of TOP-LEVEL items, which Rust never reaches as
     // `x.name` — so a method call or field (`.ok()`, `.len`) is not a use of a
     // same-named free fn. Go's `pkg.Func()` shares the leaf kind, hence rust-only.
-    let skip_fields = lang == Some("rust");
+    count_idents(lang, src, names, lang == Some("rust"))
+}
+
+/// `ident_counts` including Rust member positions (`x.name`, `.name()`): a
+/// method's only uses are there, so `dead` must see them.
+pub fn ident_counts_members(
+    lang: Option<&str>,
+    src: &str,
+    names: &std::collections::HashSet<&str>,
+) -> std::collections::HashMap<String, i64> {
+    count_idents(lang, src, names, false)
+}
+
+fn count_idents(
+    lang: Option<&str>,
+    src: &str,
+    names: &std::collections::HashSet<&str>,
+    skip_fields: bool,
+) -> std::collections::HashMap<String, i64> {
+    let mut counts = std::collections::HashMap::new();
     match lang.and_then(|l| parse(l, src).ok()) {
         Some(tree) => for_each_node(tree.root_node(), |n| {
             if n.child_count() == 0 && n.kind().ends_with("identifier") {

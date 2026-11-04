@@ -505,8 +505,14 @@ fn try_grep(
     // Separate from `surgical`: never blocks, but `show`/`refs` answers this
     // shape strictly better. Resolved against the payload cwd.
     let start = grep_start(path, v["cwd"].as_str());
-    let single_file = path.is_some() && start.is_file();
-    if !identifier && single_file {
+    // A named path that is not a directory is one file — including one that
+    // does not exist yet (`git diff > d.diff && grep x d.diff`: the hook runs
+    // before the redirect creates it). Grep cannot recurse into either.
+    let single_file = path.is_some() && !start.is_dir();
+    // `show`/`refs` advice is a dead end on a diff, log or doc: no symbols there.
+    let code_file =
+        || lang::detect_lang(&start.to_string_lossy()).is_some_and(lang::has_callable_symbols);
+    if single_file && (!identifier || !code_file()) {
         return Ok(());
     }
     let root = db::git_root_from(&start);
