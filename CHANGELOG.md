@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/ph1p/cona/compare/v0.1.6...v0.1.7) - 2026-11-04
+
+### Added
+
+- add dead-code finder and act on usage feedback
+
+### Other
+
+- skip cwd canonicalize on windows in hook grep test
+
 ## [0.1.6](https://github.com/ph1p/cona/compare/v0.1.5...v0.1.6) - 2026-10-31
 
 ### Fixed
