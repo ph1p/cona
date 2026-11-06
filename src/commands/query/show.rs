@@ -20,7 +20,8 @@ pub fn cmd_show(
     let ShowOpts { kind, sig, all, .. } = opts;
     // `file:120-160` / `file:120` — a line range, for the code between symbols
     // (file headers, one block of a long body) that `sed -n` would otherwise read
-    if let Some((file, start, end)) = line_range(root, conn, symbol)? {
+    let scope = crate::commands::PathFilter::new(root, opts.path);
+    if let Some((file, start, end)) = line_range(root, conn, symbol, &scope)? {
         return show_lines(root, &file, start, end, opts.context, json);
     }
     // A path means "map this file" → outline (directories reach its
@@ -36,7 +37,7 @@ pub fn cmd_show(
         // one. Gated on a known extension: `Type.method` must not pay the
         // unindexed `LIKE '%/…'` scan.
         if crate::lang::detect_lang(symbol).is_some() {
-            match crate::commands::files_named(conn, symbol).as_slice() {
+            match crate::commands::files_named_in(conn, symbol, &scope).as_slice() {
                 [] => {}
                 [one] => return cmd_outline(root, conn, one, sig, json),
                 many => return Err(ambiguous_file(symbol, many, "")),
@@ -115,7 +116,13 @@ pub fn cmd_show(
 /// `path:N-M` or `path:N` → (path, N, M). The path is a file on disk or —
 /// like `file.rs:Name` — an indexed path suffix (`deploy.ts:300-325`). A range
 /// on a path that names nothing is an error, not a symbol lookup for `300-325`.
-fn line_range(root: &Path, conn: &Connection, arg: &str) -> Result<Option<(String, usize, usize)>> {
+/// `scope` (`--path`) narrows several same-named files.
+fn line_range(
+    root: &Path,
+    conn: &Connection,
+    arg: &str,
+    scope: &crate::commands::PathFilter,
+) -> Result<Option<(String, usize, usize)>> {
     let Some((file, range)) = arg.rsplit_once(':') else {
         return Ok(None);
     };
@@ -129,7 +136,7 @@ fn line_range(root: &Path, conn: &Connection, arg: &str) -> Result<Option<(Strin
     if root.join(file).is_file() {
         return Ok(Some((file.to_string(), start, end)));
     }
-    match crate::commands::files_named(conn, file).as_slice() {
+    match crate::commands::files_named_in(conn, file, scope).as_slice() {
         [one] => Ok(Some((one.clone(), start, end))),
         [] => {
             let near = crate::commands::did_you_mean_file(conn, file);

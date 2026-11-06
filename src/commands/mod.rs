@@ -342,6 +342,9 @@ pub struct ShowOpts<'a> {
     pub sig: bool,
     /// On an ambiguous name, render every candidate instead of erroring.
     pub all: bool,
+    /// `--path`: also narrows a bare file name (`webhook.ts:10-40`,
+    /// `webhook.ts`) that several indexed files end with.
+    pub path: Option<&'a str>,
 }
 
 /// How `grep` matches lines — read by both `Matcher` and `grep_prefilter`, so
@@ -458,6 +461,134 @@ pub(crate) fn did_you_mean_file(conn: &Connection, f: &str) -> String {
     format!(" — did you mean {}?", hits.join(", "))
 }
 
+/// `files_named` narrowed to `scope` (`--path`). Nothing left under it → the
+/// unscoped list, so an ambiguity error still names every candidate.
+pub(crate) fn files_named_in(conn: &Connection, f: &str, scope: &PathFilter) -> Vec<String> {
+    let named = files_named(conn, f);
+    if !scope.is_scoped() || named.len() < 2 {
+        return named;
+    }
+    let inside: Vec<String> = named.iter().filter(|p| scope.ok(p)).cloned().collect();
+    if inside.is_empty() {
+        named
+    } else {
+        inside
+    }
+}
+
+/// Does any indexed path start with `prefix`? The index probe behind "is
+/// this a directory / does this scope name anything" — it also catches an
+/// indexed dir since removed from disk.
+pub(crate) fn indexed_prefix(conn: &Connection, prefix: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM files WHERE path LIKE ?1 ESCAPE '\\' LIMIT 1",
+        [format!("{}%", like_escape(prefix))],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// `-C` output (grep and refs): one header per block (`file:line`, plus
+/// ` (in sym)` when `sym` is set), then numbered lines with `>` where `is_hit`
+/// says so. Overlapping or adjacent windows in one file merge into a single
+/// block, so no line is printed twice.
+pub(crate) fn render_context_blocks<'a>(
+    out: &mut String,
+    blocks: impl IntoIterator<Item = (&'a str, usize, &'a str, &'a [(usize, String)])>,
+    is_hit: impl Fn(&str, usize, &str) -> bool,
+) {
+    use std::fmt::Write;
+    let mut last: Option<(&str, usize)> = None;
+    for (f, l, sym, window) in blocks {
+        let first = window.first().map_or(l, |w| w.0);
+        let joined = matches!(last, Some((lf, ll)) if lf == f && first <= ll + 1);
+        if !joined {
+            if last.is_some() {
+                out.push_str("--\n");
+            }
+            let _ = if sym.is_empty() {
+                writeln!(out, "{f}:{l}")
+            } else {
+                writeln!(out, "{f}:{l} (in {sym})")
+            };
+        }
+        let done = if joined { last.map_or(0, |x| x.1) } else { 0 };
+        for (n, text) in window.iter().filter(|(n, _)| *n > done) {
+            let mark = if is_hit(f, *n, text) { '>' } else { ' ' };
+            let _ = writeln!(out, "{n:>5}{mark} {text}");
+        }
+        let end = window.last().map_or(l, |w| w.0);
+        last = Some((f, end.max(done)));
+    }
+}
+
+/// A filter naming the repo root (`.`, `./`, empty) is no filter at all —
+/// `--path .` must widen, not match nothing.
+pub(crate) fn unscope_root(filter: Option<&str>) -> Option<&str> {
+    filter.filter(|f| !matches!(f.trim_end_matches('/'), "" | "."))
+}
+
+/// `--path` as typed (relative to the CWD, like every shell path) → the
+/// repo-relative form the index stores. Run once at the CLI boundary; MCP
+/// paths are already root-relative (the server runs at the root).
+pub fn repo_relative(raw: &str) -> String {
+    let Ok(cwd) = std::env::current_dir() else {
+        return raw.to_string();
+    };
+    let root = crate::db::git_root_from(&cwd);
+    repo_relative_from(raw, &cwd, &root, |p| p.exists())
+}
+
+/// Pure core of [`repo_relative`]. From a subdirectory, the CWD reading wins
+/// when it exists; a path that only exists from the root (agents habitually
+/// type root-relative paths) keeps that reading; neither existing (a prefix
+/// like `src/comm`) → the CWD reading. Paths outside the repo pass through.
+pub(crate) fn repo_relative_from(
+    raw: &str,
+    cwd: &Path,
+    root: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> String {
+    let raw_norm = raw.replace('\\', "/");
+    let trailing = raw_norm.ends_with('/') && !raw_norm.trim_end_matches('/').is_empty();
+    // `abs` is already lexically normalized (no `.`/`..` left).
+    let rel_of = |abs: &Path| -> Option<String> {
+        let mut s = abs
+            .strip_prefix(root)
+            .ok()?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if trailing && !s.is_empty() {
+            s.push('/');
+        }
+        Some(if s.is_empty() { ".".into() } else { s })
+    };
+    let lexical = |base: &Path| -> std::path::PathBuf {
+        let mut out = base.to_path_buf();
+        for c in Path::new(&raw_norm).components() {
+            match c {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    };
+    // CWD reading first; the root reading only when it alone exists.
+    let abs = if Path::new(&raw_norm).is_absolute() {
+        lexical(Path::new("/"))
+    } else {
+        let from_cwd = lexical(cwd);
+        let from_root = (cwd != root && !exists(&from_cwd))
+            .then(|| lexical(root))
+            .filter(|p| exists(p));
+        from_root.unwrap_or(from_cwd)
+    };
+    rel_of(&abs).unwrap_or_else(|| raw.to_string())
+}
+
 /// A `--path` filter with the directory question answered ONCE.
 ///
 /// The dir-vs-prefix reading is loop-invariant, but the filter runs per row
@@ -471,6 +602,7 @@ pub(crate) struct PathFilter<'a> {
 impl<'a> PathFilter<'a> {
     /// Resolve `filter` against the filesystem — THE one stat.
     pub(crate) fn new(root: &Path, filter: Option<&'a str>) -> Self {
+        let filter = unscope_root(filter);
         let dir_filter = filter.is_some_and(|f| root.join(f.trim_end_matches('/')).is_dir());
         PathFilter { filter, dir_filter }
     }
@@ -767,11 +899,16 @@ pub(crate) fn split_locator(arg: &str) -> Option<(&str, &str)> {
 /// `show --path P Name` → `P:Name`, so a scope reaches the one resolver, not a
 /// parallel filter. An existing locator wins (it is the narrower address).
 pub fn scoped_locator(path: Option<&str>, symbol: &str) -> String {
-    match path
-        .map(|p| p.trim_end_matches('/'))
-        .filter(|p| !p.is_empty())
-    {
-        Some(p) if split_locator(symbol).is_none() => format!("{p}:{symbol}"),
+    match unscope_root(path).map(|p| p.trim_end_matches('/')) {
+        // A bare dir name (`src`) has no `.`/`/`, so `split_locator` would not
+        // read `src:Name` as a locator — the trailing `/` makes it one.
+        Some(p) if split_locator(symbol).is_none() => {
+            if p.contains('.') || p.contains('/') {
+                format!("{p}:{symbol}")
+            } else {
+                format!("{p}/:{symbol}")
+            }
+        }
         _ => symbol.to_string(),
     }
 }
@@ -977,6 +1114,9 @@ mod tests {
         assert_eq!(scoped_locator(Some("web/src/"), "day"), "web/src:day");
         assert_eq!(scoped_locator(Some("a.ts"), "x.ts:day"), "x.ts:day");
         assert_eq!(scoped_locator(None, "day"), "day");
+        // a bare directory name still scopes (`src:day` is no locator)
+        assert_eq!(scoped_locator(Some("src"), "day"), "src/:day");
+        assert_eq!(split_locator("src/:day"), Some(("src/", "day")));
         // a directory locator is a locator too
         assert_eq!(split_locator("web/src:day"), Some(("web/src", "day")));
         assert_eq!(split_locator("Parent.Name"), None);
@@ -1038,6 +1178,70 @@ mod tests {
             "src/commands",
             false
         ));
+    }
+
+    #[test]
+    fn root_filter_is_no_filter() {
+        let root = Path::new("/nonexistent-root");
+        for f in [".", "./", ""] {
+            assert!(PathFilter::new(root, Some(f)).ok("src/db.rs"));
+            assert!(!PathFilter::new(root, Some(f)).is_scoped());
+        }
+        assert_eq!(scoped_locator(Some("."), "run"), "run");
+    }
+
+    #[test]
+    #[cfg(unix)] // `/r` is not absolute on Windows
+    fn repo_relative_reads_the_cwd_first() {
+        let root = Path::new("/r");
+        let sub = Path::new("/r/src");
+        let on_disk = |p: &Path| {
+            [
+                "/r/src/commands/mod.rs",
+                "/r/src/commands",
+                "/r/src",
+                "/r/docs",
+            ]
+            .iter()
+            .any(|e| Path::new(e) == p)
+        };
+        // from a subdir: cwd reading
+        assert_eq!(
+            repo_relative_from("commands/mod.rs", sub, root, on_disk),
+            "src/commands/mod.rs"
+        );
+        // `.` from a subdir = that subdir; from the root = the root
+        assert_eq!(repo_relative_from(".", sub, root, on_disk), "src");
+        assert_eq!(repo_relative_from(".", root, root, on_disk), ".");
+        assert_eq!(repo_relative_from("./", root, root, on_disk), ".");
+        // root-relative habit from a subdir still works
+        assert_eq!(repo_relative_from("docs", sub, root, on_disk), "docs");
+        assert_eq!(
+            repo_relative_from("src/commands", sub, root, on_disk),
+            "src/commands"
+        );
+        // prefix that exists nowhere → cwd reading
+        assert_eq!(repo_relative_from("comm", sub, root, on_disk), "src/comm");
+        // trailing slash kept (directory-only reading), `..` resolved
+        assert_eq!(
+            repo_relative_from("commands/", sub, root, on_disk),
+            "src/commands/"
+        );
+        assert_eq!(repo_relative_from("../docs", sub, root, on_disk), "docs");
+        // absolute inside / outside the repo
+        assert_eq!(
+            repo_relative_from("/r/src/commands", root, root, on_disk),
+            "src/commands"
+        );
+        assert_eq!(
+            repo_relative_from("/elsewhere/x", root, root, on_disk),
+            "/elsewhere/x"
+        );
+        // from the root nothing changes
+        assert_eq!(
+            repo_relative_from("src/comm", root, root, on_disk),
+            "src/comm"
+        );
     }
 
     #[test]

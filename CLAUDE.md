@@ -260,7 +260,10 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
 - Git submodules are indexed as part of the parent project (one DB), not as
   separate projects — a submodule shared by two repos is indexed twice.
   Unregistered nested repos (a `.git` with no `.gitmodules` entry) stay skipped.
-- `--path` resolves directory-vs-prefix by stat-ing the filter, so a filter that
+- `--path` (CLI) is a shell path: resolved CWD-relative at the clap boundary
+  (`commands::repo_relative`; a path that only exists from the root keeps that
+  reading; `.` = the CWD, so at the root no filter). MCP paths stay root-relative. It resolves
+  directory-vs-prefix by stat-ing the filter, so a filter that
   names a dir which no longer exists on disk degrades to the prefix reading.
 - `grep` matches literally by DEFAULT, regex only on `--regex`/`-e`. Literal is
   the default because `foo.bar`/`Vec<T>` are ordinary code — reinterpreting them

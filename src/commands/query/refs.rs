@@ -1,18 +1,32 @@
 //! `refs`: semantic usage sites of a name.
 
-use crate::commands::{jout, scan_ref_sites, LIMIT_TRAILER};
+use crate::commands::{jout, render_context_blocks, scan_ref_sites, LIMIT_TRAILER};
 use crate::db;
 use crate::entries;
 use anyhow::Result;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::Path;
 
-/// How `refs` renders its sites: every line, or one row per file (`-l`/`-c`).
+/// `-C n` lines around one site: (line number, text).
+type Window = Vec<(usize, String)>;
+
+/// How `refs` renders its sites: every line, every line with `n` lines of
+/// context around it (`-C n`, grep's block format), or one row per file
+/// (`-l`/`-c`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RefsShape {
     Lines,
+    Context(usize),
     Files,
     Counts,
+}
+
+impl RefsShape {
+    /// One row per site (limited) — as opposed to one row per file.
+    fn per_site(self) -> bool {
+        matches!(self, RefsShape::Lines | RefsShape::Context(_))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -27,11 +41,7 @@ pub fn cmd_refs(
     json: bool,
 ) -> Result<(String, i64)> {
     // -l/-c summarize every site: a limit would make the counts lie.
-    let limit = if shape == RefsShape::Lines {
-        limit
-    } else {
-        usize::MAX
-    };
+    let limit = if shape.per_site() { limit } else { usize::MAX };
     // Test sites are kept apart: on a hot symbol they outnumber production
     // sites ~5:1 and eat the limit. They are folded into one count line unless
     // asked for (`tests`), the caller scoped with --path, or they are all there is.
@@ -48,6 +58,13 @@ pub fn cmd_refs(
     // they don't borrow fsrc, so they outlive each visit call.
     let mut cur_offsets: Vec<usize> = Vec::new();
     let mut cur_lns: Vec<usize> = Vec::new();
+    let ctx = match shape {
+        RefsShape::Context(n) => n,
+        _ => 0,
+    };
+    // `-C n`: the window around each site, cut while the source is in hand —
+    // parallel to `prod`/`test`, and only for sites that can still be shown.
+    let (mut prod_w, mut test_w): (Vec<Window>, Vec<Window>) = (Vec::new(), Vec::new());
     let fold = !tests && path_filter.is_none();
     let mut flush = |lens: &[usize], lns: &[usize], is_test: bool| {
         if !lns.is_empty() {
@@ -83,6 +100,19 @@ pub fn cmd_refs(
                 .and_then(|&st| fsrc[st..].lines().next())
                 .unwrap_or("")
                 .trim();
+            let wins = if cur_test { &mut test_w } else { &mut prod_w };
+            if ctx > 0 && wins.len() < limit {
+                let lo = ln.saturating_sub(ctx).max(1);
+                let hi = (ln + ctx).min(cur_offsets.len());
+                wins.push(
+                    (lo..=hi)
+                        .filter_map(|n| {
+                            let st = *cur_offsets.get(n - 1)?;
+                            Some((n, fsrc[st..].lines().next().unwrap_or("").to_string()))
+                        })
+                        .collect(),
+                );
+            }
             let side = if cur_test { &mut test } else { &mut prod };
             side.push((rel.to_string(), ln, text.to_string()));
             // Test sites never truncate while folded — only the shown side counts.
@@ -96,12 +126,12 @@ pub fn cmd_refs(
     flush(&cur_lens, &cur_lns, cur_test);
     // Nothing but test sites: they ARE the answer, show them (up to limit).
     let folded = (!prod.is_empty() && !test.is_empty()).then(|| (test.len(), hits_files(&test)));
-    let (hits, baseline) = if prod.is_empty() {
+    let (hits, wins, baseline) = if prod.is_empty() {
         test.truncate(limit);
         truncated |= test.len() >= limit;
-        (test, base_test)
+        (test, test_w, base_test)
     } else {
-        (prod, base_prod)
+        (prod, prod_w, base_prod)
     };
     if json {
         let items: Vec<_> = hits
@@ -111,7 +141,14 @@ pub fn cmd_refs(
         return jout(&items, baseline);
     }
     let mut out = String::new();
-    if shape == RefsShape::Lines {
+    if ctx > 0 {
+        let sites: HashSet<(&str, usize)> = hits.iter().map(|(f, l, _)| (f.as_str(), *l)).collect();
+        let blocks = hits
+            .iter()
+            .zip(&wins)
+            .map(|((f, l, _), w)| (f.as_str(), *l, "", w.as_slice()));
+        render_context_blocks(&mut out, blocks, |f, n, _| sites.contains(&(f, n)));
+    } else if shape.per_site() {
         let mut current = "";
         for (f, l, t) in &hits {
             if f.as_str() != current {

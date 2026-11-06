@@ -179,6 +179,7 @@ fn run() -> Result<()> {
                         kind: kind.as_deref(),
                         sig: *sig,
                         all: *all,
+                        path: path.as_deref(),
                     },
                     cli.json,
                 ) {
@@ -215,10 +216,12 @@ fn run() -> Result<()> {
                 tests,
                 files_with_matches,
                 count,
+                context,
             } = a;
-            let shape = match (*files_with_matches, *count) {
-                (true, _) => RefsShape::Files,
-                (_, true) => RefsShape::Counts,
+            let shape = match (*files_with_matches, *count, *context) {
+                (true, ..) => RefsShape::Files,
+                (_, true, _) => RefsShape::Counts,
+                (.., Some(n)) if n > 0 => RefsShape::Context(n),
                 _ => RefsShape::Lines,
             };
             queried(&root, t0, "refs", &names.join(" "), |conn| {
@@ -293,6 +296,11 @@ fn run() -> Result<()> {
             } = a;
             // `grep a b` where b is no path: search either name (`a\|b`).
             let (extra, paths) = split_positionals(&root, paths);
+            // positional paths are shell paths too: CWD-relative like --path
+            let paths: Vec<String> = paths
+                .into_iter()
+                .map(cona::commands::repo_relative)
+                .collect();
             let pattern = &std::iter::once(pattern.as_str())
                 .chain(extra.iter().copied())
                 .collect::<Vec<_>>()
@@ -303,8 +311,8 @@ fn run() -> Result<()> {
                 vec![None]
             } else {
                 path.iter()
+                    .chain(&paths)
                     .map(String::as_str)
-                    .chain(paths)
                     .map(Some)
                     .collect()
             };

@@ -848,3 +848,72 @@ fn hook_lets_single_file_grep_through_even_before_the_file_exists() {
     assert!(hook("grep -rn locate_fresh src").contains("\"deny\""));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `--path` is a shell path: `.` widens instead of matching nothing, a
+/// CWD-relative path resolves from a subdirectory, a bare dir name scopes
+/// `show`, a scope that names nothing says so — and `refs -C` prints context.
+#[test]
+fn path_scopes_resolve_like_shell_paths_and_refs_takes_context() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("cona-path-scope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    std::fs::create_dir_all(dir.join("src/a")).unwrap();
+    std::fs::create_dir_all(dir.join("src/b")).unwrap();
+    std::fs::write(
+        dir.join("src/a/m.rs"),
+        "pub fn alpha() {}\n\nfn main() {\n    alpha();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/b/m.rs"), "pub fn beta() {}\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cona");
+    let run = |cwd: &std::path::Path, args: &[&str]| -> String {
+        let o = Command::new(bin)
+            .args(args)
+            .env("CONA_DATA_DIR", dir.join(".cona-data"))
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+    run(&dir, &["index"]);
+    let sub = dir.join("src");
+
+    // `--path .` = the root (or the CWD's directory), never "nothing"
+    let out = run(&dir, &["show", "alpha", "--path", "."]);
+    assert!(out.contains("src/a/m.rs:1"), "{out}");
+    let out = run(&sub, &["show", "alpha", "--path", "."]);
+    assert!(out.contains("src/a/m.rs:1"), "{out}");
+    // a bare directory name scopes show
+    let out = run(&dir, &["show", "alpha", "--path", "src"]);
+    assert!(out.contains("src/a/m.rs:1"), "{out}");
+    // CWD-relative --path and positional path from a subdirectory
+    let out = run(&sub, &["grep", "alpha", "--path", "a/m.rs"]);
+    assert!(out.contains("src/a/m.rs:1"), "{out}");
+    let out = run(&sub, &["grep", "alpha", "a", "-l"]);
+    assert_eq!(out.trim(), "src/a/m.rs", "{out}");
+    // root-relative habit from a subdirectory still resolves
+    let out = run(&sub, &["grep", "alpha", "--path", "src/a"]);
+    assert!(out.contains("src/a/m.rs:1"), "{out}");
+    // --path narrows an ambiguous bare file name in a line range
+    let out = run(&dir, &["show", "m.rs:1-1", "--path", "src/b"]);
+    assert!(out.contains("beta") && !out.contains("ambiguous"), "{out}");
+    // a scope that names nothing is reported, not passed off as "no matches here"
+    let out = run(&dir, &["grep", "alpha", "--path", "src/nope"]);
+    assert!(
+        out.contains("'src/nope' names no indexed file or directory"),
+        "{out}"
+    );
+    // refs -C: grep's block format, `>` on the site
+    let out = run(&dir, &["refs", "alpha", "-C", "1"]);
+    // overlapping windows merge under one header
+    assert_eq!(out.matches("src/a/m.rs:").count(), 1, "{out}");
+    assert!(out.contains("    4>     alpha();"), "{out}");
+    assert!(out.contains("    3  fn main() {"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

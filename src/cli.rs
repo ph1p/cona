@@ -98,7 +98,7 @@ pub struct TreeArgs {
     #[arg(long, default_value_t = defaults::TREE_BUDGET)]
     pub budget: i64,
     /// Only show files under this path prefix
-    #[arg(long)]
+    #[arg(long, value_parser = repo_path)]
     pub path: Option<String>,
     /// Rank symbols by reference fan-in (most-referenced first) instead of by path
     #[arg(long)]
@@ -126,7 +126,7 @@ pub struct FindArgs {
     #[arg(long, default_value_t = defaults::FIND_LIMIT)]
     pub limit: usize,
     /// Only symbols in files under this path prefix (file or directory)
-    #[arg(long)]
+    #[arg(long, value_parser = repo_path)]
     pub path: Option<String>,
 }
 
@@ -137,7 +137,7 @@ pub struct SearchArgs {
     #[arg(long, default_value_t = defaults::SEARCH_LIMIT)]
     pub limit: usize,
     /// Only symbols in files under this path (file, directory, or prefix)
-    #[arg(long)]
+    #[arg(long, value_parser = repo_path)]
     pub path: Option<String>,
 }
 
@@ -160,7 +160,7 @@ pub struct ShowArgs {
     #[arg(long)]
     pub sig: bool,
     /// Only definitions in files under this path (file or directory) — same as `path:Name`
-    #[arg(long)]
+    #[arg(long, value_parser = repo_path)]
     pub path: Option<String>,
 }
 
@@ -172,7 +172,7 @@ pub struct RefsArgs {
     #[arg(long, default_value_t = defaults::REFS_LIMIT)]
     pub limit: usize,
     /// Only references in files under this path prefix (file or directory)
-    #[arg(long)]
+    #[arg(long, value_parser = repo_path)]
     pub path: Option<String>,
     /// List test-file sites too (default: folded into one count line)
     #[arg(long)]
@@ -183,6 +183,9 @@ pub struct RefsArgs {
     /// References per file, `path:N` (like grep -c)
     #[arg(short = 'c', long, conflicts_with = "files_with_matches")]
     pub count: bool,
+    /// Lines of context around each reference (like grep -C)
+    #[arg(short = 'C', long, conflicts_with_all = ["files_with_matches", "count"])]
+    pub context: Option<usize>,
 }
 
 #[derive(clap::Args)]
@@ -231,7 +234,7 @@ pub struct GrepArgs {
     #[arg(long, default_value_t = defaults::GREP_LIMIT)]
     pub limit: usize,
     /// Only search files under this path prefix (file or directory); repeatable
-    #[arg(long)]
+    #[arg(long, value_parser = repo_path)]
     pub path: Vec<String>,
     /// Accepted for grep compatibility — hits always carry line numbers
     #[arg(short = 'n', long = "line-number", hide = true)]
@@ -299,7 +302,7 @@ pub struct CheckArgs {
 #[derive(clap::Args)]
 pub struct DeadArgs {
     /// Only symbols under this path (uses are still counted repo-wide)
-    #[arg(long)]
+    #[arg(long, value_parser = repo_path)]
     pub path: Option<String>,
     /// Max rows per section
     #[arg(long, default_value_t = defaults::DEAD_LIMIT)]
@@ -314,7 +317,7 @@ pub struct ImpactArgs {
 #[derive(clap::Args)]
 pub struct EntriesArgs {
     /// Only files under this path prefix
-    #[arg(long)]
+    #[arg(long, value_parser = repo_path)]
     pub path: Option<String>,
     /// Max rows per section
     #[arg(long, default_value_t = defaults::ENTRIES_LIMIT)]
@@ -397,7 +400,7 @@ pub struct ShapeArgs {
 #[derive(clap::Args)]
 pub struct DepsArgs {
     /// Only edges from files under this path prefix
-    #[arg(long)]
+    #[arg(long, value_parser = repo_path)]
     pub path: Option<String>,
     /// Positional fallback for --path (the pre-0.1 spelling)
     #[arg(value_name = "PATH", hide = true)]
@@ -871,4 +874,10 @@ pub enum Cmd {
     McpFlat,
     #[command(name = "hook", hide = true)]
     HookFlat(HookArgs),
+}
+
+/// `--path` value parser: CWD-relative as typed → repo-relative (see
+/// `commands::repo_relative`). Never fails — an odd path just matches nothing.
+fn repo_path(raw: &str) -> Result<String, std::convert::Infallible> {
+    Ok(cona::commands::repo_relative(raw))
 }

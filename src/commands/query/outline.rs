@@ -44,14 +44,8 @@ pub fn cmd_outline(
     if rows.is_empty() {
         // A directory: point at the command that covers directories. The
         // index probe also catches an indexed dir since removed from disk.
-        let is_dir = root.join(file).is_dir()
-            || conn
-                .query_row(
-                    "SELECT 1 FROM files WHERE path LIKE ?1 ESCAPE '\\' LIMIT 1",
-                    [format!("{}/%", crate::commands::like_escape(file))],
-                    |_| Ok(()),
-                )
-                .is_ok();
+        let is_dir =
+            root.join(file).is_dir() || crate::commands::indexed_prefix(conn, &format!("{file}/"));
         if is_dir {
             bail!("'{file}' is a directory — try `cona tree --path {file}`");
         }

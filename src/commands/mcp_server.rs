@@ -328,6 +328,7 @@ fn mcp_call(
                         kind: opt("kind"),
                         sig: flag("sig"),
                         all: flag("all"),
+                        path: opt("path"),
                     },
                     false,
                 )?;

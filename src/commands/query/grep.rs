@@ -4,7 +4,8 @@
 //! only serves `--include-deps`, which searches outside the index.
 
 use crate::commands::{
-    defaults, jout, shell_quote, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL, LIMIT_TRAILER,
+    defaults, jout, render_context_blocks, shell_quote, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL,
+    LIMIT_TRAILER,
 };
 use crate::{db, entries, indexer};
 use anyhow::{anyhow, Result};
@@ -178,7 +179,11 @@ pub fn cmd_grep(
     }
     let mut out = note;
     if !ctx.is_empty() {
-        render_with_context(&mut out, &hits, &ctx, &matcher);
+        let blocks = hits
+            .iter()
+            .zip(&ctx)
+            .map(|((f, l, sym, _), w)| (f.as_str(), *l, sym.as_str(), w.as_slice()));
+        render_context_blocks(&mut out, blocks, |_, _, t| matcher.is_match(t));
     }
     for (f, l, sym, t) in hits.iter().filter(|_| ctx.is_empty()) {
         if sym.is_empty() {
@@ -274,6 +279,17 @@ fn no_matches(root: &Path, conn: &Connection, pattern: &str, opts: GrepOpts<'_>)
             ));
         }
     } else if let Some(scope) = path_filter {
+        // A scope that names nothing (typo, or a path written for another
+        // CWD) is the real answer — "no matches under X" would read as "the
+        // code isn't there".
+        let missing = !root.join(scope.trim_end_matches('/')).exists()
+            && !crate::commands::indexed_prefix(conn, scope);
+        if missing {
+            out.push_str(&format!(
+                " — '{scope}' names no indexed file or directory{}",
+                crate::commands::did_you_mean_file(conn, scope)
+            ));
+        }
         let wide = GrepOpts {
             path: None,
             limit: defaults::GREP_ELSEWHERE,
@@ -283,10 +299,18 @@ fn no_matches(root: &Path, conn: &Connection, pattern: &str, opts: GrepOpts<'_>)
         };
         let (elsewhere, _) = cmd_grep(root, conn, pattern, wide, false)?;
         if elsewhere.starts_with("no matches") {
-            out.push_str(" anywhere in the repo");
+            out.push_str(if missing {
+                "; none anywhere in the repo"
+            } else {
+                " anywhere in the repo"
+            });
         } else {
             let elsewhere = elsewhere.replace(LIMIT_TRAILER, "… more without --path\n");
-            out.push_str(&format!(" under '{scope}' — elsewhere:\n{elsewhere}"));
+            if missing {
+                out.push_str(&format!("\nrepo-wide:\n{elsewhere}"));
+            } else {
+                out.push_str(&format!(" under '{scope}' — elsewhere:\n{elsewhere}"));
+            }
             return Ok(out);
         }
     } else if looks_like_name(pattern) {
@@ -324,39 +348,6 @@ fn looks_like_name(pattern: &str) -> bool {
         && pattern
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | ':'))
-}
-
-/// `-A`/`-B`/`-C` output: one header per block (`file:line (in sym)`), then
-/// numbered lines with `>` on the hits. Overlapping or adjacent windows in one
-/// file merge into a single block, so no line is printed twice.
-fn render_with_context(
-    out: &mut String,
-    hits: &[(String, usize, String, String)],
-    ctx: &[Vec<(usize, String)>],
-    matcher: &Matcher,
-) {
-    let mut last: Option<(&str, usize)> = None;
-    for ((f, l, sym, _), window) in hits.iter().zip(ctx) {
-        let first = window.first().map_or(*l, |w| w.0);
-        let joined = matches!(last, Some((lf, ll)) if lf == f && first <= ll + 1);
-        if !joined {
-            if last.is_some() {
-                out.push_str("--\n");
-            }
-            if sym.is_empty() {
-                out.push_str(&format!("{f}:{l}\n"));
-            } else {
-                out.push_str(&format!("{f}:{l} (in {sym})\n"));
-            }
-        }
-        let done = if joined { last.map_or(0, |x| x.1) } else { 0 };
-        for (n, text) in window.iter().filter(|(n, _)| *n > done) {
-            let mark = if matcher.is_match(text) { '>' } else { ' ' };
-            out.push_str(&format!("{n:>5}{mark} {text}\n"));
-        }
-        let end = window.last().map_or(*l, |w| w.0);
-        last = Some((f, end.max(done)));
-    }
 }
 
 /// THE line-matching rule behind `grep`, in one place so the mode can't drift
@@ -695,12 +686,12 @@ mod tests {
                 .collect()
         };
         let mut out = String::new();
-        render_with_context(
-            &mut out,
-            &[h(3), h(5), h(20)],
-            &[w(2, 4), w(4, 6), w(19, 21)],
-            &m,
-        );
+        let (hits, wins) = ([h(3), h(5), h(20)], [w(2, 4), w(4, 6), w(19, 21)]);
+        let blocks = hits
+            .iter()
+            .zip(&wins)
+            .map(|((f, l, sym, _), w)| (f.as_str(), *l, sym.as_str(), w.as_slice()));
+        render_context_blocks(&mut out, blocks, |_, _, t| m.is_match(t));
         assert_eq!(
             out,
             "f.rs:3 (in S)\n    2  x\n    3> hit\n    4  x\n    5> hit\n    6  x\n--\nf.rs:20 (in S)\n   19  x\n   20> hit\n   21  x\n"
