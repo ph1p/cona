@@ -311,6 +311,9 @@ pub mod defaults {
     pub const GREP_LIMIT: usize = 50;
     /// Hits shown from the rest of the repo when a `--path` grep finds none.
     pub const GREP_ELSEWHERE: usize = 3;
+    /// A hit line longer than this (chars) prints as a window around the
+    /// match: one base64 data-URI or minified line otherwise costs 30 KB.
+    pub const GREP_LINE_MAX: usize = 240;
     pub const CALLS_DEPTH: usize = 2;
     pub const SHAPE_BUDGET: i64 = 2000;
     pub const ENTRIES_LIMIT: usize = 40;

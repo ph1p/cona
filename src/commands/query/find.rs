@@ -22,8 +22,10 @@ pub fn cmd_find(
          FROM symbols s JOIN files f ON f.id = s.file_id
          WHERE (s.name = ?1 OR s.qualified = ?1 OR s.name LIKE ?2 OR s.qualified LIKE ?2)
          {kind_clause}
-         ORDER BY rank, length(s.qualified), f.path LIMIT ?3"
+         ORDER BY rank, s.kind = 'test', length(s.qualified), f.path LIMIT ?3"
     );
+    // `test` rows (describe/it titles) sort after definitions: a title that
+    // merely mentions the name must not push the def past --limit.
     let like = format!("%{name}%");
     // `--path` is applied in Rust below, so the SQL LIMIT must not clip
     // in-scope rows first: over-fetch when scoped, truncate afterwards. Clamped

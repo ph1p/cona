@@ -40,7 +40,17 @@ pub fn cmd_outline(
             .flatten()
             .collect())
     };
-    let rows = fetch()?;
+    let mut rows = fetch()?;
+    if rows.is_empty() {
+        // A file indexed with zero symbols may just be stale (edited, or an
+        // extractor upgrade marked it) — the refresh below only covers files
+        // that already had rows, so refresh the symbol-less matches first.
+        let named = crate::commands::files_named(conn, file);
+        let refreshed = named.iter().filter(|f| indexer::ensure_fresh(root, conn, f)).count();
+        if refreshed > 0 {
+            rows = fetch()?;
+        }
+    }
     if rows.is_empty() {
         // A directory: point at the command that covers directories. The
         // index probe also catches an indexed dir since removed from disk.

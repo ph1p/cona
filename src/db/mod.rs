@@ -222,7 +222,9 @@ pub fn open_project_db(root: &Path) -> Result<Connection> {
 /// 3: Swift `#if` blocks no longer cut type bodies; Swift static properties.
 /// 4: Swift computed instance properties; `open.x` receivers no longer
 ///    swallow the file (mask_swift_open_receivers).
-const EXTRACT_VERSION: i64 = 4;
+/// 5: JS/TS declarative object-literal members (`executors.update`) and
+///    describe/it/test blocks (kind `test`).
+const EXTRACT_VERSION: i64 = 5;
 
 /// Open an already-built project index without creating files or migrating.
 /// Prefers durable storage, but also checks the sandbox fallback so

@@ -91,6 +91,102 @@ fn top_level_consts<'a>(decl: Node<'a>, src: &str) -> Vec<(String, Node<'a>)> {
         .collect()
 }
 
+/// JS/TS: the title of a `describe`/`it`/`test` block (also `.only`/`.skip`/
+/// `.concurrent`) written as a statement with a string first argument and a
+/// function second — the test runner's unit, absent from any def node.
+fn test_block_name(stmt: Node, src: &str) -> Option<String> {
+    if stmt.kind() != "expression_statement" {
+        return None;
+    }
+    let mut call = stmt.named_child(0)?;
+    if call.kind() == "await_expression" {
+        call = call.named_child(0)?;
+    }
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let callee = call.child_by_field_name("function")?;
+    let base = match callee.kind() {
+        "identifier" => callee,
+        "member_expression" => {
+            let prop = callee.child_by_field_name("property")?;
+            let p = prop.utf8_text(src.as_bytes()).ok()?;
+            if !matches!(p, "only" | "skip" | "concurrent" | "todo") {
+                return None;
+            }
+            callee.child_by_field_name("object")?
+        }
+        _ => return None,
+    };
+    let b = base.utf8_text(src.as_bytes()).ok()?;
+    if !matches!(b, "describe" | "it" | "test" | "suite" | "context") {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let mut c = args.walk();
+    let mut it = args.named_children(&mut c);
+    let title = it.next()?;
+    if !matches!(title.kind(), "string" | "template_string") {
+        return None;
+    }
+    let body = it.next()?;
+    if !matches!(body.kind(), "arrow_function" | "function_expression" | "function") {
+        return None;
+    }
+    let t = title.utf8_text(src.as_bytes()).ok()?;
+    let t = t.trim_matches(|c| c == '"' || c == '\'' || c == '`').trim();
+    (!t.is_empty() && !t.contains('\n')).then(|| t.to_string())
+}
+
+/// JS/TS: `key: value` of a DECLARATIVE object literal — one reachable from
+/// file scope without entering a function body (`definePlugin({…})`, zustand
+/// `create((set) => ({…}))`, `const api = {…}`), or the object a function
+/// `return`s (SDK factories). Callback bags inside function bodies
+/// (`fetch(u, { onError: … })`) stay out: they would flood find/refs and
+/// `dead` with one-shot handlers. Returns (key, value); string keys
+/// (`"send-email"`) are unquoted, computed/numeric keys skipped.
+fn declarative_pair<'a>(pair: Node<'a>, src: &str) -> Option<(String, Node<'a>)> {
+    if pair.kind() != "pair" {
+        return None;
+    }
+    let mut cur = pair.parent();
+    while let Some(n) = cur {
+        match n.kind() {
+            "program" | "return_statement" => break,
+            "object"
+            | "pair"
+            | "arguments"
+            | "call_expression"
+            | "arrow_function"
+            | "parenthesized_expression"
+            | "variable_declarator"
+            | "lexical_declaration"
+            | "variable_declaration"
+            | "export_statement"
+            | "as_expression"
+            | "satisfies_expression"
+            | "assignment_expression"
+            | "expression_statement"
+            | "await_expression" => cur = n.parent(),
+            _ => return None,
+        }
+    }
+    cur?;
+    let key = pair.child_by_field_name("key")?;
+    let name = match key.kind() {
+        "property_identifier" | "identifier" => key.utf8_text(src.as_bytes()).ok()?.to_string(),
+        "string" => {
+            let t = key.utf8_text(src.as_bytes()).ok()?;
+            t.trim_matches(|c| c == '"' || c == '\'').to_string()
+        }
+        _ => return None,
+    };
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((name, pair.child_by_field_name("value")?))
+}
+
 /// Swift type-level `static`/`class` properties (`BooPaths.configDir`) as
 /// `const` (let) / `var` symbols — the type-scoped constants agents look up by
 /// name — plus computed instance properties (`var cellHeight: CGFloat { … }`):
@@ -197,6 +293,59 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
         };
         // js/ts: function-valued bindings — the declarator carries the symbol
         if matches!(lang, "javascript" | "typescript" | "tsx") {
+            // test blocks: `describe("x", () => { it("does a", …) })` →
+            // `x.does a` (kind `test`), so outline maps a test file
+            if let Some(name) = test_block_name(child, src) {
+                let qualified = match parent.as_deref() {
+                    Some(p) => format!("{p}.{name}"),
+                    None => name.clone(),
+                };
+                out.push(Sym {
+                    name,
+                    qualified: qualified.clone(),
+                    kind: "test",
+                    parent: parent.as_deref().map(|s| s.to_string()),
+                    start_line: child.start_position().row + 1,
+                    end_line: child.end_position().row + 1,
+                    signature: first_line_sig(child, src),
+                });
+                push_children(&mut stack, child, Some(Rc::from(qualified)));
+                continue;
+            }
+            // object-literal members: `executors: { update: () => … }` →
+            // `executors.update`; nested objects only extend the qualifier
+            if let Some((name, value)) = declarative_pair(child, src) {
+                let value = match value.kind() {
+                    "parenthesized_expression" | "as_expression" | "satisfies_expression" => {
+                        value.named_child(0).unwrap_or(value)
+                    }
+                    _ => value,
+                };
+                if matches!(
+                    value.kind(),
+                    "arrow_function" | "function_expression" | "function" | "generator_function"
+                ) {
+                    stack.push(Job::FnDecl {
+                        name,
+                        site: child,
+                        value,
+                        // not `method`: these are dispatched by key
+                        // (`toolExecutors[name]`), so `dead` must not read
+                        // zero identifier uses as unused
+                        label: "prop",
+                        parent,
+                    });
+                    continue;
+                }
+                if value.kind() == "object" {
+                    let qualified = match parent.as_deref() {
+                        Some(p) => format!("{p}.{name}"),
+                        None => name,
+                    };
+                    push_children(&mut stack, value, Some(Rc::from(qualified)));
+                    continue;
+                }
+            }
             let declish = matches!(
                 child.kind(),
                 "lexical_declaration"

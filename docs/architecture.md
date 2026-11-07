@@ -170,6 +170,15 @@ src/lang/        Language detection + tree-sitter symbol extraction: mod.rs
                  known descendant kind behind wrappers — OCaml bindings, Julia
                  signature/type_head, SQL object_reference, Perl package_name,
                  ObjC method, Makefile target; per-language in nested_name).
+                 JS/TS extras (walk.rs): declarative object-literal members
+                 (`executors.update`, `useStore.reorder`, nested via
+                 `Parent.key`) — only when every ancestor up to program/return
+                 is declarative (object/pair/call/arrow/declarator/export/as/
+                 satisfies…), so callback bags inside function bodies stay out;
+                 function values get kind `prop` (key-dispatched → `dead` skips
+                 them). describe/it/test(+.only/.skip…) blocks with a literal
+                 title → kind `test`, qualified `outer.inner`; `find` sorts
+                 them after definitions. EXTRACT_VERSION 5 re-parses old rows.
                  Makefile+Dockerfile detected via basename (Dockerfile also
                  Dockerfile.<flavour>/<name>.dockerfile/Containerfile).
                  Vue+Dockerfile grammars vendored (vendor/*, build.rs + cc) —

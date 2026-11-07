@@ -727,6 +727,30 @@ fn file_scope_consts_and_go_vars_only() {
     // locals stay out
     assert!(syms.iter().all(|s| s.name != "local"), "{syms:?}");
 
+    // declarative object literals: plugin defs, zustand stores, factories
+    let ts = "export default definePlugin({\n  name: \"email\",\n  executors: {\n    \"send-email\": async (x) => x,\n    update(y) { return y },\n  },\n});\n\
+              export const useStore = create((set) => ({\n  tiles: [],\n  reorder: (a, b) => set({ a, b }),\n}));\n\
+              export function makeSdk() {\n  return { flows: { save: () => 1 } };\n}\n\
+              function f() {\n  fetch(u, { onError: () => 1 });\n}\n";
+    let tq = quals("typescript", ts);
+    for q in ["executors.send-email", "executors.update", "useStore.reorder", "makeSdk.flows.save"] {
+        assert!(tq.iter().any(|x| x == q), "{q} missing: {tq:?}");
+    }
+    // function-valued keys are `prop` (key-dispatched — `dead` skips them)
+    let ts_syms = lang::extract_symbols("typescript", ts).unwrap();
+    let k = |q: &str| ts_syms.iter().find(|s| s.qualified == q).map(|s| s.kind);
+    assert_eq!(k("useStore.reorder"), Some("prop"));
+    // test blocks outline as `test` symbols, nested under their describe
+    let spec = "describe(\"thing\", () => {\n  it(\"does a\", () => {});\n  test.only('does b', async () => {});\n});\nfoo(\"x\", () => {});\n";
+    let sq = quals("typescript", spec);
+    for q in ["thing", "thing.does a", "thing.does b"] {
+        assert!(sq.iter().any(|x| x == q), "{q} missing: {sq:?}");
+    }
+    assert!(sq.iter().all(|q| q != "x"), "{sq:?}");
+    // callback bags inside function bodies stay out; plain values too
+    assert!(tq.iter().all(|q| !q.ends_with("onError")), "{tq:?}");
+    assert!(tq.iter().all(|q| !q.ends_with("name") && !q.ends_with("tiles")), "{tq:?}");
+
     let go = "package a\n\nvar Chips = []int{1}\n\nfunc (s *Store[T]) Get() {\n  var x = 1\n  _ = x\n}\n";
     let quals = quals("go", go);
     assert!(quals.iter().any(|q| q == "Chips"), "{quals:?}");

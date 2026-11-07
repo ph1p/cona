@@ -148,13 +148,13 @@ pub fn cmd_grep(
             let sym: String = enclosing
                 .query_row(rusqlite::params![rel, (ln + 1) as i64], |r| r.get(0))
                 .unwrap_or_default();
-            hits.push((rel.clone(), ln + 1, sym, line.trim().to_string()));
+            hits.push((rel.clone(), ln + 1, sym, matcher.clip(line.trim())));
             if !lines.is_empty() {
                 let lo = ln.saturating_sub(before);
                 let hi = (ln + after).min(lines.len() - 1);
                 ctx.push(
                     (lo..=hi)
-                        .map(|i| (i + 1, lines[i].trim_end().to_string()))
+                        .map(|i| (i + 1, matcher.clip(lines[i].trim_end())))
                         .collect(),
                 );
             }
@@ -444,6 +444,42 @@ impl Matcher {
         }
     }
 
+    /// Byte offset of the first match in `line` (0 when unknown — a
+    /// case-folded line whose byte length changed).
+    fn match_start(&self, line: &str) -> usize {
+        match self {
+            Matcher::Literal {
+                needle,
+                ignore_case: true,
+            } => {
+                let low = line.to_lowercase();
+                if low.len() == line.len() {
+                    low.find(needle.as_str()).unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            Matcher::Literal { needle, .. } => line.find(needle.as_str()).unwrap_or(0),
+            Matcher::Regex(re) => re.find(line).map_or(0, |m| m.start()),
+        }
+    }
+
+    /// `line` itself, or — past `defaults::GREP_LINE_MAX` chars — a window
+    /// around the first match with `…` marking each cut and the full length.
+    fn clip(&self, line: &str) -> String {
+        let max = defaults::GREP_LINE_MAX;
+        let total = line.chars().count();
+        if total <= max {
+            return line.to_string();
+        }
+        let at = line[..self.match_start(line)].chars().count();
+        let lo = at.saturating_sub(max / 3).min(total - max);
+        let body: String = line.chars().skip(lo).take(max).collect();
+        let head = if lo > 0 { "…" } else { "" };
+        let tail = if lo + max < total { "…" } else { "" };
+        format!("{head}{body}{tail} [{total} chars]")
+    }
+
     fn is_match(&self, line: &str) -> bool {
         match self {
             Matcher::Literal {
@@ -708,6 +744,21 @@ mod tests {
         let ci = Matcher::new("FOO", true, false).unwrap();
         assert!(ci.matches_text(text));
         assert!(!Matcher::literal("baz").matches_text(text));
+    }
+
+    #[test]
+    fn long_lines_clip_to_a_window_around_the_match() {
+        let m = Matcher::literal("bpb");
+        let line = format!("const big = \"{}bpb{}\";", "A".repeat(500), "B".repeat(500));
+        let out = m.clip(&line);
+        assert!(out.contains("bpb"), "{out}");
+        assert!(out.starts_with('…') && out.contains("… ["), "{out}");
+        assert!(out.chars().count() < defaults::GREP_LINE_MAX + 20, "{out}");
+        // short lines are untouched
+        assert_eq!(m.clip("let bpb = 1;"), "let bpb = 1;");
+        // multibyte text never splits a char
+        let wide = "ä".repeat(400) + "bpb";
+        assert!(m.clip(&wide).ends_with("bpb [403 chars]"));
     }
 
     #[test]

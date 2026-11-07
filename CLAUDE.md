@@ -333,8 +333,8 @@ helpers (totals/per_command/top_targets/recent/savings_series) feed both
 ## cona — code navigation (use FIRST, not as fallback)
 
 In a cona-indexed repo, cona IS how you read and search code. It reads one
-symbol instead of a whole file and searches identifier nodes instead of raw
-text, so it replaces the generic read-the-file / grep-the-tree habit:
+symbol instead of a whole file and searches only indexed code (no deps, no
+build output), so it replaces the generic read-the-file / grep-the-tree habit:
 
 - Need ONE function/class/method → `cona show <Sym>`, or `cona context <Sym>`
   for source + callees + call sites. Do not read a whole file for one symbol.
@@ -357,8 +357,9 @@ without writing code, indexes, or usage stats.
 
 Too many hits? `--path <dir|file>` scopes `find`/`refs`/`grep`/`tree`/`show`.
 Ambiguous name? `cona show <Sym> --all` prints every definition instead of
-erroring. `cona grep` matches literally (`a\|b` = either); `--regex` for a
-real regex; `-C 3` prints context lines, so `cona grep X --path f -C 3`
+erroring. `cona grep` is full-text over indexed files — string literals, JSX
+tags, CSS classes, comments too — and matches literally (`a\|b` = either);
+`--regex` for a real regex; `-C 3` prints context lines, so `cona grep X --path f -C 3`
 replaces `grep -n X f` + `sed -n` range reads; `cona show f:40-80` prints a
 line range. `-l`/`-c` list matching files / counts. Batch: `show A B`,
 `refs A B`, `outline f1 f2`, `find A B`. Go methods are `Type.Method`.
