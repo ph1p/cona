@@ -733,7 +733,12 @@ fn file_scope_consts_and_go_vars_only() {
               export function makeSdk() {\n  return { flows: { save: () => 1 } };\n}\n\
               function f() {\n  fetch(u, { onError: () => 1 });\n}\n";
     let tq = quals("typescript", ts);
-    for q in ["executors.send-email", "executors.update", "useStore.reorder", "makeSdk.flows.save"] {
+    for q in [
+        "executors.send-email",
+        "executors.update",
+        "useStore.reorder",
+        "makeSdk.flows.save",
+    ] {
         assert!(tq.iter().any(|x| x == q), "{q} missing: {tq:?}");
     }
     // function-valued keys are `prop` (key-dispatched — `dead` skips them)
@@ -749,7 +754,11 @@ fn file_scope_consts_and_go_vars_only() {
     assert!(sq.iter().all(|q| q != "x"), "{sq:?}");
     // callback bags inside function bodies stay out; plain values too
     assert!(tq.iter().all(|q| !q.ends_with("onError")), "{tq:?}");
-    assert!(tq.iter().all(|q| !q.ends_with("name") && !q.ends_with("tiles")), "{tq:?}");
+    assert!(
+        tq.iter()
+            .all(|q| !q.ends_with("name") && !q.ends_with("tiles")),
+        "{tq:?}"
+    );
 
     let go = "package a\n\nvar Chips = []int{1}\n\nfunc (s *Store[T]) Get() {\n  var x = 1\n  _ = x\n}\n";
     let quals = quals("go", go);

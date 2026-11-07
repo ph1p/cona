@@ -130,7 +130,10 @@ fn test_block_name(stmt: Node, src: &str) -> Option<String> {
         return None;
     }
     let body = it.next()?;
-    if !matches!(body.kind(), "arrow_function" | "function_expression" | "function") {
+    if !matches!(
+        body.kind(),
+        "arrow_function" | "function_expression" | "function"
+    ) {
         return None;
     }
     let t = title.utf8_text(src.as_bytes()).ok()?;
