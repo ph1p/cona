@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10](https://github.com/ph1p/cona/compare/v0.1.9...v0.1.10) - 2026-11-09
+
+### Fixed
+
+- *(deps)* bump rusqlite to 0.41 for RUSTSEC-2026-0459
+
 ## [0.1.9](https://github.com/ph1p/cona/compare/v0.1.8...v0.1.9) - 2026-11-07
 
 ### Added
