@@ -224,7 +224,9 @@ pub fn open_project_db(root: &Path) -> Result<Connection> {
 ///    swallow the file (mask_swift_open_receivers).
 /// 5: JS/TS declarative object-literal members (`executors.update`) and
 ///    describe/it/test blocks (kind `test`).
-const EXTRACT_VERSION: i64 = 5;
+/// 6: JS/TS object-literal methods are kind `member` (class methods stay
+///    `method`).
+const EXTRACT_VERSION: i64 = 6;
 
 /// Open an already-built project index without creating files or migrating.
 /// Prefers durable storage, but also checks the sandbox fallback so

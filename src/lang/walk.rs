@@ -295,7 +295,7 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
             Job::Visit(child, parent) => (child, parent),
         };
         // js/ts: function-valued bindings — the declarator carries the symbol
-        if matches!(lang, "javascript" | "typescript" | "tsx") {
+        if super::is_js_ts(lang) {
             // test blocks: `describe("x", () => { it("does a", …) })` →
             // `x.does a` (kind `test`), so outline maps a test file
             if let Some(name) = test_block_name(child, src) {
@@ -428,6 +428,11 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
         if let Some((label, _is_container, name_field)) = classify(lang, child.kind()) {
             let label = if lang == "swift" && child.kind() == "class_declaration" {
                 swift_class_label(child, src)
+            } else if object_literal_method(lang, child) {
+                // reached through the object, never by its own name — a kind
+                // of its own lets `dead` tell it from a class method without
+                // looking the container up
+                "member"
             } else {
                 label
             };
@@ -463,4 +468,12 @@ pub(crate) fn walk(node: Node, src: &str, lang: &str, parent: Option<&str>, out:
         }
         push_children(&mut stack, child, parent);
     }
+}
+
+/// JS/TS shorthand method of an object literal (`{ boot() {} }`), as opposed
+/// to a class method — same `method_definition` node, different parent.
+fn object_literal_method(lang: &str, node: Node) -> bool {
+    crate::lang::is_js_ts(lang)
+        && node.kind() == "method_definition"
+        && node.parent().is_some_and(|p| p.kind() == "object")
 }

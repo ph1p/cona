@@ -4,7 +4,8 @@
 //! only serves `--include-deps`, which searches outside the index.
 
 use crate::commands::{
-    defaults, jout, render_context_blocks, shell_quote, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL,
+    defaults, jout, render_context_blocks, rewalk_if_vanished, shell_quote, GrepOpts, PathFilter,
+    ENCLOSING_SYMBOL_SQL, STALE_NOTE,
 };
 use crate::{db, entries, indexer};
 use anyhow::{anyhow, Result};
@@ -26,70 +27,52 @@ pub fn cmd_grep(
     opts: GrepOpts<'_>,
     json: bool,
 ) -> Result<(String, i64)> {
-    let (out, baseline) = grep_once(root, conn, pattern, opts, json)?;
-    let empty = if json {
-        out.trim() == "[]"
-    } else {
-        out.starts_with("no matches")
-    };
-    if !empty
-        || opts.include_deps
-        || !index_lists_vanished_files(root, conn)
-        || indexer::index_project(root, conn).is_err()
-    {
-        return Ok((out, baseline));
+    let first = grep_once(root, conn, pattern, opts, json)?;
+    if first.hits > 0 || opts.include_deps || !rewalk_if_vanished(root, conn) {
+        return Ok((first.out, first.baseline));
     }
-    let (again, baseline) = grep_once(root, conn, pattern, opts, json)?;
+    let again = grep_once(root, conn, pattern, opts, json)?;
     if json {
-        return Ok((again, baseline));
+        return Ok((again.out, again.baseline));
     }
-    Ok((
-        format!("note: the index listed files that no longer exist — re-indexed\n{again}"),
-        baseline,
-    ))
+    Ok((format!("{STALE_NOTE}{}", again.out), again.baseline))
 }
 
-/// Any indexed path missing on disk: the walk predates a move/delete.
-fn index_lists_vanished_files(root: &Path, conn: &Connection) -> bool {
-    let Ok(mut stmt) = conn.prepare("SELECT path FROM files") else {
-        return false;
-    };
-    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
-        return false;
-    };
-    let vanished = rows.flatten().any(|p| !root.join(p).exists());
-    vanished
+/// One search's rendered answer plus how many hits it holds (`-l`/`-c`:
+/// matching files). "Empty" is read off the count, never off the text.
+struct Answer {
+    out: String,
+    baseline: i64,
+    hits: usize,
 }
 
-fn grep_once(
+/// The matcher that produced the candidates (the regex one after a literal
+/// miss), the files that may hold a hit, and the `note:` lines saying how the
+/// list came about (always empty under `json`).
+struct Selected {
+    matcher: Matcher,
+    files: Vec<String>,
+    note: String,
+}
+
+/// Which files to scan and with which matcher: scope, prefilter, the
+/// literal→regex retry, `--no-tests` and the generated-file fold.
+fn select_files(
     root: &Path,
     conn: &Connection,
     pattern: &str,
     opts: GrepOpts<'_>,
     json: bool,
-) -> Result<(String, i64)> {
+) -> Result<Selected> {
     let GrepOpts {
         ignore_case,
         regex,
-        limit,
         path: path_filter,
         include_deps,
-        before,
-        after,
-        files_only,
-        count,
         word,
-        only_matching,
-        full_lines,
         no_tests,
-        strict_path: _,
+        ..
     } = opts;
-    // -o prints the match itself, so context lines have nothing to attach to
-    let (before, after) = if only_matching {
-        (0, 0)
-    } else {
-        (before, after)
-    };
     let mut matcher = Matcher::build(pattern, ignore_case, regex, word)?;
     let pf = PathFilter::new(root, path_filter);
     let mut fell_back = false;
@@ -174,9 +157,47 @@ fn grep_once(
             ));
         }
     }
+    Ok(Selected {
+        matcher,
+        files,
+        note,
+    })
+}
+
+fn grep_once(
+    root: &Path,
+    conn: &Connection,
+    pattern: &str,
+    opts: GrepOpts<'_>,
+    json: bool,
+) -> Result<Answer> {
+    let GrepOpts {
+        limit,
+        include_deps,
+        before,
+        after,
+        files_only,
+        count,
+        only_matching,
+        full_lines,
+        ..
+    } = opts;
+    // -o prints the match itself, so context lines have nothing to attach to
+    let (before, after) = if only_matching {
+        (0, 0)
+    } else {
+        (before, after)
+    };
+    let Selected {
+        matcher,
+        files,
+        note,
+    } = select_files(root, conn, pattern, opts, json)?;
     if files_only || count {
-        let (out, saved) = grep_files(root, conn, pattern, &matcher, files, opts, json)?;
-        return Ok((note + &out, saved));
+        let found = count_per_file(root, &matcher, files);
+        let mut answer = grep_files(root, conn, pattern, &found, opts, json)?;
+        answer.out.insert_str(0, &note);
+        return Ok(answer);
     }
     let mut enclosing = conn.prepare(ENCLOSING_SYMBOL_SQL)?;
     let mut hits: Vec<(String, usize, String, String)> = Vec::new();
@@ -261,7 +282,12 @@ fn grep_once(
                 serde_json::json!({"file": f, "line": l, "symbol": sym, "text": t})
             })
             .collect();
-        return jout(&items, baseline);
+        let (out, baseline) = jout(&items, baseline)?;
+        return Ok(Answer {
+            out,
+            baseline,
+            hits: hits.len(),
+        });
     }
     let mut out = note;
     if !ctx.is_empty() {
@@ -287,7 +313,25 @@ fn grep_once(
     if hits.is_empty() {
         out.push_str(&no_matches(root, conn, pattern, opts)?);
     }
-    Ok((out, baseline))
+    Ok(Answer {
+        out,
+        baseline,
+        hits: hits.len(),
+    })
+}
+
+/// Matching-line count per file, files without a match dropped. Never
+/// truncated: a file list or a count that stops at --limit answers
+/// "where / how many" wrongly, and a line per file is already compact.
+fn count_per_file(root: &Path, matcher: &Matcher, files: Vec<String>) -> Vec<(String, usize)> {
+    files
+        .into_iter()
+        .filter_map(|rel| {
+            let src = std::fs::read_to_string(root.join(&rel)).ok()?;
+            let n = src.lines().filter(|l| matcher.is_match(l)).count();
+            (n > 0).then_some((rel, n))
+        })
+        .collect()
 }
 
 /// `-l`/`-c`: one line per matching file. Nothing to label, so no index
@@ -296,33 +340,25 @@ fn grep_files(
     root: &Path,
     conn: &Connection,
     pattern: &str,
-    matcher: &Matcher,
-    files: Vec<String>,
+    found: &[(String, usize)],
     opts: GrepOpts<'_>,
     json: bool,
-) -> Result<(String, i64)> {
-    // Never truncated: a file list or a count that stops at --limit answers
-    // "where / how many" wrongly, and a line per file is already compact.
-    let mut found: Vec<(String, usize)> = Vec::new();
-    for rel in files {
-        let Ok(src) = std::fs::read_to_string(root.join(&rel)) else {
-            continue;
-        };
-        let n = src.lines().filter(|l| matcher.is_match(l)).count();
-        if n == 0 {
-            continue;
-        }
-        found.push((rel, n));
-    }
+) -> Result<Answer> {
+    let hits = found.len();
     if json {
         let items: Vec<_> = found
             .iter()
             .map(|(f, n)| serde_json::json!({"file": f, "count": n}))
             .collect();
-        return jout(&items, 0);
+        let (out, baseline) = jout(&items, 0)?;
+        return Ok(Answer {
+            out,
+            baseline,
+            hits,
+        });
     }
     let mut out = String::new();
-    for (f, n) in &found {
+    for (f, n) in found {
         if opts.count {
             out.push_str(&format!("{f}:{n}\n"));
         } else {
@@ -336,7 +372,11 @@ fn grep_files(
     if found.is_empty() {
         out.push_str(&no_matches(root, conn, pattern, opts)?);
     }
-    Ok((out, 0))
+    Ok(Answer {
+        out,
+        baseline: 0,
+        hits,
+    })
 }
 
 /// The zero-hit message. Under `--path` it searches the rest of the repo
@@ -372,22 +412,16 @@ fn no_matches(root: &Path, conn: &Connection, pattern: &str, opts: GrepOpts<'_>)
         // One line on where the pattern does live: enough to spot a wrong
         // scope, without burying the "no" under unrelated hits.
         if !opts.strict_path && !opts.include_deps {
-            let wide = GrepOpts {
-                path: None,
-                count: true,
-                files_only: false,
-                strict_path: true,
-                ..opts
-            };
-            let (json, _) = grep_once(root, conn, pattern, wide, true)?;
-            let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
+            let wide = GrepOpts { path: None, ..opts };
+            let Selected { matcher, files, .. } = select_files(root, conn, pattern, wide, true)?;
+            let rows = count_per_file(root, &matcher, files);
             if rows.is_empty() {
                 out.push_str(" — none anywhere in the repo");
             } else {
-                let hits: u64 = rows.iter().filter_map(|r| r["count"].as_u64()).sum();
+                let hits: usize = rows.iter().map(|(_, n)| n).sum();
                 let names: Vec<&str> = rows
                     .iter()
-                    .filter_map(|r| r["file"].as_str())
+                    .map(|(f, _)| f.as_str())
                     .take(defaults::GREP_ELSEWHERE)
                     .collect();
                 let more = if rows.len() > names.len() {
@@ -422,7 +456,7 @@ fn unseen_scope(root: &Path, conn: &Connection, scope: &str) -> Result<Vec<Strin
     let rel = scope.trim_start_matches("./").trim_end_matches('/');
     let on_disk = root.join(rel);
     if on_disk.is_file() {
-        return match indexer::index_unseen(root, conn, rel) {
+        return match crate::commands::index_if_unseen(root, conn, rel) {
             Ok(_) => Ok(vec![rel.to_string()]),
             Err(why) => Err(anyhow!(
                 "'{scope}' is not indexed ({why}) — search it with plain grep/rg"

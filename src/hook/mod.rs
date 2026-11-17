@@ -171,15 +171,15 @@ pub struct ReadFacts {
     pub dirty: bool,
 }
 
+/// A README or a config is read whole by design; a 10k-line data dump is not.
+pub const NON_CALLABLE_REDIRECT_FACTOR: i64 = 8;
+
 /// Decide what to do with a candidate `Read`.
 /// - large indexed code file, full read → Redirect (block, actionable now)
 /// - large UNINDEXED code file in a git repo, full read → Nudge (index me)
 /// - re-read of an already-read indexed file → Advise (any size)
 /// - mid-size indexed code file, full read → Advise (allowed, hint attached)
 /// - everything else (partial, small, non-code, loose file) → Allow
-/// A README or a config is read whole by design; a 10k-line data dump is not.
-pub const NON_CALLABLE_REDIRECT_FACTOR: i64 = 8;
-
 pub fn decide_read(f: &ReadFacts) -> Decision {
     if f.partial || !f.is_code {
         return Decision::Allow;
@@ -220,8 +220,11 @@ pub struct GrepFacts {
     /// "I want a symbol" signal: grep returns a line number to slice around,
     /// where `show` returns the symbol. Advisory tier.
     pub single_file: bool,
-    /// The pattern is a plain identifier cona can serve semantically.
+    /// The pattern is shaped like a plain identifier.
     pub identifier: bool,
+    /// The index defines a symbol of that name. A word that names none is
+    /// text, not a symbol lookup. Only read in an indexed project.
+    pub symbol_known: bool,
     /// The search root is an indexed cona project.
     pub indexed_project: bool,
     /// The search root is inside a git repo (indexable, if not yet indexed).
@@ -239,6 +242,14 @@ pub struct GrepFacts {
 /// - broad identifier search over an UNINDEXED git repo → Nudge
 /// - broad literal/regex search over an indexed project → Advise
 /// - surgical / non-repo / other literal or regex searches → Allow
+impl GrepFacts {
+    /// cona can serve the pattern semantically (`refs`/`show`): an identifier
+    /// and, where there is an index to ask, one it has a symbol for.
+    pub fn names_symbol(&self) -> bool {
+        self.identifier && (!self.indexed_project || self.symbol_known)
+    }
+}
+
 pub fn decide_grep(f: &GrepFacts) -> Decision {
     if f.surgical {
         return Decision::Allow;
@@ -246,7 +257,7 @@ pub fn decide_grep(f: &GrepFacts) -> Decision {
     // A literal/regex (`dmf-primary-[a-z]*`, `foo.bar`) has no symbol for
     // `refs`, but `cona grep` searches it code-only — a hint in an indexed
     // project, never a block or nudge.
-    if !f.identifier {
+    if !f.names_symbol() {
         return if f.indexed_project && !f.single_file {
             Decision::Advise
         } else {

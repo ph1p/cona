@@ -345,10 +345,36 @@ fn grep_facts() -> GrepFacts {
         surgical: false,
         single_file: false,
         identifier: true,
+        symbol_known: true,
         indexed_project: true,
         in_repo: true,
         soft: false,
     }
+}
+
+#[test]
+fn identifier_without_a_symbol_is_text() {
+    // `grep TODO`: identifier-shaped, but the index defines no such symbol
+    let word = GrepFacts {
+        symbol_known: false,
+        ..grep_facts()
+    };
+    assert_eq!(decide_grep(&word), Decision::Advise);
+    assert_eq!(
+        decide_grep(&GrepFacts {
+            single_file: true,
+            ..word.clone()
+        }),
+        Decision::Allow
+    );
+    // no index to ask: the identifier shape alone decides
+    assert_eq!(
+        decide_grep(&GrepFacts {
+            indexed_project: false,
+            ..word
+        }),
+        Decision::Nudge
+    );
 }
 
 #[test]

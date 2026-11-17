@@ -131,16 +131,9 @@ fn line_range(
     arg: &str,
     scope: &crate::commands::PathFilter,
 ) -> Result<Option<(String, usize, usize)>> {
-    let Some((file, range)) = arg.rsplit_once(':') else {
+    let Some((file, start, end)) = split_range(arg) else {
         return Ok(None);
     };
-    let (a, b) = range.split_once('-').unwrap_or((range, range));
-    let (Ok(start), Ok(end)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>()) else {
-        return Ok(None);
-    };
-    if start < 1 || end < start {
-        return Ok(None);
-    }
     // `Name:13-30` — no `.`/`/`, so a symbol, not a file: `symbol_range`'s
     if !file.contains('.') && !file.contains('/') && !root.join(file).exists() {
         return Ok(None);
@@ -154,7 +147,7 @@ fn line_range(
             let near = crate::commands::did_you_mean_file(conn, file);
             anyhow::bail!("no file '{file}'{near}")
         }
-        many => Err(ambiguous_file(file, many, &format!(":{range}"))),
+        many => Err(ambiguous_file(file, many, &arg[file.len()..])),
     }
 }
 
@@ -174,11 +167,16 @@ fn ambiguous_file(name: &str, many: &[String], suffix: &str) -> anyhow::Error {
 
 /// `Name:N-M` / `Name:N` where `Name` is no path → (Name, N, M).
 fn symbol_range(arg: &str) -> Option<(&str, usize, usize)> {
-    let (name, range) = arg.rsplit_once(':')?;
+    split_range(arg).filter(|(name, ..)| !name.is_empty() && !name.ends_with(':'))
+}
+
+/// `head:13-30` / `head:13` → `(head, 13, 30)`: THE trailing-range parse for
+/// both the file and the symbol form. `None` unless 1 ≤ start ≤ end.
+fn split_range(arg: &str) -> Option<(&str, usize, usize)> {
+    let (head, range) = arg.rsplit_once(':')?;
     let (a, b) = range.split_once('-').unwrap_or((range, range));
-    let (start, end) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
-    (!name.is_empty() && !name.ends_with(':') && start >= 1 && end >= start)
-        .then_some((name, start, end))
+    let (start, end): (usize, usize) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+    (start >= 1 && end >= start).then_some((head, start, end))
 }
 
 /// `Sym:13-30`: lines of the file that defines `Sym`. Agents write this with

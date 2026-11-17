@@ -218,20 +218,26 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
             Ok(r) => r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"),
             Err(_) => continue,
         };
-        let Some(language) = lang::detect_file(&abs, &rel) else {
-            continue;
-        };
-        if is_excluded_file(entry.file_name().to_str().unwrap_or("")) {
+        // Cheap rejects first: `detect_file` opens an extension-less file
+        // for its `#!` line, which an unchanged indexed script must not pay
+        // on every walk.
+        if !lang::may_be_code(&rel) || is_excluded_file(entry.file_name().to_str().unwrap_or("")) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
         let (mtime, size) = (file_mtime(&meta), meta.len() as i64);
-        seen.insert(rel.clone());
-        if let Some((_, m, s)) = existing.get(&rel) {
-            if *m == mtime && *s == size {
-                continue;
-            }
+        // indexed and unchanged: it had a language then, it has one now
+        if existing
+            .get(&rel)
+            .is_some_and(|(_, m, s)| *m == mtime && *s == size)
+        {
+            seen.insert(rel);
+            continue;
         }
+        let Some(language) = lang::detect_file(&abs, &rel) else {
+            continue;
+        };
+        seen.insert(rel.clone());
         candidates.push(Candidate {
             rel,
             abs,
@@ -557,14 +563,27 @@ pub fn reindex_file(root: &Path, conn: &Connection, rel: &str) -> Result<usize> 
         bail!("{rel} changed since it was indexed; cannot refresh in read-only mode (run `cona index` from a writable environment)");
     }
     let abs = root.join(rel);
-    let Some(language) = lang::detect_file(&abs, rel) else {
+    let by_ext = lang::detect_lang(rel);
+    if !lang::may_be_code(rel) {
         return Ok(0);
-    };
+    }
     // stat BEFORE reading: a write in between leaves an older mtime, so the
     // next is_stale self-heals. The other order pairs a fresh mtime with stale
     // content until the next external edit.
-    let meta = std::fs::metadata(&abs)?;
-    let src = std::fs::read_to_string(&abs)?;
+    let read = || -> std::io::Result<_> {
+        let meta = std::fs::metadata(&abs)?;
+        Ok((meta, std::fs::read_to_string(&abs)?))
+    };
+    let (meta, src) = match read() {
+        Ok(read) => read,
+        // extension-less and unreadable as text: a binary, not a script
+        Err(_) if by_ext.is_none() => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+    // the `#!` line comes from the source just read — no second open
+    let Some(language) = lang::detect_src(rel, &src) else {
+        return Ok(0);
+    };
     let symbols = lang::extract_symbols(language, &src)?;
     // One transaction, so a crash can't leave a "fresh" file with missing
     // symbols. IMMEDIATE: see index_project's phase-3 note.

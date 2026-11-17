@@ -606,19 +606,16 @@ pub fn cmd_rename(
             list.join("\n")
         );
     }
-    let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
-    let files: Vec<String> = files_stmt
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let files = crate::commands::indexed_files(conn)?;
     // Plan all edits before staging; every syntax gate must pass first.
     let mut plans = Vec::new();
     let mut hit_counts = Vec::new();
     let mut fallback_files: Vec<String> = Vec::new();
-    for rel in &files {
+    for (rel, flang) in &files {
         let abs = project_path(root, rel)
             .with_context(|| format!("invalid indexed mutation path: {rel}"))?;
         let src = std::fs::read_to_string(abs).with_context(|| format!("cannot read {rel}"))?;
-        let flang = lang::detect_src(rel, &src);
+        let flang = Some(flang.as_str());
         let (positions, semantic) = lang::ident_positions(flang, &src, &name);
         if positions.is_empty() {
             continue;
@@ -988,7 +985,7 @@ mod tests {
             .as_nanos() as i64;
         f.conn
             .execute(
-                "INSERT INTO files(path,mtime,size) VALUES('c.txt',?1,3)",
+                "INSERT INTO files(path,mtime,size,lang) VALUES('c.txt',?1,3,'text')",
                 [modified],
             )
             .unwrap();

@@ -1,6 +1,8 @@
 //! `find`: exact / LIKE / fuzzy symbol lookup.
 
-use crate::commands::{clip, fuzzy_symbols, jout, PathFilter, LIMIT_TRAILER};
+use crate::commands::{
+    clip, fuzzy_symbols, jout, rewalk_if_vanished, PathFilter, LIMIT_TRAILER, STALE_NOTE,
+};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::path::Path;
@@ -74,6 +76,15 @@ pub fn cmd_find(
         }
     }
     if rows.is_empty() {
+        // the symbol may live in a file that replaced a vanished one
+        if rewalk_if_vanished(root, conn) {
+            let (body, b) = cmd_find(root, conn, name, kind, limit, path_filter, json)?;
+            return Ok(if json {
+                (body, b)
+            } else {
+                (format!("{STALE_NOTE}{body}"), b)
+            });
+        }
         // `find openai-oauth` names a FILE (kebab stem), not a symbol: point
         // at matching files before the fuzzy symbol guess. Skipped under
         // --kind, which asks for a symbol kind no file has.

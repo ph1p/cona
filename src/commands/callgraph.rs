@@ -77,9 +77,9 @@ pub(crate) fn build_graph(
     conn: &Connection,
 ) -> Result<(graph::Graph, HashMap<String, i64>)> {
     refresh_candidate_files(root, conn)?;
-    let mut stmt = conn.prepare("SELECT path, size FROM files ORDER BY path")?;
-    let files: Vec<(String, i64)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let mut stmt = conn.prepare("SELECT path, size, lang FROM files ORDER BY path")?;
+    let files: Vec<(String, i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut sym_stmt = conn.prepare(
         "SELECT s.name, s.qualified, s.kind, s.start_line, s.end_line, s.signature
@@ -87,11 +87,11 @@ pub(crate) fn build_graph(
     )?;
     let mut sizes: HashMap<String, i64> = HashMap::new();
     let mut input: Vec<(String, Option<&str>, String, Vec<graph::SymNode>)> = Vec::new();
-    for (rel, size) in files {
-        let src = std::fs::read_to_string(root.join(&rel))
+    for (rel, size, lng) in &files {
+        let src = std::fs::read_to_string(root.join(rel))
             .with_context(|| format!("cannot read {rel} while building a fresh graph"))?;
         let syms: Vec<graph::SymNode> = sym_stmt
-            .query_map([&rel], |r| {
+            .query_map([rel], |r| {
                 let sig: String = r.get(5)?;
                 Ok(graph::SymNode {
                     name: r.get(0)?,
@@ -105,9 +105,8 @@ pub(crate) fn build_graph(
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        sizes.insert(rel.clone(), size);
-        let lng = lang::detect_src(&rel, &src);
-        input.push((rel.clone(), lng, src, syms));
+        sizes.insert(rel.clone(), *size);
+        input.push((rel.clone(), Some(lng.as_str()), src, syms));
     }
     Ok((graph::Graph::build(&input), sizes))
 }
