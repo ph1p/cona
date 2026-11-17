@@ -73,7 +73,31 @@ fn format_arg_uses(src: &str, names: &HashSet<&str>, counts: &mut HashMap<String
     }
 }
 
+/// A JS/TS method whose container is not itself a symbol: a member of an
+/// anonymous object literal (`export default { setup() {} }`,
+/// `defineComponent({ mounted() {} })`). The object is handed away by value
+/// and its members are called through it — no identifier ever names them.
+fn anonymous_member(lang: &str, kind: &str, container_kind: Option<&str>) -> bool {
+    object_method(lang, kind) && container_kind.is_none()
+}
+
+/// A JS/TS method of a NAMED object literal (`const cfg = { boot() {} }`):
+/// callers hold the object (`run(cfg)`), so the object's name is a use too.
+/// Class members are called by their own name and stay plain candidates.
+fn object_member(lang: &str, kind: &str, container_kind: Option<&str>) -> bool {
+    object_method(lang, kind)
+        && container_kind.is_some_and(|k| !matches!(k, "class" | "interface" | "enum" | "type"))
+}
+
+fn object_method(lang: &str, kind: &str) -> bool {
+    matches!(lang, "javascript" | "typescript" | "tsx") && kind == "method"
+}
+
 struct Cand {
+    /// `export default …` — alive when some file `import()`s this module.
+    default_export: bool,
+    /// Name of the object literal holding this method (`object_member`).
+    via: Option<String>,
     path: String,
     kind: String,
     qualified: String,
@@ -122,7 +146,7 @@ pub fn cmd_dead(
     )?;
     let mut defs: HashMap<String, HashMap<String, i64>> = HashMap::new();
     let mut cands: Vec<Cand> = Vec::new();
-    for row in stmt
+    let rows: Vec<_> = stmt
         .query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -137,8 +161,19 @@ pub fn cmd_dead(
             ))
         })?
         .flatten()
-    {
-        let (path, lng, kind, qualified, name, parent, start, end, sig) = row;
+        .collect();
+    let kinds: HashMap<(&str, &str), &str> = rows
+        .iter()
+        .map(|r| ((r.0.as_str(), r.3.as_str()), r.2.as_str()))
+        .collect();
+    for row in &rows {
+        let (path, lng, kind, qualified, name, parent, start, end, sig) = row.clone();
+        // `a.b.m` → container `a.b`; an unqualified method has none
+        let container = qualified.rsplit_once('.').map(|(c, _)| c.to_string());
+        let container_kind = container
+            .as_deref()
+            .and_then(|c| kinds.get(&(path.as_str(), c)))
+            .copied();
         if !lang::has_callable_symbols(&lng) {
             continue;
         }
@@ -161,11 +196,22 @@ pub fn cmd_dead(
                 Some(entries::EntryClass::Main | entries::EntryClass::Test)
             )
             || implicitly_called(&name, &sig)
+            || anonymous_member(&lng, &kind, container_kind)
+            || (sig.trim_start().starts_with("export ") && entries::is_framework_entry_path(&path))
             || (parent.is_some() && inside_conforming(&path, start, end))
         {
             continue;
         }
         cands.push(Cand {
+            default_export: sig.trim_start().starts_with("export default"),
+            via: object_member(&lng, &kind, container_kind)
+                .then(|| {
+                    container
+                        .as_deref()
+                        .map(crate::db::name_tail)
+                        .map(str::to_string)
+                })
+                .flatten(),
             api: matches!(class, Some(entries::EntryClass::Api)),
             path,
             kind,
@@ -175,7 +221,10 @@ pub fn cmd_dead(
             end,
         });
     }
-    let names: HashSet<&str> = cands.iter().map(|c| c.name.as_str()).collect();
+    let names: HashSet<&str> = cands
+        .iter()
+        .flat_map(|c| std::iter::once(c.name.as_str()).chain(c.via.as_deref()))
+        .collect();
 
     let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
     let all_files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
@@ -185,15 +234,26 @@ pub fn cmd_dead(
     let mut bytes = 0usize;
     let scans = par_map(&all_files, 8, |rel| {
         let src = std::fs::read_to_string(root.join(rel)).ok()?;
-        let lng = lang::detect_lang(rel);
+        let lng = lang::detect_src(rel, &src);
         let mut counts = lang::ident_counts_members(lng, &src, &names);
         if lng == Some("rust") {
             format_arg_uses(&src, &names, &mut counts);
         }
-        Some((src.len(), counts))
+        let lazy = if src.contains("import(") {
+            entries::dynamic_import_stems(&src)
+        } else {
+            Vec::new()
+        };
+        Some((src.len(), counts, lazy))
     });
+    // modules loaded by `lazy(() => import("./X"))`: no identifier names their
+    // default export anywhere, so the name scan alone calls it dead
+    let mut lazy_modules: HashSet<String> = HashSet::new();
     for (rel, scan) in all_files.iter().zip(scans) {
-        let Some((b, counts)) = scan else { continue };
+        let Some((b, counts, lazy)) = scan else {
+            continue;
+        };
+        lazy_modules.extend(lazy);
         bytes += b;
         let own = defs.get(rel);
         let bucket = if entries::is_test_path(rel) {
@@ -216,6 +276,15 @@ pub fn cmd_dead(
     let (mut unused, mut tests_only): (Vec<&Cand>, Vec<&Cand>) = cands
         .iter()
         .filter(|c| prod.get(c.name.as_str()).copied().unwrap_or(0) == 0)
+        .filter(|c| {
+            c.via
+                .as_deref()
+                .is_none_or(|v| prod.get(v).copied().unwrap_or(0) == 0)
+        })
+        .filter(|c| {
+            !(c.default_export
+                && entries::module_stem(&c.path).is_some_and(|m| lazy_modules.contains(m)))
+        })
         .partition(|c| test.get(c.name.as_str()).copied().unwrap_or(0) == 0);
     let baseline = db::orient_baseline(bytes);
 
@@ -294,6 +363,19 @@ mod tests {
         assert_eq!(c.get("w"), Some(&1));
         // `{{gone}}` is an escaped brace: inner `{gone}` still matches — errs alive
         assert_eq!(c.get("gone"), Some(&1));
+    }
+
+    #[test]
+    fn members_of_anonymous_objects_are_not_candidates() {
+        // `export default { setup() {} }` / `methods: { click() {} }`
+        assert!(anonymous_member("typescript", "method", None));
+        assert!(!anonymous_member("typescript", "method", Some("class")));
+        assert!(!anonymous_member("typescript", "fn", None));
+        assert!(!anonymous_member("rust", "method", None));
+        // a named object's member lives as long as the object is used
+        assert!(object_member("typescript", "method", Some("const")));
+        assert!(!object_member("typescript", "method", Some("class")));
+        assert!(!object_member("typescript", "method", None));
     }
 
     #[test]

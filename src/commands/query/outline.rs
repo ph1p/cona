@@ -6,6 +6,51 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 use std::path::Path;
 
+/// A file with no symbols still has a shape worth one call: a re-export
+/// barrel, a config object, a route table. Small → the file itself (cheaper
+/// than the error + the Read it forces); larger → its import/export lines.
+/// `None` when neither applies and the caller's error is the honest answer.
+fn symbolless(root: &Path, conn: &Connection, file: &str) -> Option<(String, i64)> {
+    const WHOLE_MAX_LINES: usize = 60;
+    let named = crate::commands::files_named(conn, file);
+    let rel = match named.as_slice() {
+        [one] => one.as_str(),
+        _ => file.trim_start_matches("./"),
+    };
+    let src = std::fs::read_to_string(root.join(rel)).ok()?;
+    let lines: Vec<&str> = src.lines().collect();
+    let baseline = db::est_tokens(src.len());
+    if lines.len() <= WHOLE_MAX_LINES {
+        let mut out = format!("{rel}  (no symbols — whole file, {} lines)\n", lines.len());
+        crate::commands::push_numbered_lines(&mut out, &lines, 0, lines.len());
+        return Some((out, baseline));
+    }
+    let edges: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            let t = l.trim_start();
+            t.starts_with("export ") || t.starts_with("module.exports") || t.starts_with("pub use ")
+        })
+        .map(|(i, l)| (i + 1, l.trim()))
+        .take(WHOLE_MAX_LINES)
+        .collect();
+    if edges.is_empty() {
+        return None;
+    }
+    let mut out = format!(
+        "{rel}  (no symbols — export lines of {}; `cona show {rel}:A-B` for a range)\n",
+        lines.len()
+    );
+    for (n, l) in edges {
+        out.push_str(&format!(
+            "  {n}: {}\n",
+            l.chars().take(160).collect::<String>()
+        ));
+    }
+    Some((out, baseline))
+}
+
 /// One outline row: `(path, kind, qualified, start, end, signature, file_size)`.
 type OutlineRow = (String, String, String, i64, i64, String, i64);
 
@@ -64,20 +109,32 @@ pub fn cmd_outline(
         }
         // Distinguish the remaining causes — each has a different next step,
         // and a hook-redirected agent must not be stranded by a dead end.
-        if !crate::commands::files_named(conn, file).is_empty() {
-            bail!(
-                "'{file}' is indexed but has no extractable symbols — read it directly, \
-                 or search it with `cona grep <pattern> --path {file}`"
-            );
+        let indexed = !crate::commands::files_named(conn, file).is_empty();
+        if !indexed && root.join(file).is_file() {
+            // created since the last walk: index it now rather than send the
+            // agent to `cona index` — unless the walk excludes it for good
+            let rel = file.trim_start_matches("./");
+            if let Err(why) = indexer::index_unseen(root, conn, rel) {
+                bail!("'{file}' is not indexed ({why}) — read it directly");
+            }
+            rows = fetch()?;
         }
-        if root.join(file).is_file() {
-            bail!("'{file}' exists but is not in the index — run `cona index`, then retry");
+        if rows.is_empty() {
+            if indexed || root.join(file).is_file() {
+                if let Some(answer) = symbolless(root, conn, file).filter(|_| !json) {
+                    return Ok(answer);
+                }
+                bail!(
+                    "'{file}' is indexed but has no extractable symbols — read it directly, \
+                     or search it with `cona grep <pattern> --path {file}`"
+                );
+            }
+            let near = crate::commands::did_you_mean_file(conn, file);
+            if !near.is_empty() {
+                bail!("no file '{file}' in the index{near}");
+            }
+            bail!("no file '{file}' in the index — `cona find <name>` locates symbols by name");
         }
-        let near = crate::commands::did_you_mean_file(conn, file);
-        if !near.is_empty() {
-            bail!("no file '{file}' in the index{near}");
-        }
-        bail!("no file '{file}' in the index — `cona find <name>` locates symbols by name");
     }
     // Baseline: sum each matched file's size once (rows are path-ordered).
     let mut bytes: i64 = 0;

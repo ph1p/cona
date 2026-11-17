@@ -80,6 +80,84 @@ pub enum EntryClass {
 
 /// `parent` = enclosing symbol (None = top level). Test symbols count only
 /// when callable (a struct in a test file is neither a test nor API).
+/// A file the framework loads by NAME, so nothing in the repo imports it:
+/// Next.js App/Pages Router files, middleware, service workers. Every export
+/// of such a file is an entry point, not dead code.
+pub fn is_framework_entry_path(path: &str) -> bool {
+    let Some((stem, ext)) = path.rsplit('/').next().and_then(|f| f.split_once('.')) else {
+        return false;
+    };
+    if !matches!(ext, "ts" | "tsx" | "js" | "jsx" | "mjs" | "mts") {
+        return false;
+    }
+    let under =
+        |dir: &str| path.starts_with(&format!("{dir}/")) || path.contains(&format!("/{dir}/"));
+    if matches!(
+        stem,
+        "middleware" | "proxy" | "instrumentation" | "sw" | "service-worker"
+    ) {
+        return true;
+    }
+    if under("pages") {
+        return true;
+    }
+    under("app")
+        && matches!(
+            stem,
+            "page"
+                | "layout"
+                | "route"
+                | "loading"
+                | "error"
+                | "not-found"
+                | "template"
+                | "default"
+                | "global-error"
+                | "sitemap"
+                | "robots"
+                | "manifest"
+                | "opengraph-image"
+                | "twitter-image"
+                | "icon"
+                | "apple-icon"
+        )
+}
+
+/// `import("./apps/Mail")` / `import('./x/index')` → the module name a lazy
+/// loader refers to (`Mail`, `x`). Name-based like the rest of `dead`.
+pub fn dynamic_import_stems(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(i) = rest.find("import(") {
+        rest = &rest[i + 7..];
+        let t = rest.trim_start();
+        let Some(q) = t.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')) else {
+            continue;
+        };
+        let Some(end) = t[1..].find(q) else { continue };
+        if let Some(stem) = module_stem(&t[1..1 + end]) {
+            out.push(stem.to_string());
+        }
+    }
+    out
+}
+
+/// Last path segment without extension; a trailing `index` names its directory.
+pub fn module_stem(path: &str) -> Option<&str> {
+    let mut segs = path.rsplit('/').filter(|s| !s.is_empty());
+    let last = segs.next()?;
+    let stem = last
+        .split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(last);
+    if stem == "index" {
+        segs.next().filter(|s| *s != "." && *s != "..")
+    } else {
+        Some(stem)
+    }
+}
+
 pub fn entry_class(
     lang: &str,
     name: &str,
@@ -222,5 +300,40 @@ mod tests {
             ),
             Some(EntryClass::Main)
         );
+    }
+
+    #[test]
+    fn framework_entry_files_are_reached_by_convention() {
+        for p in [
+            "app/page.tsx",
+            "src/app/blog/[slug]/layout.tsx",
+            "app/api/users/route.ts",
+            "pages/index.tsx",
+            "src/pages/api/hello.js",
+            "middleware.ts",
+            "src/instrumentation.ts",
+        ] {
+            assert!(is_framework_entry_path(p), "{p}");
+        }
+        for p in [
+            "app/components/Button.tsx",
+            "src/lib/page.tsx",
+            "app/page.test.tsx",
+            "pages/readme.md",
+            "src/util.ts",
+        ] {
+            assert!(!is_framework_entry_path(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn dynamic_imports_name_the_module_they_load() {
+        let src = "const A = lazy(() => import('./views/Chart'));\n\
+                   await import(\"../feature/index.js\");\n\
+                   import(`./x.mjs`); import(name); import('./index')";
+        assert_eq!(dynamic_import_stems(src), ["Chart", "feature", "x"]);
+        assert_eq!(module_stem("./a/b.test.ts"), Some("b"));
+        assert_eq!(module_stem("pkg"), Some("pkg"));
+        assert_eq!(module_stem("../index"), None);
     }
 }

@@ -80,10 +80,6 @@ fn try_shell(v: &serde_json::Value, cmd: &str) -> Result<()> {
 
 /// Is this path present in the project index? Fail-open: any DB trouble reads
 /// as "not indexed", which can only ever soften the decision.
-fn file_indexed(conn: &rusqlite::Connection, rel: &str) -> bool {
-    conn.query_row("SELECT 1 FROM files WHERE path = ?1", [rel], |_| Ok(true))
-        .unwrap_or(false)
-}
 
 /// The biggest few symbols in an indexed file, longest first, as a
 /// ready-to-paste `cona show` example.
@@ -231,7 +227,7 @@ fn resolve_target(v: &serde_json::Value, file_path: &str) -> Target {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| file_path.to_string());
 
-    let detected = lang::detect_lang(&rel);
+    let detected = lang::detect_file(&file_abs, &rel);
     Target {
         file_abs,
         root,
@@ -265,7 +261,7 @@ fn try_partial_read(v: &serde_json::Value, file_path: &str) -> Result<()> {
     if !fires_on_cadence(n, streak) {
         return Ok(());
     }
-    let indexed = db::open_project_db(&t.root).is_ok_and(|c| file_indexed(&c, &t.rel));
+    let indexed = db::open_project_db(&t.root).is_ok_and(|c| db::file_indexed(&c, &t.rel));
     if !indexed {
         return Ok(());
     }
@@ -283,6 +279,26 @@ fn try_partial_read(v: &serde_json::Value, file_path: &str) -> Result<()> {
 /// The shared read intercept. `partial` = "the agent already narrowed this";
 /// `upto` is a shell-side upper line bound (`ShellIntent::Read`) that only
 /// counts as narrowing if the file is actually longer.
+/// Modified, staged or untracked per git. `false` outside a repo or on any
+/// git failure — the hook then behaves as before.
+fn has_uncommitted_changes(root: &Path, rel: &str) -> bool {
+    crate::gitmap::run_git(root, &["status", "--porcelain", "--", rel])
+        .is_ok_and(|out| !out.trim().is_empty())
+}
+
+/// The grep pattern names something the index holds. An identifier that is no
+/// symbol (a CLI flag, an i18n key, a table name) has no `show`/`refs` answer.
+fn symbol_known(root: &Path, name: &str) -> bool {
+    db::open_project_db(root).is_ok_and(|c| {
+        c.query_row(
+            "SELECT 1 FROM symbols WHERE name = ?1 LIMIT 1",
+            [name],
+            |_| Ok(()),
+        )
+        .is_ok()
+    })
+}
+
 fn try_read(
     v: &serde_json::Value,
     file_path: &str,
@@ -350,7 +366,7 @@ fn try_read(
     } else {
         None
     };
-    let indexed: bool = conn.as_ref().is_some_and(|c| file_indexed(c, &rel));
+    let indexed: bool = conn.as_ref().is_some_and(|c| db::file_indexed(c, &rel));
 
     // Track full reads of indexed source (size-blind: re-read + streak).
     // Skipped when unindexed (nothing to point at), non-callable (README reads
@@ -377,6 +393,8 @@ fn try_read(
         advise_min_lines,
         callable,
         reread,
+        // only a would-be redirect pays for the git spawn
+        dirty: indexed && lines > max_lines && has_uncommitted_changes(&root, &rel),
     };
     match decide_read(&facts) {
         Decision::Allow => {
@@ -510,19 +528,27 @@ fn try_grep(
     // before the redirect creates it). Grep cannot recurse into either.
     let single_file = path.is_some() && !start.is_dir();
     // `show`/`refs` advice is a dead end on a diff, log or doc: no symbols there.
-    let code_file =
-        || lang::detect_lang(&start.to_string_lossy()).is_some_and(lang::has_callable_symbols);
+    let code_file = || {
+        lang::detect_file(&start, &start.to_string_lossy()).is_some_and(lang::has_callable_symbols)
+    };
     if single_file && (!identifier || !code_file()) {
         return Ok(());
     }
     let root = db::git_root_from(&start);
+    // A word that names no indexed symbol is text, not a symbol lookup: the
+    // single-file search passes, the broad one gets the `cona grep` hint.
+    // only projects the user already indexed — never create a DB from a hook
+    let indexed_project = db::has_index(&root);
+    let identifier = identifier && (!indexed_project || symbol_known(&root, pattern));
+    if single_file && !identifier {
+        return Ok(());
+    }
 
     let facts = GrepFacts {
         surgical,
         single_file,
         identifier,
-        // only projects the user already indexed — never create a DB from a hook
-        indexed_project: db::has_index(&root),
+        indexed_project,
         in_repo: root.join(".git").exists(),
         soft,
     };

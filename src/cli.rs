@@ -162,6 +162,9 @@ pub struct ShowArgs {
     /// Only definitions in files under this path (file or directory) — same as `path:Name`
     #[arg(long, value_parser = repo_path)]
     pub path: Option<String>,
+    /// Source text only — no header, no line numbers (for piping or pasting back)
+    #[arg(long, conflicts_with = "sig")]
+    pub raw: bool,
 }
 
 #[derive(clap::Args)]
@@ -258,14 +261,29 @@ pub struct GrepArgs {
     /// Matching lines per file, `path:N` (like grep -c)
     #[arg(short = 'c', long)]
     pub count: bool,
+    /// Whole-word matches only (like grep -w)
+    #[arg(short = 'w', long = "word")]
+    pub word: bool,
+    /// Print each match instead of its line (like grep -o)
+    #[arg(short = 'o', long)]
+    pub only_matching: bool,
+    /// Print long hit lines whole instead of a window around the match
+    #[arg(long, visible_alias = "no-truncate")]
+    pub full_lines: bool,
+    /// Skip test files
+    #[arg(long)]
+    pub no_tests: bool,
+    /// With --path and no match: do not report where else the pattern matches
+    #[arg(long)]
+    pub strict_path: bool,
 }
 
 #[derive(clap::Args)]
 pub struct EditArgs {
     /// Symbol (Name or Parent.Name) — or, with --range, a file path
     pub symbol: String,
-    /// File with replacement code (default: read from stdin)
-    #[arg(long)]
+    /// File holding the REPLACEMENT code, not the file to edit (default: stdin)
+    #[arg(long, visible_alias = "from")]
     pub file: Option<String>,
     /// Replace absolute lines S-E of SYMBOL (treated as a file path) instead of a whole symbol body
     #[arg(long, value_name = "S-E")]

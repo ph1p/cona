@@ -348,6 +348,8 @@ pub struct ShowOpts<'a> {
     /// `--path`: also narrows a bare file name (`webhook.ts:10-40`,
     /// `webhook.ts`) that several indexed files end with.
     pub path: Option<&'a str>,
+    /// Source text only: no header, no line-number gutter.
+    pub raw: bool,
 }
 
 /// How `grep` matches lines — read by both `Matcher` and `grep_prefilter`, so
@@ -374,6 +376,16 @@ pub struct GrepOpts<'a> {
     /// instead of one per hit.
     pub files_only: bool,
     pub count: bool,
+    /// `-w`: the match must not sit inside a longer word.
+    pub word: bool,
+    /// `-o`: print each match, not its line.
+    pub only_matching: bool,
+    /// Print hit lines whole instead of clipping past `GREP_LINE_MAX`.
+    pub full_lines: bool,
+    /// Skip test files.
+    pub no_tests: bool,
+    /// On a scoped miss, do not report where else the pattern matches.
+    pub strict_path: bool,
 }
 
 /// THE `--path` policy for every query command (tree/find/refs/grep/…).
@@ -735,7 +747,7 @@ pub(crate) fn scan_ref_sites_identified(
                 Err(_) => continue,
             },
         };
-        let ref_lns = lang::ref_lines(lang::detect_lang(rel), fsrc, name);
+        let ref_lns = lang::ref_lines(lang::detect_src(rel, fsrc), fsrc, name);
         if ref_lns.is_empty() {
             continue;
         }
@@ -792,6 +804,11 @@ pub(crate) fn locate_fresh(
         // drop those and retry before calling it ambiguous
         Err(_) if prune_vanished(root, conn, symbol, kind) => {
             locate_symbol_kind(conn, symbol, kind)?
+        }
+        // `new_file.ts:Name` on a file created since the last walk: index it
+        // and retry (a file the walk excludes keeps the original miss)
+        Err(e) if index_unseen_locator(root, conn, symbol) => {
+            locate_symbol_kind(conn, symbol, kind).map_err(|_| e)?
         }
         Err(e) => return Err(e),
     };
@@ -864,6 +881,18 @@ pub(crate) fn locate_all(
 /// after `path:Name` and `--kind` narrowing — empty on a miss (the error text
 /// is `locate_symbol_kind`'s). Shared by the single-result
 /// resolver and `locate_all` so they can't disagree about the candidates.
+/// True when `symbol` is a `file:Name` locator whose file exists on disk, is
+/// absent from the index, and was indexed just now.
+fn index_unseen_locator(root: &Path, conn: &Connection, symbol: &str) -> bool {
+    let Some((file, _)) = split_locator(strip_call_suffix(symbol)) else {
+        return false;
+    };
+    let rel = file.trim_start_matches("./");
+    root.join(rel).is_file()
+        && files_named(conn, rel).is_empty()
+        && indexer::index_unseen(root, conn, rel).is_ok()
+}
+
 fn locate_candidates(conn: &Connection, symbol: &str, kind: Option<&str>) -> Result<Vec<Located>> {
     let (rows, symbol) = locate_rows(conn, symbol, kind)?;
     let exact: Vec<Located> = rows.iter().filter(|r| r.3 == symbol).cloned().collect();
@@ -930,16 +959,25 @@ fn locate_rows(
         None => (None, symbol),
     };
     let mut stmt = conn.prepare(
-        "SELECT f.path, s.start_line, s.end_line, s.qualified
+        "SELECT f.path, s.start_line, s.end_line, s.qualified, s.kind = 'test'
          FROM symbols s JOIN files f ON f.id = s.file_id
          WHERE (s.qualified = ?1 OR s.name = ?1) AND (?2 IS NULL OR s.kind = ?2)
          ORDER BY CASE WHEN s.qualified = ?1 THEN 0 ELSE 1 END, length(s.qualified)",
     )?;
-    let mut rows: Vec<Located> = stmt
+    let tagged: Vec<(Located, bool)> = stmt
         .query_map(rusqlite::params![symbol, kind], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?), r.get(4)?))
         })?
         .flatten()
+        .collect();
+    // A test block (`describe("foo", …)`, kind `test`) is a label, not a
+    // definition: it must not make `foo` ambiguous next to `function foo`.
+    // It stays reachable on its own, via `--kind test`, and in `outline`.
+    let has_def = tagged.iter().any(|(_, is_block)| !is_block);
+    let mut rows: Vec<Located> = tagged
+        .into_iter()
+        .filter(|(_, is_block)| !(has_def && *is_block))
+        .map(|(row, _)| row)
         .collect();
     if let Some(f) = &file_filter {
         // An exact path wins outright — else `src/main.rs` also suffix-matches

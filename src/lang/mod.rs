@@ -15,6 +15,61 @@ pub struct Sym {
 /// resolution (deps.rs) probes against, so the two can't drift.
 pub const JS_TS_EXTS: [&str; 8] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"];
 
+/// Language of an extension-less script, from its `#!` line: `#!/bin/sh`,
+/// `#!/usr/bin/env python3`, `#!/usr/bin/env -S node --flag`. `None` for no
+/// shebang or an interpreter cona has no grammar for.
+pub fn shebang_lang(head: &str) -> Option<&'static str> {
+    let line = head.lines().next()?.strip_prefix("#!")?;
+    let base = |t: &str| t.rsplit(['/', '\\']).next().unwrap_or(t).to_string();
+    let mut toks = line.split_whitespace();
+    let mut interp = base(toks.next()?);
+    if interp == "env" {
+        // skip env's own flags (`-S`, `-i`) and `VAR=value` assignments
+        interp = base(toks.find(|t| !t.starts_with('-') && !t.contains('='))?);
+    }
+    // python3.11 → python, ruby2.7 → ruby
+    let name = interp.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    match name {
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "ash" => Some("bash"),
+        "python" | "pypy" => Some("python"),
+        "node" | "nodejs" | "bun" => Some("javascript"),
+        "deno" | "tsx" | "ts-node" => Some("typescript"),
+        "ruby" => Some("ruby"),
+        "perl" => Some("perl"),
+        "lua" | "luajit" => Some("lua"),
+        "php" => Some("php"),
+        _ => None,
+    }
+}
+
+/// True when the basename carries no extension — the only files whose
+/// language can come from a `#!` line instead of the path.
+fn extensionless(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    !base.is_empty() && !base.contains('.')
+}
+
+/// `detect_lang`, plus the `#!` line for an extension-less script whose
+/// source is already in hand. Pure — prefer it wherever the text was read.
+pub fn detect_src(path: &str, src: &str) -> Option<&'static str> {
+    detect_lang(path).or_else(|| extensionless(path).then(|| shebang_lang(src)).flatten())
+}
+
+/// `detect_lang`, plus the `#!` line read off disk (first 128 bytes, and only
+/// for an extension-less path — every other file costs no I/O).
+pub fn detect_file(abs: &std::path::Path, rel: &str) -> Option<&'static str> {
+    if let Some(l) = detect_lang(rel) {
+        return Some(l);
+    }
+    if !extensionless(rel) {
+        return None;
+    }
+    use std::io::Read;
+    let mut head = [0u8; 128];
+    let n = std::fs::File::open(abs).ok()?.read(&mut head).ok()?;
+    shebang_lang(&String::from_utf8_lossy(&head[..n]))
+}
+
 pub fn detect_lang(path: &str) -> Option<&'static str> {
     // extension-less build files matched by basename
     let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
@@ -60,6 +115,8 @@ pub fn detect_lang(path: &str) -> Option<&'static str> {
         "hs" => Some("haskell"),
         "ml" | "mli" => Some("ocaml"),
         "svelte" => Some("svelte"),
+        // parsed with the CSS grammar (error-tolerant): search only, no symbols
+        "scss" | "sass" | "less" => Some("scss"),
         "vue" => Some("vue"),
         "pl" | "pm" => Some("perl"),
         "r" | "R" => Some("r"),
@@ -93,7 +150,7 @@ pub fn has_callable_symbols(lang: &str) -> bool {
         "markdown" | "json" | "yaml" | "toml" | "css" | "graphql"
             // parse-only code languages: refs/grep work, but NO classify arms,
             // so `show <Symbol>` advice is a dead end
-            | "nix" | "svelte" | "vue" | "r"
+            | "nix" | "svelte" | "vue" | "r" | "scss"
     )
 }
 
@@ -108,7 +165,7 @@ pub fn language_for(lang: &str) -> Option<Language> {
         "java" => Some(tree_sitter_java::LANGUAGE.into()),
         "c" => Some(tree_sitter_c::LANGUAGE.into()),
         "cpp" => Some(tree_sitter_cpp::LANGUAGE.into()),
-        "css" => Some(tree_sitter_css::LANGUAGE.into()),
+        "css" | "scss" => Some(tree_sitter_css::LANGUAGE.into()),
         "ruby" => Some(tree_sitter_ruby::LANGUAGE.into()),
         "php" => Some(tree_sitter_php::LANGUAGE_PHP.into()),
         "csharp" => Some(tree_sitter_c_sharp::LANGUAGE.into()),

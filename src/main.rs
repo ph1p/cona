@@ -17,8 +17,57 @@ fn main() {
     }
 }
 
+/// `cona grep -webkit` reaches clap as the flag cluster `-w -e -b …`, and
+/// clap's own tip names only `-w`. Name the whole token and the fix instead.
+fn dash_pattern_hint(err: &clap::Error) -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let at = args.iter().position(|a| a == "grep")?;
+    // `grep -e a -e b`: here -e is the --regex switch, not a pattern option
+    if err.kind() == clap::error::ErrorKind::ArgumentConflict
+        && args[at + 1..].iter().filter(|a| *a == "-e").count() > 1
+    {
+        return Some(
+            "error: -e is the --regex switch here and takes no pattern — \
+             for several patterns: cona grep 'a\\|b'"
+                .into(),
+        );
+    }
+    // `grep -e '--regex'`: a pattern that IS a flag name reads as that flag twice
+    if err.kind() == clap::error::ErrorKind::ArgumentConflict {
+        let token = args[at + 1..]
+            .iter()
+            .take_while(|a| *a != "--")
+            .filter(|a| a.starts_with("--") && a.len() > 2)
+            .last()?;
+        return Some(format!(
+            "error: '{token}' was read as a flag, twice — a pattern starting with '-' goes after `--`: \
+             cona grep [flags] -- '{token}'"
+        ));
+    }
+    if err.kind() != clap::error::ErrorKind::UnknownArgument {
+        return None;
+    }
+    // grep's short flags: i e n l c, and C A B with a count
+    let known = |c: char| "ienlcwoCAB".contains(c) || c.is_ascii_digit();
+    let token = args[at + 1..]
+        .iter()
+        .take_while(|a| *a != "--")
+        .find(|a| a.len() > 2 && a.starts_with('-') && !a.starts_with("--"))
+        .filter(|a| !a[1..].chars().all(known))?;
+    Some(format!(
+        "error: '{token}' was read as flags — a pattern starting with '-' goes after `--`: \
+         cona grep [flags] -- {token}"
+    ))
+}
+
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|e| match dash_pattern_hint(&e) {
+        Some(hint) => {
+            eprintln!("{hint}");
+            std::process::exit(2);
+        }
+        None => e.exit(),
+    });
     if cli.read_only {
         db::set_read_only(true);
         if !read_only_command(&cli.cmd) {
@@ -163,6 +212,7 @@ fn run() -> Result<()> {
                 kind,
                 sig,
                 path,
+                raw,
             } = a;
             let conn = open_indexed(&root)?;
             let mut out = String::new();
@@ -180,11 +230,12 @@ fn run() -> Result<()> {
                         sig: *sig,
                         all: *all,
                         path: path.as_deref(),
+                        raw: *raw,
                     },
                     cli.json,
                 ) {
                     Ok((o, b)) => {
-                        if i > 0 && !cli.json {
+                        if i > 0 && !cli.json && !*raw {
                             out.push('\n');
                         }
                         out.push_str(&o);
@@ -293,6 +344,11 @@ fn run() -> Result<()> {
                 count,
                 paths,
                 line_number: _,
+                word,
+                only_matching,
+                full_lines,
+                no_tests,
+                strict_path,
             } = a;
             // `grep a b` where b is no path: search either name (`a\|b`).
             let (extra, paths) = split_positionals(&root, paths);
@@ -326,6 +382,11 @@ fn run() -> Result<()> {
                 after: after.or(*context).unwrap_or(0),
                 files_only: *files_with_matches,
                 count: *count,
+                word: *word,
+                only_matching: *only_matching,
+                full_lines: *full_lines,
+                no_tests: *no_tests,
+                strict_path: *strict_path,
             };
             queried(&root, t0, "grep", pattern, |conn| {
                 let mut out = String::new();

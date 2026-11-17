@@ -22,7 +22,10 @@ pub fn cmd_show(
     // (file headers, one block of a long body) that `sed -n` would otherwise read
     let scope = crate::commands::PathFilter::new(root, opts.path);
     if let Some((file, start, end)) = line_range(root, conn, symbol, &scope)? {
-        return show_lines(root, &file, start, end, opts.context, json);
+        return show_lines(root, &file, start, end, opts, json);
+    }
+    if let Some((name, start, end)) = symbol_range(symbol) {
+        return show_symbol_range(root, conn, name, start, end, opts, json);
     }
     // A path means "map this file" → outline (directories reach its
     // `tree --path` redirect). The filesystem decides; `split_locator` only
@@ -51,6 +54,11 @@ pub fn cmd_show(
     // locate erred on ambiguity.
     // candidates from deleted files must not fake an ambiguity (one stat each)
     crate::commands::prune_vanished(root, conn, symbol, kind);
+    if !all {
+        if let Some(out) = show_sole_non_test(root, conn, symbol, opts, json)? {
+            return Ok(out);
+        }
+    }
     let cands = if all {
         Some(crate::commands::locate_all(conn, symbol, kind)?)
     } else {
@@ -133,6 +141,10 @@ fn line_range(
     if start < 1 || end < start {
         return Ok(None);
     }
+    // `Name:13-30` — no `.`/`/`, so a symbol, not a file: `symbol_range`'s
+    if !file.contains('.') && !file.contains('/') && !root.join(file).exists() {
+        return Ok(None);
+    }
     if root.join(file).is_file() {
         return Ok(Some((file.to_string(), start, end)));
     }
@@ -160,14 +172,64 @@ fn ambiguous_file(name: &str, many: &[String], suffix: &str) -> anyhow::Error {
     )
 }
 
+/// `Name:N-M` / `Name:N` where `Name` is no path → (Name, N, M).
+fn symbol_range(arg: &str) -> Option<(&str, usize, usize)> {
+    let (name, range) = arg.rsplit_once(':')?;
+    let (a, b) = range.split_once('-').unwrap_or((range, range));
+    let (start, end) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+    (!name.is_empty() && !name.ends_with(':') && start >= 1 && end >= start)
+        .then_some((name, start, end))
+}
+
+/// `Sym:13-30`: lines of the file that defines `Sym`. Agents write this with
+/// file line numbers (from an outline) or counting from the symbol's first
+/// line; a range lying wholly above the symbol can only be the latter. The
+/// header line says which file and lines were read, so neither is a guess
+/// the reader cannot see.
+fn show_symbol_range(
+    root: &Path,
+    conn: &Connection,
+    name: &str,
+    start: usize,
+    end: usize,
+    opts: ShowOpts<'_>,
+    json: bool,
+) -> Result<(String, i64)> {
+    let (file, s, e, q) = locate_fresh(root, conn, name, opts.kind)?;
+    let (s, e) = (s as usize, e as usize);
+    let relative = end < s;
+    let (from, to) = if relative {
+        (s + start - 1, (s + end - 1).min(e))
+    } else {
+        (start, end)
+    };
+    if from > to {
+        anyhow::bail!(
+            "'{name}' spans {file}:{s}-{e} ({} lines) — {start} is past its end",
+            e - s + 1
+        );
+    }
+    let (body, baseline) = show_lines(root, &file, from, to, opts, json)?;
+    if json || opts.raw {
+        return Ok((body, baseline));
+    }
+    let how = if relative {
+        format!("lines {start}-{end} of {q}")
+    } else {
+        format!("file lines of {q}'s file ({q} is {s}-{e})")
+    };
+    Ok((format!("· {how}\n{body}"), baseline))
+}
+
 fn show_lines(
     root: &Path,
     file: &str,
     start: usize,
     end: usize,
-    context: usize,
+    opts: ShowOpts<'_>,
     json: bool,
 ) -> Result<(String, i64)> {
+    let context = opts.context;
     let src = std::fs::read_to_string(root.join(file))?;
     let lines: Vec<&str> = src.lines().collect();
     if start > lines.len() {
@@ -182,9 +244,77 @@ fn show_lines(
             "code": lines[from..to].join("\n")});
         return jout(&obj, baseline);
     }
+    if opts.raw {
+        return Ok((raw_lines(&lines[from..to]), baseline));
+    }
     let mut out = format!("{file}:{}-{to}\n", from + 1);
     push_numbered_lines(&mut out, &lines, from, to);
     Ok((out, baseline))
+}
+
+/// True for a candidate that lives in test code: a test file, or a Rust
+/// inline `mod tests`.
+fn is_test_candidate(c: &crate::commands::Located) -> bool {
+    crate::entries::is_test_path(&c.0) || crate::entries::is_test_symbol(&c.3)
+}
+
+/// The one non-test definition of an ambiguous name whose other candidates
+/// all live in test code (a mock, a fixture helper), or None.
+fn sole_non_test(
+    conn: &Connection,
+    symbol: &str,
+    kind: Option<&str>,
+) -> Option<(crate::commands::Located, usize)> {
+    let pool = crate::commands::locate_all(conn, symbol, kind).ok()?;
+    if pool.len() < 2 {
+        return None;
+    }
+    let mut real = pool.iter().filter(|c| !is_test_candidate(c));
+    match (real.next(), real.next()) {
+        (Some(one), None) => Some((one.clone(), pool.len() - 1)),
+        _ => None,
+    }
+}
+
+/// `show` of a name defined once in real code and again only in tests renders
+/// the real one instead of erroring: every candidate still surfaces, via the
+/// banner and the `also matched` trailer, so nothing is silently picked
+/// (inv. 4). `edit`/`rename` never take this path — they still demand a
+/// qualified name.
+fn show_sole_non_test(
+    root: &Path,
+    conn: &Connection,
+    symbol: &str,
+    opts: ShowOpts<'_>,
+    json: bool,
+) -> Result<Option<(String, i64)>> {
+    let Some((mut one, mut tests)) = sole_non_test(conn, symbol, opts.kind) else {
+        return Ok(None);
+    };
+    // invariant 2: line numbers only after the candidate's file is fresh
+    if indexer::refresh_files(root, conn, [one.0.as_str()]).any_refreshed {
+        match sole_non_test(conn, symbol, opts.kind) {
+            Some(again) => (one, tests) = again,
+            None => return Ok(None),
+        }
+    }
+    let (body, baseline) = show_located(root, conn, &one, opts, json, !json)?;
+    if json {
+        return Ok(Some((body, baseline)));
+    }
+    let banner = format!(
+        "· '{symbol}': showing the one non-test definition — {tests} more in tests \
+         (--all prints them)\n"
+    );
+    Ok(Some((banner + &body, baseline)))
+}
+
+/// `--raw`: the source text alone — no header, no line-number gutter — for
+/// piping into a file or pasting back as an `edit` replacement.
+fn raw_lines(lines: &[&str]) -> String {
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 fn show_one(
@@ -196,7 +326,19 @@ fn show_one(
     disclose_others: bool,
 ) -> Result<(String, i64)> {
     let located = locate_fresh(root, conn, symbol, opts.kind)?;
-    show_located(root, conn, &located, opts, json, disclose_others)
+    // `file:Name` / `Parent.Name` that resolved exactly already says which
+    // one — same-named symbols elsewhere are noise, not a disclosure.
+    let narrowed = crate::commands::split_locator(symbol).is_some()
+        || (located.3 == crate::commands::strip_call_suffix(symbol)
+            && db::name_tail(&located.3) != located.3);
+    show_located(
+        root,
+        conn,
+        &located,
+        opts,
+        json,
+        disclose_others && !narrowed,
+    )
 }
 
 /// Render one already-located symbol, so `--all` can print candidates without
@@ -267,6 +409,9 @@ fn show_located(
         });
         return jout(&obj, baseline);
     }
+    if opts.raw {
+        return Ok((raw_lines(&lines[start..end]), baseline));
+    }
     let mut out = format!("{path}:{s}-{e}  ({q})\n");
     for (_, n, _) in &notes {
         out.push_str(&format!("  ⚑ {n}\n"));
@@ -282,6 +427,10 @@ fn show_located(
             "SELECT s.qualified, f.path, s.start_line
              FROM symbols s JOIN files f ON f.id = s.file_id
              WHERE s.name = ?1 AND NOT (f.path = ?2 AND s.start_line = ?3)
+               AND s.kind != 'test'
+             ORDER BY (lower(f.path) LIKE 'vendor/%' OR lower(f.path) LIKE '%/vendor/%'
+                       OR lower(f.path) LIKE 'third_party/%' OR lower(f.path) LIKE '%/third_party/%'),
+                      f.path
              LIMIT 3",
         )?
         .query_map(rusqlite::params![db::name_tail(&q), path, s], |r| {
@@ -298,4 +447,30 @@ fn show_located(
         out.push_str(&format!("also matched: {}\n", others.join(", ")));
     }
     Ok((out, baseline))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_range_splits_only_a_trailing_line_range() {
+        assert_eq!(symbol_range("beta:1-2"), Some(("beta", 1, 2)));
+        assert_eq!(symbol_range("Parent.run:7"), Some(("Parent.run", 7, 7)));
+        assert_eq!(
+            symbol_range("src/a.rs:beta:3-9"),
+            Some(("src/a.rs:beta", 3, 9))
+        );
+        for not in [
+            "beta",
+            "src/a.rs:beta",
+            "beta:0-2",
+            "beta:5-2",
+            ":1-2",
+            "a::1-2",
+            "beta:x-y",
+        ] {
+            assert_eq!(symbol_range(not), None, "{not}");
+        }
+    }
 }

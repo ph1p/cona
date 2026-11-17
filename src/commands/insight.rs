@@ -216,7 +216,7 @@ pub fn cmd_shape(
     let (path, s, e, q) = locate_fresh(root, conn, symbol, kind)?;
     let src = std::fs::read_to_string(root.join(&path))?;
     let lines: Vec<&str> = src.lines().collect();
-    let idents = lang::idents_in_range(lang::detect_lang(&path), &src, s as usize, e as usize);
+    let idents = lang::idents_in_range(lang::detect_src(&path, &src), &src, s as usize, e as usize);
     let name = db::name_tail(&q).to_string();
     // type-kind list comes from lang.rs — the one place that mints kind labels
     let kind_list = lang::TYPE_KINDS
@@ -478,7 +478,7 @@ pub fn cmd_check(
     let mut checked = 0usize;
     for path in &files {
         let abs = root.join(path);
-        let Some(language) = lang::detect_lang(path) else {
+        let Some(language) = lang::detect_file(&abs, path) else {
             continue; // unknown language — nothing to parse
         };
         let Ok(src) = std::fs::read_to_string(&abs) else {

@@ -19,7 +19,7 @@ fn resolve_callee(
     defs: &[usize],
 ) -> Option<usize> {
     let caller = &g.syms[cur];
-    let lang = lang::detect_lang(&caller.file)?;
+    let lang = lang::detect_file(&root.join(&caller.file), &caller.file)?;
     if !resolve::lang_supported(lang) {
         return None;
     }
@@ -106,7 +106,8 @@ pub(crate) fn build_graph(
             })?
             .collect::<rusqlite::Result<_>>()?;
         sizes.insert(rel.clone(), size);
-        input.push((rel.clone(), lang::detect_lang(&rel), src, syms));
+        let lng = lang::detect_src(&rel, &src);
+        input.push((rel.clone(), lng, src, syms));
     }
     Ok((graph::Graph::build(&input), sizes))
 }

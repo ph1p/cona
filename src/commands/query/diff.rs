@@ -7,6 +7,13 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+/// A path `diff` reports on: a code file by extension or `#!` line. A deleted
+/// extension-less script has no first line left to read — the index still
+/// remembers it was code.
+fn is_code(root: &Path, conn: &Connection, path: &str) -> bool {
+    lang::detect_file(&root.join(path), path).is_some() || db::file_indexed(conn, path)
+}
+
 /// Maps `git diff --unified=0` new-side ranges onto the (fresh) symbol index
 /// and reports the innermost symbols touched. Untracked code files appear as
 /// whole new files.
@@ -22,11 +29,11 @@ pub fn cmd_diff(root: &Path, conn: &Connection, gitref: &str, json: bool) -> Res
             untracked.insert(p.to_string());
         }
     }
-    changes.retain(|c| lang::detect_lang(&c.path).is_some());
+    changes.retain(|c| is_code(root, conn, &c.path));
     let untracked_code: Vec<String> = {
         let mut v: Vec<String> = untracked
             .into_iter()
-            .filter(|p| lang::detect_lang(p).is_some())
+            .filter(|p| is_code(root, conn, p))
             .collect();
         v.sort();
         v
@@ -168,7 +175,7 @@ pub fn cmd_diff_impact(
     let paths: std::collections::BTreeSet<_> = names
         .split('\0')
         .chain(untracked.split('\0'))
-        .filter(|p| !p.is_empty() && lang::detect_lang(p).is_some())
+        .filter(|p| !p.is_empty() && is_code(root, conn, p))
         .collect();
     let mut changes = Vec::new();
     let mut bytes = 0;
@@ -252,7 +259,9 @@ fn collect_changes(
     new_ranges: &[(i64, i64)],
     out: &mut Vec<ChangedDefinition>,
 ) -> Result<()> {
-    let language = lang::detect_lang(path).expect("filtered language");
+    let Some(language) = lang::detect_src(path, new.or(old).unwrap_or("")) else {
+        return Ok(());
+    };
     let before = old
         .map(|s| lang::extract_symbols(language, s))
         .transpose()?
