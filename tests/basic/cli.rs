@@ -470,16 +470,51 @@ fn line_ranges_grep_counts_and_honest_misses() {
     assert!(!ok && out.contains("past the end"), "{out}");
 
     let (out, _) = run(&["grep", "alpha", "-c"]);
-    assert_eq!(out, "a.rs:2\nsub/b.rs:1\n");
+    assert_eq!(out, "a.rs:2\nsub/b.rs:1\ntotal: 3 in 2 files\n");
     let (out, _) = run(&["grep", "alpha", "-l"]);
     assert_eq!(out, "a.rs\nsub/b.rs\n");
 
     let (out, _) = run(&["grep", "beta", "--path", "sub"]);
     assert!(
-        out.starts_with("no matches for 'beta' under 'sub' — elsewhere:"),
+        out.starts_with(
+            "no matches for 'beta' under 'sub' — elsewhere: 1 hit(s) in 1 file(s): a.rs"
+        ),
         "{out}"
     );
-    assert!(out.contains("a.rs:3"), "{out}");
+    // one line, never the hits themselves; --strict-path drops even that
+    assert_eq!(out.lines().count(), 1, "{out}");
+    let (out, _) = run(&["grep", "beta", "--path", "sub", "--strict-path"]);
+    assert_eq!(out, "no matches for 'beta' under 'sub'\n");
+    // a scope that names nothing is an error, not a quiet repo-wide search
+    let (out, ok) = run(&["grep", "beta", "--path", "nope/x.rs"]);
+    assert!(
+        !ok && out.contains("names no indexed file or directory"),
+        "{out}"
+    );
+    // a file created since the walk is indexed on the spot
+    std::fs::write(dir.join("sub/new.rs"), "fn delta() {}\n").unwrap();
+    let (out, ok) = run(&["grep", "delta", "--path", "sub/new.rs"]);
+    assert!(ok && out.contains("sub/new.rs:1"), "{out}");
+    // -w / -o / --no-truncate / total in the truncation line
+    let (out, _) = run(&["grep", "-w", "alph"]);
+    assert!(out.starts_with("no matches"), "{out}");
+    let (out, _) = run(&["grep", "-w", "alpha", "-c"]);
+    assert!(out.contains("total: 3 in 2 files"), "{out}");
+    let (out, _) = run(&["grep", "-o", "-e", "fn [a-z]+", "--path", "a.rs"]);
+    assert_eq!(
+        out,
+        "a.rs:1 (in alpha): fn alpha\na.rs:3 (in beta): fn beta\n"
+    );
+    let (out, _) = run(&["grep", "alpha", "--limit", "1"]);
+    assert!(out.contains("truncated: 1 of 3 hits shown"), "{out}");
+    // code punctuation is not regex intent: no match-everything retry
+    let (out, _) = run(&["grep", ".alpha ??"]);
+    assert!(
+        out.starts_with("no matches") && !out.contains("as a regex"),
+        "{out}"
+    );
+    let (out, ok) = run(&["grep", "-e", "a", "-e", "b"]);
+    assert!(!ok && out.contains("a\\|b"), "{out}");
     let (out, _) = run(&["grep", "no such text"]);
     assert!(
         out.contains("anywhere in the repo") && !out.contains("cona find"),
@@ -915,5 +950,396 @@ fn path_scopes_resolve_like_shell_paths_and_refs_takes_context() {
     assert_eq!(out.matches("src/a/m.rs:").count(), 1, "{out}");
     assert!(out.contains("    4>     alpha();"), "{out}");
     assert!(out.contains("    3  fn main() {"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Temp project + a `run` closure over the built binary (ok, stdout+stderr).
+fn temp_project(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("cona-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, body) in files {
+        let p = dir.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    dir
+}
+
+fn run_in(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
+    let o = std::process::Command::new(env!("CARGO_BIN_EXE_cona"))
+        .args(args)
+        .env("CONA_DATA_DIR", dir.join(".cona-data"))
+        .env("CONA_NO_STATS", "1")
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    (
+        o.status.success(),
+        String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr),
+    )
+}
+
+#[test]
+fn show_skips_test_block_labels_and_test_only_twins() {
+    let dir = temp_project(
+        "testtwins",
+        &[
+            ("src/foo.js", "export function foo() {\n  return 1;\n}\n"),
+            (
+                "src/foo.test.js",
+                "describe(\"foo\", () => {\n  it(\"works\", () => {});\n});\n",
+            ),
+            (
+                "src/settings.ts",
+                "export function getSetting(k: string) {\n  return k;\n}\n",
+            ),
+            (
+                "tests/helpers.ts",
+                "export function getSetting(k: string) {\n  return 'mock';\n}\n",
+            ),
+            ("src/a.ts", "export function dup() {\n  return 1;\n}\n"),
+            ("src/b.ts", "export function dup() {\n  return 2;\n}\n"),
+        ],
+    );
+    run_in(&dir, &["index"]);
+    // a describe() label is not a second definition
+    let (ok, out) = run_in(&dir, &["show", "foo"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("src/foo.js:1-3"), "{out}");
+    assert!(!out.contains("ambiguous"), "{out}");
+    // real def + test-only twin → the real one, with every candidate disclosed
+    let (ok, out) = run_in(&dir, &["show", "getSetting"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("showing the one non-test definition — 1 more in tests"),
+        "{out}"
+    );
+    assert!(out.contains("src/settings.ts:1-3"), "{out}");
+    assert!(
+        out.contains("also matched:") && out.contains("tests/helpers.ts"),
+        "{out}"
+    );
+    assert!(!out.contains("'mock'"), "{out}");
+    // --all still prints both
+    let (ok, out) = run_in(&dir, &["show", "getSetting", "--all"]);
+    assert!(ok && out.contains("'mock'"), "{out}");
+    // two real definitions stay an ambiguity (inv. 4)
+    let (ok, out) = run_in(&dir, &["show", "dup"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("ambiguous — showing all 2"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn outline_and_show_index_files_created_after_the_walk() {
+    let dir = temp_project("unseen", &[("src/a.ts", "export function a() {}\n")]);
+    run_in(&dir, &["index"]);
+    std::fs::write(
+        dir.join("src/fresh.ts"),
+        "export function fresh() {\n  return 1;\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/late.ts"),
+        "export function late() {\n  return 2;\n}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("build")).unwrap();
+    std::fs::write(dir.join("build/x.js"), "function x() {}\n").unwrap();
+
+    let (ok, out) = run_in(&dir, &["outline", "src/fresh.ts"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("fresh :1-3"), "{out}");
+    let (ok, out) = run_in(&dir, &["show", "src/late.ts:late"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("return 2"), "{out}");
+    // excluded paths say why instead of pointing at `cona index`
+    let (ok, out) = run_in(&dir, &["outline", "build/x.js"]);
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("not indexed") && out.contains("build/"),
+        "{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn grep_dash_pattern_names_the_double_dash_fix() {
+    let dir = temp_project(
+        "dashgrep",
+        &[("s.css", ".a { -webkit-appearance: none; }\n")],
+    );
+    // a pattern that is itself a flag name: clap sees the flag twice
+    let (ok, out) = run_in(&dir, &["grep", "-e", "--regex"]);
+    assert!(
+        !ok && out.contains("cona grep [flags] -- '--regex'"),
+        "{out}"
+    );
+    run_in(&dir, &["index"]);
+    let (ok, out) = run_in(&dir, &["grep", "-webkit"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("cona grep [flags] -- -webkit"), "{out}");
+    let (ok, out) = run_in(&dir, &["grep", "--", "-webkit"]);
+    assert!(ok && out.contains("s.css:1"), "{out}");
+    // known short flags still parse as flags
+    let (ok, out) = run_in(&dir, &["grep", "-il", "WEBKIT"]);
+    assert!(ok && out.contains("s.css"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// Feedback-log slips, each answered instead of erroring: a line range on a
+// symbol, `--raw` for piping, `edit --file <the target file>`, refs on a
+// receiver-qualified name, a barrel outline, scss search, a stale file list.
+#[test]
+fn feedback_slips_are_answered() {
+    let dir = temp_project(
+        "slips",
+        &[
+            (
+                "src/a.ts",
+                "export function alpha() {\n  return 1;\n}\n\nexport function beta() {\n  const x = alpha();\n  return x;\n}\n",
+            ),
+            ("src/index.ts", "export { alpha } from './a';\nexport * from './b';\n"),
+            ("src/b.ts", "export const svc = { go() { return 1; } };\nexport function useIt() { return svc.go(); }\n"),
+            ("src/q.scss", "$brand: red;\n.card { color: $brand; }\n"),
+            ("src/gone.ts", "export function vanished() {}\n"),
+        ],
+    );
+    run_in(&dir, &["index"]);
+
+    // Sym:A-B — relative to the symbol when the range lies above it
+    let (ok, out) = run_in(&dir, &["show", "beta:1-2"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("lines 1-2 of beta") && out.contains("const x = alpha()"),
+        "{out}"
+    );
+    assert!(!out.contains("return x"), "{out}");
+    // absolute file lines when they fall inside the symbol
+    let (ok, out) = run_in(&dir, &["show", "beta:7-7"]);
+    assert!(
+        ok && out.contains("return x") && !out.contains("const x"),
+        "{out}"
+    );
+
+    // --raw: source only, no header, no line numbers
+    let (ok, out) = run_in(&dir, &["show", "alpha", "--raw"]);
+    assert!(ok, "{out}");
+    assert_eq!(out, "export function alpha() {\n  return 1;\n}\n");
+
+    // edit --file naming the DEFINING file is the classic slip: explain, don't
+    // splice the whole file into the symbol
+    let before = std::fs::read_to_string(dir.join("src/a.ts")).unwrap();
+    let (ok, out) = run_in(&dir, &["edit", "alpha", "--file", "src/a.ts"]);
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("DEFINES alpha") && out.contains("< new-code"),
+        "{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/a.ts")).unwrap(),
+        before
+    );
+
+    // refs on a receiver-qualified name falls back to the bare name, labeled
+    let (ok, out) = run_in(&dir, &["refs", "Nope.go"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("sites of 'go' by name") && out.contains("src/b.ts"),
+        "{out}"
+    );
+
+    // a barrel has no symbols — print it instead of an empty outline
+    let (ok, out) = run_in(&dir, &["outline", "src/index.ts"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("no symbols") && out.contains("export * from './b'"),
+        "{out}"
+    );
+
+    // scss is searchable
+    let (ok, out) = run_in(&dir, &["grep", "$brand", "--path", "src/q.scss"]);
+    assert!(
+        ok && out.contains("src/q.scss:1") && out.contains("src/q.scss:2"),
+        "{out}"
+    );
+
+    // a file deleted + another gaining the name since the walk: the empty
+    // answer triggers one re-index instead of a false "no matches"
+    std::fs::remove_file(dir.join("src/gone.ts")).unwrap();
+    std::fs::write(dir.join("src/new.ts"), "export const freshName = 1;\n").unwrap();
+    let (ok, out) = run_in(&dir, &["grep", "freshName"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("re-indexed") && out.contains("src/new.ts:1"),
+        "{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An extension-less script is indexed by its `#!` line; an extension-less
+/// non-script still names why it is skipped.
+#[test]
+fn shebang_scripts_are_indexed() {
+    let dir = temp_project(
+        "shebang",
+        &[
+            (
+                "bin/tool",
+                "#!/usr/bin/env python3\ndef greet(name):\n    return \"hi \" + name\n\ndef main():\n    print(greet(\"x\"))\n",
+            ),
+            ("bin/run", "#!/bin/sh\nbuild() {\n  echo build\n}\nbuild\n"),
+            ("LICENSE", "just text\n"),
+            ("fix.txt", "def greet(name):\n    return \"hello \" + name\n"),
+            ("bad.txt", "def greet(name:\n"),
+        ],
+    );
+    run_in(&dir, &["index"]);
+
+    let (ok, out) = run_in(&dir, &["outline", "bin/tool", "bin/run"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("def greet") && out.contains("def main") && out.contains("fn build"),
+        "{out}"
+    );
+    let (ok, out) = run_in(&dir, &["refs", "greet"]);
+    assert!(ok && out.contains("print(greet(\"x\"))"), "{out}");
+
+    // edit is syntax-verified with the shebang's grammar
+    let (ok, out) = run_in(&dir, &["edit", "greet", "--file", "bad.txt"]);
+    assert!(!ok && out.contains("edit rejected"), "{out}");
+    let (ok, out) = run_in(&dir, &["edit", "greet", "--file", "fix.txt"]);
+    assert!(ok, "{out}");
+    let src = std::fs::read_to_string(dir.join("bin/tool")).unwrap();
+    assert!(
+        src.starts_with("#!/usr/bin/env python3\n") && src.contains("hello"),
+        "{src}"
+    );
+
+    let (ok, out) = run_in(&dir, &["outline", "LICENSE"]);
+    assert!(!ok && out.contains("no supported language"), "{out}");
+
+    // created after the walk: indexed on demand like any other file
+    std::fs::write(
+        dir.join("bin/new"),
+        "#!/usr/bin/env ruby\ndef fresh\n  1\nend\n",
+    )
+    .unwrap();
+    let (ok, out) = run_in(&dir, &["outline", "bin/new"]);
+    assert!(ok && out.contains("fresh"), "{out}");
+
+    // show --raw / a deleted script still counts as code in `diff`
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+    };
+    std::fs::write(dir.join(".gitignore"), ".cona-data\n").unwrap();
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "init"]);
+    run_in(&dir, &["index"]);
+    std::fs::remove_file(dir.join("bin/run")).unwrap();
+    let (ok, out) = run_in(&dir, &["diff"]);
+    assert!(ok && out.contains("bin/run (deleted)"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Members of an anonymous object (`export default { setup() {} }`) are
+/// reached through the object, never by name — `dead` must not list them.
+#[test]
+fn dead_skips_members_of_anonymous_objects() {
+    let dir = temp_project(
+        "deadanon",
+        &[
+            (
+                "src/plugin.ts",
+                "export default {\n  setup() {\n    return 1;\n  },\n};\n",
+            ),
+            (
+                "src/k.ts",
+                "export class K {\n  gone() {\n    return 1;\n  }\n}\nexport const k = new K();\n",
+            ),
+        ],
+    );
+    run_in(&dir, &["index"]);
+    let (_, out) = run_in(&dir, &["dead"]);
+    assert!(out.contains("gone") && !out.contains("setup"), "{out}");
+
+    // a NAMED object's members live while the object is used; an unused
+    // object takes its members down with it
+    std::fs::write(
+        dir.join("src/named.ts"),
+        "const cfg = {\n  boot() {\n    return 1;\n  },\n};\nexport default cfg;\nexport const other = {\n  lost() {},\n};\n",
+    )
+    .unwrap();
+    run_in(&dir, &["index"]);
+    let (_, out) = run_in(&dir, &["dead"]);
+    assert!(
+        out.contains("other.lost") && !out.contains("cfg.boot"),
+        "{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The read hook sees an extension-less script as the code file it is.
+#[test]
+fn hook_redirects_a_large_shebang_script() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut body = String::from("#!/usr/bin/env python3\n");
+    for i in 0..600 {
+        body.push_str(&format!("def f{i}():\n    return {i}\n\n"));
+    }
+    let dir = temp_project("hookshebang", &[("bin/big", &body)]);
+    // a harness cwd is getcwd()-canonical (macOS temp sits behind a symlink)
+    let dir = if cfg!(windows) {
+        dir
+    } else {
+        dir.canonicalize().unwrap()
+    };
+    // the hook only redirects inside a project root (a `.git`), and never
+    // on a file with uncommitted changes
+    for args in [
+        &["init", "-q"][..],
+        &["add", "bin"],
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    ] {
+        Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+    }
+    run_in(&dir, &["index"]);
+    let payload = serde_json::json!({"session_id": "t", "cwd": dir, "tool_name": "Bash",
+        "tool_input": {"command": "cat bin/big"}});
+    let mut c = Command::new(env!("CARGO_BIN_EXE_cona"))
+        .args(["hook", "PreToolUse"])
+        .env("CONA_NO_STATS", "1")
+        .env("CONA_DATA_DIR", dir.join(".cona-data"))
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = String::from_utf8_lossy(&c.wait_with_output().unwrap().stdout).to_string();
+    assert!(out.contains("cona outline bin/big"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }

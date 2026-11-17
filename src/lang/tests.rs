@@ -1,4 +1,4 @@
-use super::{extract_symbols, param_count};
+use super::{detect_src, extract_symbols, param_count, shebang_lang};
 
 #[test]
 fn xml_elements_are_named_by_tag_and_identifying_child() {
@@ -136,4 +136,36 @@ fn ident_counts_skip_rust_method_names() {
     assert_eq!(rs.get("ok"), Some(&1));
     let go = super::ident_counts(Some("go"), "package p\nfunc f() { pkg.Run() }", &names);
     assert_eq!(go.get("Run"), Some(&1));
+}
+
+#[test]
+fn shebang_names_the_interpreter() {
+    for (head, want) in [
+        ("#!/bin/sh\necho hi\n", Some("bash")),
+        ("#!/usr/bin/env python3\n", Some("python")),
+        ("#!/usr/bin/python3.11", Some("python")),
+        (
+            "#! /usr/bin/env -S node --no-warnings\n",
+            Some("javascript"),
+        ),
+        ("#!/usr/bin/env FOO=1 ruby\r\nputs 1\r\n", Some("ruby")),
+        ("#!/usr/bin/env deno\n", Some("typescript")),
+        ("#!/usr/bin/awk -f\n", None),
+        ("#!/usr/bin/env\n", None),
+        ("#!\n", None),
+        ("echo no shebang\n#!/bin/sh\n", None),
+        ("", None),
+    ] {
+        assert_eq!(shebang_lang(head), want, "{head:?}");
+    }
+}
+
+#[test]
+fn shebang_only_decides_for_extensionless_paths() {
+    let py = "#!/usr/bin/env python3\n";
+    assert_eq!(detect_src("bin/tool", py), Some("python"));
+    // an extension always wins, known or not
+    assert_eq!(detect_src("bin/tool.rs", py), Some("rust"));
+    assert_eq!(detect_src("notes.txt", py), None);
+    assert_eq!(detect_src("LICENSE", "MIT License\n"), None);
 }

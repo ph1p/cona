@@ -50,6 +50,23 @@ src/commands/    cmd_* implementations, split by concern:
                           default (`foo.bar` is code, not a pattern), regex on
                           `--regex`/`-e`; Matcher::literal for identifier
                           callers (scan_ref_sites) where regex is never right.
+                          Matcher::build adds `-w` (word edges only where the
+                          pattern starts/ends in a word char); regex_intent is
+                          the ONE "was this written as a regex" test (zero-hit
+                          retry + miss wording). cmd_grep wraps grep_once: an
+                          empty answer while the index lists files that no
+                          longer exist re-indexes once and retries (`note:`),
+                          so a stale file list is never reported as "no
+                          matches". A miss under `--path` prints a one-line
+                          `— elsewhere:` summary (`--strict-path` = off).
+                          show: `Sym:A-B` (symbol_range) slices one symbol —
+                          absolute file lines, or symbol-relative when the
+                          range lies wholly above it (banner says which);
+                          `--raw` = bare source for piping. outline of a
+                          symbol-less file (barrel) prints it whole (≤60
+                          lines) or its export lines (`symbolless`). refs on
+                          `T.m` with zero resolved sites falls back to `m` by
+                          name with an `·ambiguous` banner.
                           prefilter_indexed narrows the indexed files
                           in-process (Matcher::matches_text = a per-file
                           SUPERSET of per-line matching; regex stays per line
@@ -156,6 +173,13 @@ src/lang/        Language detection + tree-sitter symbol extraction: mod.rs
                  (detect_lang/language_for/parse/extract_symbols), classify.rs
                  (node-kind table), names.rs (naming heuristics), walk.rs
                  (symbol walk), idents.rs (identifier scan).
+                 Extension-less scripts: `shebang_lang` maps the `#!` line
+                 (env flags/assignments skipped, version suffix stripped) to a
+                 language. `detect_src(path, src)` is the pure form for sites
+                 holding the source; `detect_file(abs, rel)` reads 128 bytes
+                 and only for a basename without a `.`, so the walk pays one
+                 small read per extension-less file and nothing else. No
+                 schema change — the next walk simply stops skipping them.
                  Symbols: Rust, Python, JS/TS/TSX, Go, Java, C, C++, CSS, Ruby,
                  PHP, C#, Kotlin, Swift, Bash, Lua, Scala, Elixir, Dart, TOML,
                  YAML, Markdown, Zig, Haskell, OCaml, Julia, PowerShell, ObjC,
@@ -346,7 +370,13 @@ src/hook/        PreToolUse + PostToolUse + PreCompact hooks
                  for refs/show, so it never blocks or nudges: indexed project +
                  not single-file → Advise (hook:grep-literal) naming a ready-to-
                  paste `cona grep '<pat>'` (+ `--regex` only when the pattern
-                 uses regex syntax). try_read gates (partial/
+                 uses regex syntax). An identifier the index holds NO symbol
+                 for (symbol_known) is treated the same way — refs/show cannot
+                 answer it. decide_read never redirects a file with
+                 uncommitted changes (`dirty` — the agent is mid-edit and
+                 needs the bytes) and redirects a non-callable file (prose,
+                 config, search-only language) only past
+                 NON_CALLABLE_REDIRECT_FACTOR × the line limit. try_read gates (partial/
                  non-code/metadata-size) BEFORE reading bytes — multi-GB file
                  must not be slurped just to be allowed. A read the redirect
                  denied is retried verbatim by most agents: note_denied marks the

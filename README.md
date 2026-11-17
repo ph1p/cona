@@ -82,7 +82,7 @@ cona edit open_project_db --file new.rs   # replace it, syntax-verified
 | ------------------------- | -------------------------------------------------------------- |
 | `cona find <Name>`        | Locate a symbol: file, line range, signature (or matching files) |
 | `cona search "<behavior>"` | Rank lexical matches in names, signatures, docs and bodies   |
-| `cona grep <text>`        | Code-only search, hits labeled by symbol (`--regex` for regex) |
+| `cona grep <text>`        | Code-only search, hits labeled by symbol (`--regex` for regex, `-w` whole word, `--no-tests`) |
 | `cona refs <Name>`        | Every usage site; skips strings and comments, folds test sites |
 | `cona diff [ref]`         | Changed _symbols_ vs a git ref; a good start for reviews       |
 | `cona impact <Sym>`       | Before an edit: refs, callers, tests, history                  |
@@ -273,7 +273,10 @@ C#, Ruby, PHP, Kotlin, Swift, Scala, Elixir, Dart, Lua, Bash, CSS, TOML, YAML,
 Markdown, Zig, Haskell, OCaml, Julia, PowerShell, Objective-C, Protobuf, SQL,
 Perl, HCL/Terraform, Makefile, Dockerfile, XML, HTML.
 
-**Search only:** JSON, Nix, Svelte, Vue, R, GraphQL.
+**Search only:** JSON, Nix, Svelte, Vue, R, GraphQL, SCSS/Sass/Less.
+
+Scripts without an extension (`bin/deploy`, `scripts/release`) are indexed by
+their `#!` line — sh/bash/zsh, Python, Node/Bun/Deno, Ruby, Perl, Lua, PHP.
 
 XML/HTML elements become symbols named `tag#identity`, e.g.
 `profile#with-frontend-build` in a `pom.xml`, or `form#login` in HTML.

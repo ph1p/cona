@@ -5,7 +5,6 @@
 
 use crate::commands::{
     defaults, jout, render_context_blocks, shell_quote, GrepOpts, PathFilter, ENCLOSING_SYMBOL_SQL,
-    LIMIT_TRAILER,
 };
 use crate::{db, entries, indexer};
 use anyhow::{anyhow, Result};
@@ -15,7 +14,54 @@ use std::path::Path;
 
 /// Substring search over indexed code files. Each hit carries its enclosing
 /// symbol so the agent can jump straight to `show <Symbol>`.
+///
+/// A zero-hit answer is only trusted from a current index: after `git mv` /
+/// a branch switch the index still lists paths that are gone and misses the
+/// ones that replaced them, so "no matches" would be a lie about the code.
+/// That case re-walks once and answers again.
 pub fn cmd_grep(
+    root: &Path,
+    conn: &Connection,
+    pattern: &str,
+    opts: GrepOpts<'_>,
+    json: bool,
+) -> Result<(String, i64)> {
+    let (out, baseline) = grep_once(root, conn, pattern, opts, json)?;
+    let empty = if json {
+        out.trim() == "[]"
+    } else {
+        out.starts_with("no matches")
+    };
+    if !empty
+        || opts.include_deps
+        || !index_lists_vanished_files(root, conn)
+        || indexer::index_project(root, conn).is_err()
+    {
+        return Ok((out, baseline));
+    }
+    let (again, baseline) = grep_once(root, conn, pattern, opts, json)?;
+    if json {
+        return Ok((again, baseline));
+    }
+    Ok((
+        format!("note: the index listed files that no longer exist — re-indexed\n{again}"),
+        baseline,
+    ))
+}
+
+/// Any indexed path missing on disk: the walk predates a move/delete.
+fn index_lists_vanished_files(root: &Path, conn: &Connection) -> bool {
+    let Ok(mut stmt) = conn.prepare("SELECT path FROM files") else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+        return false;
+    };
+    let vanished = rows.flatten().any(|p| !root.join(p).exists());
+    vanished
+}
+
+fn grep_once(
     root: &Path,
     conn: &Connection,
     pattern: &str,
@@ -32,8 +78,19 @@ pub fn cmd_grep(
         after,
         files_only,
         count,
+        word,
+        only_matching,
+        full_lines,
+        no_tests,
+        strict_path: _,
     } = opts;
-    let mut matcher = Matcher::new(pattern, ignore_case, regex)?;
+    // -o prints the match itself, so context lines have nothing to attach to
+    let (before, after) = if only_matching {
+        (0, 0)
+    } else {
+        (before, after)
+    };
+    let mut matcher = Matcher::build(pattern, ignore_case, regex, word)?;
     let pf = PathFilter::new(root, path_filter);
     let mut fell_back = false;
     let mut stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
@@ -63,16 +120,22 @@ pub fn cmd_grep(
         files.retain(|f| pf.ok(f));
     } else {
         files.retain(|f| pf.ok(f));
+        if files.is_empty() && pf.is_scoped() {
+            // A scope holding no indexed file is the real answer — searching
+            // on would report "no matches", which reads as "the code isn't
+            // there". A file created since the walk is indexed on the spot.
+            files = unseen_scope(root, conn, pf.as_str())?;
+        }
         // `\bstate\b`, `\.alarm`, `a|b`: grep habits that match nothing
         // verbatim. Agents rarely retry an empty answer — they conclude the code
         // doesn't exist — so a zero-hit literal that compiles as a regex is
         // answered as one, with a note saying which reading produced the hits.
-        let retry = !regex && regexish_literal(pattern).is_some();
+        let retry = !regex && regex_intent(pattern);
         // the retry's file list; only a regex-looking literal pays for the copy
         let all = if retry { files.clone() } else { Vec::new() };
         files = prefilter_indexed(root, files, &matcher);
         if files.is_empty() && retry {
-            if let Ok(re) = Matcher::new(pattern, ignore_case, true) {
+            if let Ok(re) = Matcher::build(pattern, ignore_case, true, word) {
                 let hits = prefilter_indexed(root, all, &re);
                 if !hits.is_empty() {
                     matcher = re;
@@ -81,6 +144,9 @@ pub fn cmd_grep(
                 }
             }
         }
+    }
+    if no_tests {
+        files.retain(|f| !entries::is_test_path(f));
     }
     let mut note = if fell_back && !json {
         format!(
@@ -119,8 +185,16 @@ pub fn cmd_grep(
     // Honest baseline: per hit file, a grep pass + a Read window around each
     // match — what this search costs without cona, NOT the whole file.
     let mut baseline: i64 = 0;
-    let mut truncated = false;
-    'outer: for rel in files {
+    // every match, shown or not — the truncation line names what --limit hides
+    let mut total = 0usize;
+    let clip = |m: &Matcher, line: &str| {
+        if full_lines {
+            line.to_string()
+        } else {
+            m.clip(line)
+        }
+    };
+    for rel in files {
         let Ok(src) = std::fs::read_to_string(root.join(&rel)) else {
             continue;
         };
@@ -137,6 +211,19 @@ pub fn cmd_grep(
             if !matcher.is_match(line) {
                 continue;
             }
+            if hits.len() >= limit && !only_matching {
+                total += 1;
+                continue;
+            }
+            let parts = if only_matching {
+                matcher.matches(line)
+            } else {
+                vec![clip(&matcher, line.trim())]
+            };
+            total += parts.len();
+            if hits.len() >= limit {
+                continue;
+            }
             // Symbol ranges come from the index — refresh before labeling.
             // Skipped under --include-deps: most dep hits have no `files` row,
             // and is_stale() treats that as stale, so each would pay a full
@@ -148,20 +235,19 @@ pub fn cmd_grep(
             let sym: String = enclosing
                 .query_row(rusqlite::params![rel, (ln + 1) as i64], |r| r.get(0))
                 .unwrap_or_default();
-            hits.push((rel.clone(), ln + 1, sym, matcher.clip(line.trim())));
+            for part in parts {
+                if hits.len() < limit {
+                    hits.push((rel.clone(), ln + 1, sym.clone(), part));
+                }
+            }
             if !lines.is_empty() {
                 let lo = ln.saturating_sub(before);
                 let hi = (ln + after).min(lines.len() - 1);
                 ctx.push(
                     (lo..=hi)
-                        .map(|i| (i + 1, matcher.clip(lines[i].trim_end())))
+                        .map(|i| (i + 1, clip(&matcher, lines[i].trim_end())))
                         .collect(),
                 );
-            }
-            if hits.len() >= limit {
-                truncated = true;
-                baseline += db::baseline_tokens(&line_lens, &match_lines);
-                break 'outer;
             }
         }
         if !match_lines.is_empty() {
@@ -192,8 +278,11 @@ pub fn cmd_grep(
             out.push_str(&format!("{f}:{l} (in {sym}): {t}\n"));
         }
     }
-    if truncated {
-        out.push_str(LIMIT_TRAILER);
+    if total > hits.len() {
+        out.push_str(&format!(
+            "… truncated: {} of {total} hits shown (raise --limit)\n",
+            hits.len()
+        ));
     }
     if hits.is_empty() {
         out.push_str(&no_matches(root, conn, pattern, opts)?);
@@ -212,8 +301,9 @@ fn grep_files(
     opts: GrepOpts<'_>,
     json: bool,
 ) -> Result<(String, i64)> {
+    // Never truncated: a file list or a count that stops at --limit answers
+    // "where / how many" wrongly, and a line per file is already compact.
     let mut found: Vec<(String, usize)> = Vec::new();
-    let mut truncated = false;
     for rel in files {
         let Ok(src) = std::fs::read_to_string(root.join(&rel)) else {
             continue;
@@ -221,10 +311,6 @@ fn grep_files(
         let n = src.lines().filter(|l| matcher.is_match(l)).count();
         if n == 0 {
             continue;
-        }
-        if found.len() >= opts.limit {
-            truncated = true;
-            break;
         }
         found.push((rel, n));
     }
@@ -243,8 +329,9 @@ fn grep_files(
             out.push_str(&format!("{f}\n"));
         }
     }
-    if truncated {
-        out.push_str(LIMIT_TRAILER);
+    if opts.count && found.len() > 1 {
+        let sum: usize = found.iter().map(|(_, n)| n).sum();
+        out.push_str(&format!("total: {sum} in {} files\n", found.len()));
     }
     if found.is_empty() {
         out.push_str(&no_matches(root, conn, pattern, opts)?);
@@ -266,7 +353,9 @@ fn no_matches(root: &Path, conn: &Connection, pattern: &str, opts: GrepOpts<'_>)
     // answers more than a hint could.
     let literal = regexish_literal(pattern).filter(|_| !opts.regex && path_filter.is_none());
     if let Some(literal) = literal {
-        let tried = if Matcher::new(pattern, opts.ignore_case, true).is_ok() {
+        let tried = if !regex_intent(pattern) {
+            "verbatim (--regex for a pattern)"
+        } else if Matcher::new(pattern, opts.ignore_case, true).is_ok() {
             "verbatim or as a regex"
         } else {
             "verbatim (it is not a valid regex)"
@@ -279,39 +368,39 @@ fn no_matches(root: &Path, conn: &Connection, pattern: &str, opts: GrepOpts<'_>)
             ));
         }
     } else if let Some(scope) = path_filter {
-        // A scope that names nothing (typo, or a path written for another
-        // CWD) is the real answer — "no matches under X" would read as "the
-        // code isn't there".
-        let missing = !root.join(scope.trim_end_matches('/')).exists()
-            && !crate::commands::indexed_prefix(conn, scope);
-        if missing {
-            out.push_str(&format!(
-                " — '{scope}' names no indexed file or directory{}",
-                crate::commands::did_you_mean_file(conn, scope)
-            ));
-        }
-        let wide = GrepOpts {
-            path: None,
-            limit: defaults::GREP_ELSEWHERE,
-            before: 0,
-            after: 0,
-            ..opts
-        };
-        let (elsewhere, _) = cmd_grep(root, conn, pattern, wide, false)?;
-        if elsewhere.starts_with("no matches") {
-            out.push_str(if missing {
-                "; none anywhere in the repo"
+        out.push_str(&format!(" under '{scope}'"));
+        // One line on where the pattern does live: enough to spot a wrong
+        // scope, without burying the "no" under unrelated hits.
+        if !opts.strict_path && !opts.include_deps {
+            let wide = GrepOpts {
+                path: None,
+                count: true,
+                files_only: false,
+                strict_path: true,
+                ..opts
+            };
+            let (json, _) = grep_once(root, conn, pattern, wide, true)?;
+            let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
+            if rows.is_empty() {
+                out.push_str(" — none anywhere in the repo");
             } else {
-                " anywhere in the repo"
-            });
-        } else {
-            let elsewhere = elsewhere.replace(LIMIT_TRAILER, "… more without --path\n");
-            if missing {
-                out.push_str(&format!("\nrepo-wide:\n{elsewhere}"));
-            } else {
-                out.push_str(&format!(" under '{scope}' — elsewhere:\n{elsewhere}"));
+                let hits: u64 = rows.iter().filter_map(|r| r["count"].as_u64()).sum();
+                let names: Vec<&str> = rows
+                    .iter()
+                    .filter_map(|r| r["file"].as_str())
+                    .take(defaults::GREP_ELSEWHERE)
+                    .collect();
+                let more = if rows.len() > names.len() {
+                    ", …"
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    " — elsewhere: {hits} hit(s) in {} file(s): {}{more}",
+                    rows.len(),
+                    names.join(", ")
+                ));
             }
-            return Ok(out);
         }
     } else if looks_like_name(pattern) {
         // A bare identifier with no hits anywhere: likely a typo — point
@@ -324,6 +413,68 @@ fn no_matches(root: &Path, conn: &Connection, pattern: &str, opts: GrepOpts<'_>)
     }
     out.push('\n');
     Ok(out)
+}
+
+/// The file list for a `--path` scope that holds no indexed file. A file on
+/// disk the walk has not seen yet is indexed now and searched; anything else
+/// is an error naming the cause, never a silent repo-wide or empty search.
+fn unseen_scope(root: &Path, conn: &Connection, scope: &str) -> Result<Vec<String>> {
+    let rel = scope.trim_start_matches("./").trim_end_matches('/');
+    let on_disk = root.join(rel);
+    if on_disk.is_file() {
+        return match indexer::index_unseen(root, conn, rel) {
+            Ok(_) => Ok(vec![rel.to_string()]),
+            Err(why) => Err(anyhow!(
+                "'{scope}' is not indexed ({why}) — search it with plain grep/rg"
+            )),
+        };
+    }
+    if on_disk.is_dir() {
+        return Err(anyhow!(
+            "no indexed files under '{scope}' — new files need `cona index`; \
+             dependency/build dirs need --include-deps"
+        ));
+    }
+    Err(anyhow!(
+        "--path '{scope}' names no indexed file or directory{}",
+        crate::commands::did_you_mean_file(conn, scope)
+    ))
+}
+
+/// Was the pattern WRITTEN as a regex? Gates the zero-hit regex retry: `\b`,
+/// `\.`, `.*`, `a|b`, `[a-z]`, `^x`/`x$` are regex habits, while `?`, `*`,
+/// `(` and `||` are ordinary code — retrying `.error ??` or `a || b` as a
+/// regex matches nearly every line and answers a question nobody asked.
+fn regex_intent(pattern: &str) -> bool {
+    let b = pattern.as_bytes();
+    for (i, c) in b.iter().enumerate() {
+        let next = b.get(i + 1).copied();
+        let prev = i.checked_sub(1).map(|j| b[j]);
+        let hit = match c {
+            b'\\' => next.is_some_and(|n| b"bBsSwWdD.()[]{}+*?^$|".contains(&n)),
+            b'.' => matches!(next, Some(b'*' | b'+')),
+            // `a|b`, not `a || b` or the union type `A | B`
+            b'|' => {
+                let plain = |x: Option<u8>| x.is_some_and(|x| x != b'|' && x != b' ');
+                plain(prev) && plain(next)
+            }
+            b'[' => {
+                let class = pattern[i + 1..].split(']').next().unwrap_or("");
+                pattern[i + 1..].contains(']')
+                    && (class.starts_with('^')
+                        || class.as_bytes().windows(3).any(|w| {
+                            w[1] == b'-'
+                                && w[0].is_ascii_alphanumeric()
+                                && w[2].is_ascii_alphanumeric()
+                        }))
+            }
+            _ => false,
+        };
+        if hit {
+            return true;
+        }
+    }
+    pattern.len() > 1 && (pattern.starts_with('^') || pattern.ends_with('$'))
 }
 
 /// Split `grep A B…` positionals into real paths and extra patterns. Agents
@@ -387,19 +538,24 @@ impl Matcher {
             // backslash. Read the whole pattern as the regex it was written as.
             // If it doesn't compile that way, the branches stay literal.
             let bre = pattern.split("\\|").any(|b| b.contains('\\'));
+            let literal = pattern
+                .split("\\|")
+                .filter(|b| !b.is_empty())
+                .map(regex::escape)
+                .collect::<Vec<_>>()
+                .join("|");
             if bre && !regex {
-                if let Ok(m) = Self::new(&pattern.replace("\\|", "|"), ignore_case, true) {
+                // Either reading may be the one meant (`\(` is a regex escape
+                // AND Swift interpolation), so match both rather than guess.
+                let both = format!("(?:{})|{literal}", pattern.replace("\\|", "|"));
+                if let Ok(m) = Self::new(&both, ignore_case, true) {
                     return Ok(m);
                 }
             }
             let alt = if regex {
                 pattern.replace("\\|", "|")
             } else {
-                pattern
-                    .split("\\|")
-                    .map(regex::escape)
-                    .collect::<Vec<_>>()
-                    .join("|")
+                literal
             };
             return Self::new(&alt, ignore_case, true);
         }
@@ -418,7 +574,56 @@ impl Matcher {
             .case_insensitive(ignore_case)
             .build()
             .map(Matcher::Regex)
-            .map_err(|e| anyhow!("invalid regex '{pattern}': {e}"))
+            .map_err(|e| {
+                anyhow!("invalid regex '{pattern}': {e}\n  drop --regex to search it literally")
+            })
+    }
+
+    /// `new`, plus `-w`: the match must not sit inside a longer word. A word
+    /// boundary is only asked for on a side where the pattern itself ends in
+    /// a word character — `\b` next to `.` or `(` could never match.
+    pub(super) fn build(pattern: &str, ignore_case: bool, regex: bool, word: bool) -> Result<Self> {
+        let m = Self::new(pattern, ignore_case, regex)?;
+        if !word {
+            return Ok(m);
+        }
+        let is_word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let (src, lead, trail) = match &m {
+            Matcher::Regex(re) => (re.as_str().to_string(), true, true),
+            Matcher::Literal { .. } => (
+                regex::escape(pattern),
+                is_word(pattern.chars().next()),
+                is_word(pattern.chars().last()),
+            ),
+        };
+        let b = |on: bool| if on { "\\b" } else { "" };
+        Self::new(
+            &format!("{}(?:{src}){}", b(lead), b(trail)),
+            ignore_case,
+            true,
+        )
+    }
+
+    /// Every match on `line`, for `-o`.
+    fn matches(&self, line: &str) -> Vec<String> {
+        match self {
+            Matcher::Regex(re) => re.find_iter(line).map(|m| m.as_str().to_string()).collect(),
+            Matcher::Literal {
+                needle,
+                ignore_case: true,
+            } => {
+                let low = line.to_lowercase();
+                // offsets only carry over when case-folding kept byte lengths
+                let src = if low.len() == line.len() { line } else { &low };
+                low.match_indices(needle.as_str())
+                    .filter_map(|(i, m)| src.get(i..i + m.len()))
+                    .map(str::to_string)
+                    .collect()
+            }
+            Matcher::Literal { needle, .. } => {
+                line.matches(needle.as_str()).map(str::to_string).collect()
+            }
+        }
     }
 
     /// The pattern as this matcher reads it, for the prefilter — differs from
@@ -680,6 +885,21 @@ mod tests {
     }
 
     #[test]
+    fn logged_feedback_patterns_match_literally() {
+        // patterns agents wrote in the feedback log, pinned so they keep working
+        let m = Matcher::new(r#"a\|b\|category: "trigger""#, false, false).unwrap();
+        assert!(m.is_match(r#"  category: "trigger","#));
+        let m = Matcher::new(r#"on_menu_event\|listen("menu"#, false, false).unwrap();
+        assert!(m.is_match(r#"app.listen("menu-open", f)"#));
+        assert!(Matcher::new(r#""cd \("#, false, false)
+            .unwrap()
+            .is_match(r#"send("cd \(path)")"#));
+        assert!(Matcher::new("data/site'", false, false)
+            .unwrap()
+            .is_match("p = 'data/site'"));
+    }
+
+    #[test]
     fn bre_alternation_matches_either_branch() {
         // literal mode: each branch stays literal — `.` is not a wildcard
         let m = Matcher::new(r"foo.bar\|baz", false, false).unwrap();
@@ -845,5 +1065,65 @@ mod include_deps_tests {
         }
         assert_eq!(base, Some(false), "default must not enter node_modules");
         assert_eq!(deep, Some(true), "--include-deps must reach it");
+    }
+}
+
+#[cfg(test)]
+mod intent_tests {
+    use super::*;
+
+    #[test]
+    fn regex_intent_separates_patterns_from_ordinary_code() {
+        for p in [
+            r"\bfoo\b",
+            r"foo\.bar",
+            "a.*b",
+            "x.+y",
+            "foo|bar",
+            "[a-z]+",
+            "[^,]",
+            "^use ",
+            "end;$",
+        ] {
+            assert!(regex_intent(p), "{p} was written as a regex");
+        }
+        // code that merely contains metacharacters stays literal
+        for p in [
+            "foo.bar",
+            "Vec<T>",
+            "a || b",
+            "A | B",
+            "arr[0]",
+            "x[i]",
+            "f(a, b)",
+            ".alpha ??",
+            "$",
+            "^",
+        ] {
+            assert!(!regex_intent(p), "{p} is ordinary code");
+        }
+    }
+
+    #[test]
+    fn word_mode_bounds_only_the_word_edges() {
+        let m = Matcher::build("id", false, false, true).unwrap();
+        assert_eq!(m.matches("id = uid + id_x; (id)"), ["id", "id"]);
+        // a pattern ending in punctuation gets no trailing `\b` (it could never match)
+        let m = Matcher::build("run(", false, false, true).unwrap();
+        assert_eq!(m.matches("run(); rerun(); run (x)"), ["run("]);
+        // regex + word, case-insensitive
+        let m = Matcher::build("get|set", true, true, true).unwrap();
+        assert_eq!(m.matches("Get getter SET reset"), ["Get", "SET"]);
+        // word off = plain substring
+        let m = Matcher::build("id", false, false, false).unwrap();
+        assert_eq!(m.matches("uid id").len(), 2);
+    }
+
+    #[test]
+    fn matches_returns_the_matched_text_for_only_matching() {
+        let m = Matcher::build(r"v\d+", false, true, false).unwrap();
+        assert_eq!(m.matches("v1 and v22"), ["v1", "v22"]);
+        let m = Matcher::build("Foo", true, false, false).unwrap();
+        assert_eq!(m.matches("foo FOO"), ["foo", "FOO"]);
     }
 }

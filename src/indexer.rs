@@ -218,7 +218,7 @@ pub fn index_project(root: &Path, conn: &Connection) -> Result<IndexReport> {
             Ok(r) => r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"),
             Err(_) => continue,
         };
-        let Some(language) = lang::detect_lang(&rel) else {
+        let Some(language) = lang::detect_file(&abs, &rel) else {
             continue;
         };
         if is_excluded_file(entry.file_name().to_str().unwrap_or("")) {
@@ -415,7 +415,7 @@ fn event_is_relevant(root: &Path, ev: &notify::Result<notify::Event>) -> bool {
             return false;
         }
         match rel.to_str() {
-            Some(s) => crate::lang::detect_lang(s).is_some() || !p.exists(),
+            Some(s) => crate::lang::detect_file(p, s).is_some() || !p.exists(),
             None => false,
         }
     })
@@ -503,12 +503,61 @@ pub fn refresh_files<'a>(
 /// `ensure_fresh` and `locate_fresh` funnel through — keeps invariant 2: a
 /// caller gets live line numbers or an error naming the stale file, never
 /// stale ranges dressed up as fresh.
+/// Why the full walk would skip this root-relative file, or None when it
+/// would index it. The same rules as `index_project`'s walker: language,
+/// lock files, pruned/hidden dirs, size cap, .gitignore.
+pub fn skip_reason(root: &Path, rel: &str) -> Option<String> {
+    if lang::detect_file(&root.join(rel), rel).is_none() {
+        return Some("no supported language for this file type".into());
+    }
+    let mut segs: Vec<&str> = rel
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    let name = segs.pop().unwrap_or(rel);
+    if is_excluded_file(name) {
+        return Some("dependency lock files are never indexed".into());
+    }
+    if let Some(dir) = segs.iter().find(|s| is_excluded_dir(s)) {
+        return Some(format!(
+            "`{dir}/` directories are always excluded from the index"
+        ));
+    }
+    if segs
+        .iter()
+        .chain([&name])
+        .any(|s| s.starts_with('.') && *s != "..")
+    {
+        return Some("hidden paths are not indexed".into());
+    }
+    let meta = std::fs::metadata(root.join(rel)).ok()?;
+    if meta.len() > MAX_FILE_BYTES {
+        return Some(format!(
+            "larger than the {} KB index cap",
+            MAX_FILE_BYTES / 1024
+        ));
+    }
+    // fail-open: no git (or not a repo) means nothing is ignored
+    let ignored = crate::gitmap::run_git(root, &["check-ignore", "-q", "--", rel]).is_ok();
+    ignored.then(|| "it is gitignored".into())
+}
+
+/// Index one file the index has never seen (created since the last walk), so
+/// `outline`/`show` answer instead of sending the agent to `cona index`.
+/// Err carries the reason the walk skips it — that file is not coming.
+pub fn index_unseen(root: &Path, conn: &Connection, rel: &str) -> Result<usize, String> {
+    if let Some(reason) = skip_reason(root, rel) {
+        return Err(reason);
+    }
+    reindex_file(root, conn, rel).map_err(|e| e.to_string())
+}
+
 pub fn reindex_file(root: &Path, conn: &Connection, rel: &str) -> Result<usize> {
     if db::is_read_only() {
         bail!("{rel} changed since it was indexed; cannot refresh in read-only mode (run `cona index` from a writable environment)");
     }
     let abs = root.join(rel);
-    let Some(language) = lang::detect_lang(rel) else {
+    let Some(language) = lang::detect_file(&abs, rel) else {
         return Ok(0);
     };
     // stat BEFORE reading: a write in between leaves an older mtime, so the

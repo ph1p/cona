@@ -298,6 +298,26 @@ pub fn cmd_edit(
     file: Option<&str>,
     force: bool,
 ) -> Result<String> {
+    // `--file` is the REPLACEMENT source. Agents also read it as "the file to
+    // edit" and pass the symbol's own file — splicing that whole file over the
+    // symbol doubles it and still parses. A --file that defines the symbol can
+    // only be that misreading: take piped stdin as the code, else refuse.
+    if let Some((f, scoped)) = file.and_then(|f| own_file_target(root, conn, symbol, f)) {
+        use std::io::IsTerminal;
+        let mut buf = String::new();
+        if !std::io::stdin().is_terminal() {
+            std::io::stdin().read_to_string(&mut buf)?;
+        }
+        if buf.trim().is_empty() {
+            bail!(
+                "--file {f} is the file that DEFINES {symbol} — --file names the replacement code, not the target\n  pipe the new code instead: cona edit '{scoped}' < new-code"
+            );
+        }
+        let out = cmd_edit_code(root, conn, &scoped, &buf, force)?;
+        return Ok(format!(
+            "note: --file {f} defines {symbol} — read as the target; replacement taken from stdin\n{out}"
+        ));
+    }
     let replacement = match file {
         Some(f) => std::fs::read_to_string(f)?,
         None => {
@@ -311,6 +331,29 @@ pub fn cmd_edit(
 
 /// The edit mechanism proper — replacement as a string, so MCP (which owns
 /// stdin) and the CLI wrapper share one implementation.
+/// `--file` names an indexed project file that itself defines `symbol` →
+/// (root-relative path, `path:symbol`). `None` for an ordinary replacement file.
+fn own_file_target(
+    root: &Path,
+    conn: &Connection,
+    symbol: &str,
+    file: &str,
+) -> Option<(String, String)> {
+    let abs = std::fs::canonicalize(file).ok()?;
+    let rel = abs
+        .strip_prefix(std::fs::canonicalize(root).ok()?)
+        .ok()?
+        .to_str()?
+        .replace('\\', "/");
+    if !db::file_indexed(conn, &rel) {
+        return None;
+    }
+    let name = symbol.rsplit_once(':').map_or(symbol, |(_, n)| n);
+    let scoped = format!("{rel}:{name}");
+    locate_symbol(conn, &scoped).ok()?;
+    Some((rel, scoped))
+}
+
 pub(crate) fn cmd_edit_code(
     root: &Path,
     conn: &Connection,
@@ -337,7 +380,8 @@ pub(crate) fn cmd_edit_code(
 /// until every required verification succeeds.
 fn verify_source(path: &str, new_src: &str, force: bool) -> Result<()> {
     if !force {
-        let language = lang::detect_lang(path).ok_or_else(|| anyhow!("unknown language"))?;
+        let language =
+            lang::detect_src(path, new_src).ok_or_else(|| anyhow!("unknown language"))?;
         let errors = lang::syntax_errors(language, new_src)?;
         if !errors.is_empty() {
             let lines: Vec<String> = errors.iter().map(|l| l.to_string()).collect();
@@ -574,7 +618,7 @@ pub fn cmd_rename(
         let abs = project_path(root, rel)
             .with_context(|| format!("invalid indexed mutation path: {rel}"))?;
         let src = std::fs::read_to_string(abs).with_context(|| format!("cannot read {rel}"))?;
-        let flang = lang::detect_lang(rel);
+        let flang = lang::detect_src(rel, &src);
         let (positions, semantic) = lang::ident_positions(flang, &src, &name);
         if positions.is_empty() {
             continue;

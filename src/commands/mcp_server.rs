@@ -36,7 +36,7 @@ fn all_tools() -> Vec<serde_json::Value> {
         mcp_tool(
             "show",
             "Print the source of one or more symbols (Name, Parent.Name or file.rs:Name). Use instead of reading a whole file to see one function/type. A file path prints that file's outline",
-            json!({"symbol": s("symbol name — comma-separate several to batch; a file path yields its outline"), "kind": s("narrow to a kind (fn, struct, …)"), "context": json!({"type": "integer", "description": "extra context lines around the body (default 0)"}), "sig": json!({"type": "boolean", "description": "signature line only, no body — leanest peek"}), "all": json!({"type": "boolean", "description": "on an ambiguous name, print every candidate instead of erroring"}), "path": s("only definitions in files under this path (file or directory)")}),
+            json!({"symbol": s("symbol name — comma-separate several to batch; a file path yields its outline"), "kind": s("narrow to a kind (fn, struct, …)"), "raw": {"type": "boolean", "description": "source only: no header, no line numbers"}, "context": json!({"type": "integer", "description": "extra context lines around the body (default 0)"}), "sig": json!({"type": "boolean", "description": "signature line only, no body — leanest peek"}), "all": json!({"type": "boolean", "description": "on an ambiguous name, print every candidate instead of erroring"}), "path": s("only definitions in files under this path (file or directory)")}),
             &["symbol"],
             read_only("Show symbol source"),
         ),
@@ -64,7 +64,7 @@ fn all_tools() -> Vec<serde_json::Value> {
         mcp_tool(
             "grep",
             "Code-only search; hits labeled with their enclosing symbol. Use instead of ripgrep over the repo — it skips strings, comments, and non-code. Matching is LITERAL unless regex is set; `a\\|b` matches either",
-            json!({"pattern": s("substring to search — literal unless regex is true"), "ignore_case": {"type": "boolean"}, "regex": {"type": "boolean", "description": "treat pattern as a regular expression (Rust regex syntax)"}, "path": s("only search files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max hits (default 50)"}, "include_deps": {"type": "boolean", "description": "also search dependency dirs (node_modules, vendor, target, .venv, …), which are not indexed and hidden by default"}, "context": {"type": "integer", "description": "lines of context around each hit (like grep -C)"}, "files_only": {"type": "boolean", "description": "list only the matching files (like grep -l)"}, "count": {"type": "boolean", "description": "matching lines per file as path:N (like grep -c)"}}),
+            json!({"pattern": s("substring to search — literal unless regex is true"), "ignore_case": {"type": "boolean"}, "regex": {"type": "boolean", "description": "treat pattern as a regular expression (Rust regex syntax)"}, "path": s("only search files under this prefix (file or directory)"), "limit": {"type": "integer", "description": "max hits (default 50)"}, "include_deps": {"type": "boolean", "description": "also search dependency dirs (node_modules, vendor, target, .venv, …), which are not indexed and hidden by default"}, "context": {"type": "integer", "description": "lines of context around each hit (like grep -C)"}, "files_only": {"type": "boolean", "description": "list only the matching files (like grep -l)"}, "count": {"type": "boolean", "description": "matching lines per file as path:N (like grep -c)"}, "word": {"type": "boolean", "description": "whole-word matches only (like grep -w)"}, "no_tests": {"type": "boolean", "description": "skip test files"}, "full_lines": {"type": "boolean", "description": "do not clip long lines"}, "strict_path": {"type": "boolean", "description": "on a miss under path, do not search elsewhere"}}),
             &["pattern"],
             read_only("Code grep"),
         ),
@@ -324,6 +324,7 @@ fn mcp_call(
                     conn,
                     &scoped,
                     ShowOpts {
+                        raw: flag("raw"),
                         context: ctx,
                         kind: opt("kind"),
                         sig: flag("sig"),
@@ -385,6 +386,11 @@ fn mcp_call(
                     after: uint("context", 0),
                     files_only: flag("files_only"),
                     count: flag("count"),
+                    word: flag("word"),
+                    only_matching: false,
+                    full_lines: flag("full_lines"),
+                    no_tests: flag("no_tests"),
+                    strict_path: flag("strict_path"),
                 },
                 false,
             )?;

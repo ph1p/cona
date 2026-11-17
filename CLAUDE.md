@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 386 tests (AR=/usr/bin/ar if Homebrew binutils' GNU ar is on PATH — it breaks the build.rs archives): unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
+cargo test                   # 409 tests (AR=/usr/bin/ar if Homebrew binutils' GNU ar is on PATH — it breaks the build.rs archives): unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -49,7 +49,11 @@ src/commands/    cmd_* impls: mod.rs (shared helpers + `defaults` = THE limits +
                  dead.rs (name-based dead-code candidates)
 src/lang/        Language detection + tree-sitter symbol extraction. 30+ langs
                  with symbols, incl. markup (XML/HTML elements named
-                 `tag#identity`); refs/grep-only for JSON/Svelte/Vue/…
+                 `tag#identity`); refs/grep-only for JSON/Svelte/Vue/SCSS/…
+                 An extension-less script takes its language from the `#!`
+                 line (`shebang_lang`): callers use `detect_src` (source in
+                 hand, pure) or `detect_file` (reads 128 bytes, extension-less
+                 paths only) — bare `detect_lang` is the extension table.
                  mod.rs (detect/parse/extract), classify.rs, names.rs,
                  walk.rs, idents.rs. Semantic identifier search lives here;
                  fail-open textual fallback is ONLY here — never rebuild it
@@ -62,6 +66,9 @@ src/indexer.rs   3-phase: walk → parallel parse → one write transaction.
                  db::IndexLock so N sessions opening together produce ONE walk,
                  not N. A typed `cona index` still warns-and-indexes and never
                  dedupes — the user asked for a walk.
+                 `index_unseen` indexes ONE file created since the walk on
+                 demand (outline / `file:Sym`), or names why the walk skips it
+                 (`skip_reason`) instead of sending the agent to `cona index`.
 src/editing.rs   Pure, tested splice logic for edit/rename (CRLF-preserving)
 src/graph.rs     In-memory call graph; narrow_by_scope = THE scope policy
 src/gitmap.rs    Git mining (churn/co-change/blame), pure parsers + run_git
@@ -113,6 +120,11 @@ src/db/          SQLite: per-project DB + global.db (registry/usage/meta).
    `cmd_show` auto-renders SMALL ambiguities (≤3 candidates, ≤400 total lines,
    `defaults::AUTO_ALL_*`) with an ambiguity banner — showing every candidate
    is not picking one; larger sets still error with the list.
+   Test-block labels (kind `test`, `describe("foo")`) never count as a
+   candidate beside a real definition (`locate_rows`), and `show` of a name
+   defined once outside tests renders that one with a banner + `also matched`
+   (`show_sole_non_test`) — every candidate still surfaces; `edit`/`rename`
+   keep demanding a narrowed name.
 5. Keep output compact: the tool exists to save agent tokens.
 6. `agents install/uninstall` is idempotent and marker-based
    (`<!-- cona:begin/end -->`) — NEVER touch foreign file content; invalid
@@ -274,8 +286,31 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
   matching flag so their file list agrees. Exception that keeps the default:
   ZERO literal hits on a regex-looking pattern retry once as a regex, with a
   `note:` line — 30% of empty greps were `\b`/`\.`/`.*` written for a regex.
+  `regex_intent` is the ONE test for that. `-w`/`-o`/`--no-tests`/`--full-lines`
+  are plain filters; a miss under `--path` prints a one-line `— elsewhere:`
+  summary (`--strict-path` off). An empty answer while the index lists files
+  that no longer exist re-indexes once and retries — never a false "no matches".
   `grep A B` where B is a bare identifier naming nothing on disk searches
   `A\|B` (`split_positionals`, `note:` line) — agents mean either name.
+- `edit --file` (alias `--from`) names the NEW code. Naming the indexed file
+  that defines the symbol is the recurring slip: refused with the pipe form
+  (or, with piped stdin, stdin is used + a `note:`). Never splice it in.
+- Hook redirects never fire on a file with uncommitted changes, on a
+  non-callable file under `NON_CALLABLE_REDIRECT_FACTOR`× the limit, or on a
+  grep for an identifier the index has no symbol for (→ `cona grep` advice).
+- `dead` skips framework entry files (`entries::is_framework_entry_path`: Next
+  app/pages router, middleware/instrumentation) and default exports of modules
+  loaded by `import("…")` — name-based reachability cannot see either. JS/TS
+  methods whose container is no indexed symbol (`export default { setup() {} }`,
+  an options object passed inline) are skipped too (`anonymous_member`): they
+  are reached through the object, never by name. Members of a NAMED object
+  (`const cfg = { boot() {} }`, `object_member`) count the object's name as a
+  use too — callers hold the object (`run(cfg)`); an unused object is reported
+  together with its members.
+- Shebang detection needs the file on disk; `diff` asks the index instead for
+  a deleted extension-less script (`is_code`). A `grep -e '--flag'` slip (clap
+  reads the pattern as a repeated flag) is answered by `dash_pattern_hint` in
+  main.rs with the `-- '<pattern>'` form.
 - `rename` semantic (identifier positions) but name-based: collision guard +
   syntax verify + all-or-nothing rollback; unparsable files only with --force.
 - `deps`: internal imports → edges; external packages counted + listed but not

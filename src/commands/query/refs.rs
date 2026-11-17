@@ -126,6 +126,26 @@ pub fn cmd_refs(
     flush(&cur_lens, &cur_lns, cur_test);
     // Nothing but test sites: they ARE the answer, show them (up to limit).
     let folded = (!prod.is_empty() && !test.is_empty()).then(|| (test.len(), hits_files(&test)));
+    // `Type.method` with no resolved site: receivers are untyped here, so
+    // `Type.shared.method(…)`, `x?.method(…)` and an unqualified call inside
+    // the type all miss. "No references" then reads as "dead code" — answer
+    // with the method name's sites instead, and say they are name-based.
+    if prod.is_empty() && test.is_empty() {
+        let tail = db::name_tail(name);
+        if tail != name && !tail.is_empty() {
+            let (body, b) = cmd_refs(root, conn, tail, limit, path_filter, tests, shape, json)?;
+            if json || body.starts_with("no references") {
+                return Ok((body, b));
+            }
+            return Ok((
+                format!(
+                    "no site resolved to '{name}' — sites of '{tail}' by name (·ambiguous: any receiver):\n{body}"
+                ),
+                b,
+            ));
+        }
+    }
+    let only_tests = fold && prod.is_empty() && !test.is_empty();
     let (hits, wins, baseline) = if prod.is_empty() {
         test.truncate(limit);
         truncated |= test.len() >= limit;
@@ -167,6 +187,7 @@ pub fn cmd_refs(
                 _ => per_file.push((f, 1)),
             }
         }
+        let files = per_file.len();
         for (f, n) in per_file {
             out.push_str(&if shape == RefsShape::Counts {
                 format!("{f}:{n}\n")
@@ -174,9 +195,15 @@ pub fn cmd_refs(
                 format!("{f}\n")
             });
         }
+        if shape == RefsShape::Counts && files > 1 {
+            out.push_str(&format!("total: {} in {files} files\n", hits.len()));
+        }
     }
     if truncated {
         out.push_str(LIMIT_TRAILER);
+    }
+    if only_tests {
+        out.push_str("prod refs: 0 — test sites only\n");
     }
     if let Some((n, files)) = folded {
         let at_least = if truncated { "≥" } else { "" };

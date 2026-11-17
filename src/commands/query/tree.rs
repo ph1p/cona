@@ -153,7 +153,7 @@ pub fn cmd_tree_rank(
     }
     let scans = crate::commands::par_map(&all_files, 8, |rel| {
         let src = std::fs::read_to_string(root.join(rel)).ok()?;
-        let lang = lang::detect_lang(rel);
+        let lang = lang::detect_src(rel, &src);
         let defines = defining.contains(rel.as_str());
         Some(Scan {
             bytes: src.len(),

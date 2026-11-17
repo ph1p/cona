@@ -14,7 +14,35 @@ fn facts() -> ReadFacts {
         advise_min_lines: 120,
         callable: true,
         reread: false,
+        dirty: false,
     }
+}
+
+#[test]
+fn never_redirects_a_file_with_uncommitted_changes() {
+    assert_eq!(
+        decide_read(&ReadFacts {
+            dirty: true,
+            ..facts()
+        }),
+        Decision::Allow
+    );
+}
+
+#[test]
+fn prose_redirects_only_when_huge() {
+    let prose = ReadFacts {
+        callable: false,
+        ..facts()
+    };
+    assert_eq!(decide_read(&prose), Decision::Allow);
+    assert_eq!(
+        decide_read(&ReadFacts {
+            lines: 300 * NON_CALLABLE_REDIRECT_FACTOR + 1,
+            ..prose
+        }),
+        Decision::Redirect
+    );
 }
 
 #[test]
@@ -227,10 +255,12 @@ fn no_advice_for_prose_or_data_files() {
 #[test]
 fn huge_prose_file_still_redirects() {
     // Advisory is gated on `callable`, size-based Redirect is not: outline/show
-    // are still the cheap way into a 5k-line changelog.
+    // are still the cheap way into a 5k-line changelog. An ordinary README
+    // (`prose_redirects_only_when_huge`) is read whole on purpose.
     assert_eq!(
         decide_read(&ReadFacts {
             callable: false,
+            lines: 5000,
             ..facts()
         }),
         Decision::Redirect
@@ -273,6 +303,7 @@ fn non_callable_languages_are_reachable() {
         ("a.nix", "nix"),
         ("a.svelte", "svelte"),
         ("a.vue", "vue"),
+        ("a.scss", "scss"),
         ("a.r", "r"),
     ] {
         assert_eq!(lang::detect_lang(path), Some(lang), "{path}");

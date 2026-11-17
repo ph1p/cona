@@ -36,7 +36,7 @@ pub fn cmd_context(
     {
         let mut seen = std::collections::HashSet::new();
         for (n, ln, is_call, argc) in
-            lang::ident_occurrences_failopen(lang::detect_lang(&path), &src)
+            lang::ident_occurrences_failopen(lang::detect_src(&path, &src), &src)
         {
             if !is_call || ln < s as usize || ln > e as usize || n.len() < 2 {
                 continue;
@@ -144,7 +144,7 @@ pub fn cmd_context(
             .collect();
 
         let resolved = resolve::disambiguate(
-            lang::detect_lang(&path).unwrap_or(""),
+            lang::detect_src(&path, &src).unwrap_or(""),
             &path,
             &src,
             &ambiguous_refs,
@@ -554,7 +554,7 @@ fn edit_dependencies(
          WHERE s.name = ?1 ORDER BY f.path, s.start_line LIMIT 7",
     )?;
     for (name, line, call, argc) in
-        lang::ident_occurrences_failopen(lang::detect_lang(path), source)
+        lang::ident_occurrences_failopen(lang::detect_src(path, source), source)
     {
         if line < start as usize || line > end as usize || !names.insert((name.clone(), call)) {
             continue;

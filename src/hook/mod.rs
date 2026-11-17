@@ -166,6 +166,9 @@ pub struct ReadFacts {
     /// This exact file was already fully read this session. Size-blind: the
     /// highest-confidence waste signal (the content is already in context).
     pub reread: bool,
+    /// The file has uncommitted changes (modified or untracked): it is being
+    /// worked on, and a rewrite needs every line. Never redirected.
+    pub dirty: bool,
 }
 
 /// Decide what to do with a candidate `Read`.
@@ -174,6 +177,9 @@ pub struct ReadFacts {
 /// - re-read of an already-read indexed file → Advise (any size)
 /// - mid-size indexed code file, full read → Advise (allowed, hint attached)
 /// - everything else (partial, small, non-code, loose file) → Allow
+/// A README or a config is read whole by design; a 10k-line data dump is not.
+pub const NON_CALLABLE_REDIRECT_FACTOR: i64 = 8;
+
 pub fn decide_read(f: &ReadFacts) -> Decision {
     if f.partial || !f.is_code {
         return Decision::Allow;
@@ -189,6 +195,12 @@ pub fn decide_read(f: &ReadFacts) -> Decision {
         return Decision::Allow;
     }
     if f.indexed {
+        // Mid-edit files and prose/data are read whole on purpose: a redirect
+        // there only costs the retry. Data past NON_CALLABLE_REDIRECT_FACTOR×
+        // the threshold still redirects — nobody means to read all of that.
+        if f.dirty || (!f.callable && f.lines <= f.max_lines * NON_CALLABLE_REDIRECT_FACTOR) {
+            return Decision::Allow;
+        }
         Decision::Redirect
     } else if f.in_repo {
         Decision::Nudge

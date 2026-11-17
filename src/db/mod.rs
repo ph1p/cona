@@ -375,6 +375,12 @@ pub fn register_project(root: &Path, files: i64, symbols: i64) -> Result<()> {
     Ok(())
 }
 
+/// Is `rel` (root-relative) a file the index holds?
+pub fn file_indexed(conn: &Connection, rel: &str) -> bool {
+    conn.query_row("SELECT 1 FROM files WHERE path = ?1", [rel], |_| Ok(()))
+        .is_ok()
+}
+
 /// Whether `root` already has a populated index. Never creates a DB — safe
 /// from hooks on arbitrary directories.
 ///
