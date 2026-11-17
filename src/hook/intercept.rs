@@ -78,9 +78,6 @@ fn try_shell(v: &serde_json::Value, cmd: &str) -> Result<()> {
     }
 }
 
-/// Is this path present in the project index? Fail-open: any DB trouble reads
-/// as "not indexed", which can only ever soften the decision.
-
 /// The biggest few symbols in an indexed file, longest first, as a
 /// ready-to-paste `cona show` example.
 ///
@@ -539,19 +536,16 @@ fn try_grep(
     // single-file search passes, the broad one gets the `cona grep` hint.
     // only projects the user already indexed — never create a DB from a hook
     let indexed_project = db::has_index(&root);
-    let identifier = identifier && (!indexed_project || symbol_known(&root, pattern));
-    if single_file && !identifier {
-        return Ok(());
-    }
-
     let facts = GrepFacts {
         surgical,
         single_file,
         identifier,
+        symbol_known: identifier && indexed_project && symbol_known(&root, pattern),
         indexed_project,
         in_repo: root.join(".git").exists(),
         soft,
     };
+    let identifier = facts.names_symbol();
     match decide_grep(&facts) {
         Decision::Allow => Ok(()),
         Decision::Advise => {

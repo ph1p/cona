@@ -643,6 +643,34 @@ impl<'a> PathFilter<'a> {
     }
 }
 
+/// Every indexed file with the language the index recorded for it. Loops over
+/// the whole index take the language from here — the walk already decided it
+/// (shebang included), so nothing re-detects per file.
+pub(crate) fn indexed_files(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT path, lang FROM files ORDER BY path")?;
+    let files = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(files)
+}
+
+/// Prefix of an answer given after `rewalk_if_vanished` re-indexed.
+pub(crate) const STALE_NOTE: &str =
+    "note: the index listed files that no longer exist — re-indexed\n";
+
+/// An indexed path missing on disk means the walk predates a move/delete
+/// (`git mv`, a branch switch): the index still lists what is gone and misses
+/// what replaced it. Re-walks once; `true` = the index changed, answer again.
+pub(crate) fn rewalk_if_vanished(root: &Path, conn: &Connection) -> bool {
+    let vanished = || -> rusqlite::Result<bool> {
+        let mut stmt = conn.prepare("SELECT path FROM files")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let any = rows.flatten().any(|p| !root.join(p).exists());
+        Ok(any)
+    };
+    vanished().unwrap_or(false) && indexer::index_project(root, conn).is_ok()
+}
+
 /// Refresh the complete candidate set before computing relationships or
 /// ambiguity. Filtering by a name first would miss deleted/renamed definitions.
 /// Writable queries forget confirmed missing files; read-only queries refuse
@@ -720,8 +748,12 @@ pub(crate) fn scan_ref_sites_identified(
     mut visit: impl FnMut(DefinitionIdentity, i64, &str) -> Result<bool>,
 ) -> Result<()> {
     let pf = PathFilter::new(root, path_filter);
-    let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
-    let mut files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
+    let indexed = indexed_files(conn)?;
+    let langs: std::collections::HashMap<&str, &str> = indexed
+        .iter()
+        .map(|(p, l)| (p.as_str(), l.as_str()))
+        .collect();
+    let mut files: Vec<String> = indexed.iter().map(|(p, _)| p.clone()).collect();
     // `--path` overrides the preloaded exemption: an explicit scope excludes
     // even the defining file. Then keep files literally containing the name,
     // plus the preloaded one (already in memory, never re-read).
@@ -747,7 +779,7 @@ pub(crate) fn scan_ref_sites_identified(
                 Err(_) => continue,
             },
         };
-        let ref_lns = lang::ref_lines(lang::detect_src(rel, fsrc), fsrc, name);
+        let ref_lns = lang::ref_lines(langs.get(rel.as_str()).copied(), fsrc, name);
         if ref_lns.is_empty() {
             continue;
         }
@@ -887,10 +919,19 @@ fn index_unseen_locator(root: &Path, conn: &Connection, symbol: &str) -> bool {
     let Some((file, _)) = split_locator(strip_call_suffix(symbol)) else {
         return false;
     };
+    index_if_unseen(root, conn, file) == Ok(true)
+}
+
+/// Index ONE file the walk has not seen yet. `Ok(true)` = indexed just now;
+/// `Ok(false)` = nothing to do (already indexed, or no such file on disk);
+/// `Err(why)` = the walk excludes it for good — callers name `why` instead of
+/// sending the agent to `cona index`.
+pub(crate) fn index_if_unseen(root: &Path, conn: &Connection, file: &str) -> Result<bool, String> {
     let rel = file.trim_start_matches("./");
-    root.join(rel).is_file()
-        && files_named(conn, rel).is_empty()
-        && indexer::index_unseen(root, conn, rel).is_ok()
+    if !root.join(rel).is_file() || !files_named(conn, rel).is_empty() {
+        return Ok(false);
+    }
+    indexer::index_unseen(root, conn, rel).map(|_| true)
 }
 
 fn locate_candidates(conn: &Connection, symbol: &str, kind: Option<&str>) -> Result<Vec<Located>> {

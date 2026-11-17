@@ -75,11 +75,11 @@ pub fn is_test_symbol(qualified: &str) -> bool {
 pub enum EntryClass {
     Main,
     Api,
+    /// Export of a file the framework loads by name (`is_framework_entry_path`).
+    Framework,
     Test,
 }
 
-/// `parent` = enclosing symbol (None = top level). Test symbols count only
-/// when callable (a struct in a test file is neither a test nor API).
 /// A file the framework loads by NAME, so nothing in the repo imports it:
 /// Next.js App/Pages Router files, middleware, service workers. Every export
 /// of such a file is an entry point, not dead code.
@@ -158,6 +158,8 @@ pub fn module_stem(path: &str) -> Option<&str> {
     }
 }
 
+/// `parent` = enclosing symbol (None = top level). Test symbols count only
+/// when callable (a struct in a test file is neither a test nor API).
 pub fn entry_class(
     lang: &str,
     name: &str,
@@ -188,9 +190,12 @@ pub fn entry_class(
             if parent.is_none() && signature.trim_start().starts_with("pub ") => {
                 return Some(EntryClass::Api);
             }
-        "javascript" | "typescript" | "tsx"
-            if signature.trim_start().starts_with("export ") => {
-                return Some(EntryClass::Api);
+        l if crate::lang::is_js_ts(l) && signature.trim_start().starts_with("export ") => {
+                return Some(if is_framework_entry_path(path) {
+                    EntryClass::Framework
+                } else {
+                    EntryClass::Api
+                });
             }
         "python"
             // no export keyword: top-level defs/classes not starting with `_`
@@ -222,6 +227,21 @@ mod tests {
         assert!(is_test_symbol("tests.maintenance_cmds_classified"));
         assert!(is_test_symbol("test_login"));
         assert!(!is_test_symbol("Totals.baseline"));
+    }
+
+    #[test]
+    fn framework_exports_are_their_own_class() {
+        let class = |sig, path| entry_class("typescript", "GET", "fn", None, sig, path);
+        assert_eq!(
+            class("export async function GET(", "app/api/users/route.ts"),
+            Some(EntryClass::Framework)
+        );
+        assert_eq!(
+            class("export async function GET(", "lib/http.ts"),
+            Some(EntryClass::Api)
+        );
+        // a private helper of a route file is still ordinary code
+        assert_eq!(class("function GET(", "app/api/users/route.ts"), None);
     }
 
     #[test]

@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 409 tests (AR=/usr/bin/ar if Homebrew binutils' GNU ar is on PATH — it breaks the build.rs archives): unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
+cargo test                   # 412 tests (AR=/usr/bin/ar if Homebrew binutils' GNU ar is on PATH — it breaks the build.rs archives): unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -289,7 +289,9 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
   `regex_intent` is the ONE test for that. `-w`/`-o`/`--no-tests`/`--full-lines`
   are plain filters; a miss under `--path` prints a one-line `— elsewhere:`
   summary (`--strict-path` off). An empty answer while the index lists files
-  that no longer exist re-indexes once and retries — never a false "no matches".
+  that no longer exist re-indexes once and retries — never a false "no matches"
+  (`rewalk_if_vanished` + `STALE_NOTE`; `refs` and `find` do the same on an
+  empty answer, `dead` checks up front).
   `grep A B` where B is a bare identifier naming nothing on disk searches
   `A\|B` (`split_positionals`, `note:` line) — agents mean either name.
 - `edit --file` (alias `--from`) names the NEW code. Naming the indexed file
@@ -298,10 +300,12 @@ binary-download path prints its own next-steps heredoc — keep the two in sync.
 - Hook redirects never fire on a file with uncommitted changes, on a
   non-callable file under `NON_CALLABLE_REDIRECT_FACTOR`× the limit, or on a
   grep for an identifier the index has no symbol for (→ `cona grep` advice).
-- `dead` skips framework entry files (`entries::is_framework_entry_path`: Next
-  app/pages router, middleware/instrumentation) and default exports of modules
+- `dead` skips framework entry files (`EntryClass::Framework`, from
+  `entries::is_framework_entry_path`: Next app/pages router,
+  middleware/instrumentation; `entries` lists them as api) and default exports of modules
   loaded by `import("…")` — name-based reachability cannot see either. JS/TS
-  methods whose container is no indexed symbol (`export default { setup() {} }`,
+  object-literal methods (kind `member`, set by the walker) whose container is
+  no indexed symbol (`export default { setup() {} }`,
   an options object passed inline) are skipped too (`anonymous_member`): they
   are reached through the object, never by name. Members of a NAMED object
   (`const cfg = { boot() {} }`, `object_member`) count the object's name as a

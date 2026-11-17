@@ -265,15 +265,9 @@ fn check_no_arg_walks_git_changes() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let git = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .current_dir(&dir)
-            .output()
-            .unwrap();
+        git_in(&dir, args);
     };
     git(&["init", "-q"]);
-    git(&["config", "user.email", "t@t"]);
-    git(&["config", "user.name", "t"]);
     // one committed-clean file, one untracked broken file
     std::fs::write(dir.join("ok.rs"), "fn a() {}\n").unwrap();
     git(&["add", "."]);
@@ -826,8 +820,6 @@ fn find_files_dead_code_and_generated_grep() {
 
 #[test]
 fn hook_lets_single_file_grep_through_even_before_the_file_exists() {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
     let dir = std::env::temp_dir().join(format!("cona-hookgrep-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -840,39 +832,10 @@ fn hook_lets_single_file_grep_through_even_before_the_file_exists() {
     } else {
         dir.canonicalize().unwrap()
     };
-    let bin = env!("CARGO_BIN_EXE_cona");
-    let data = dir.join(".cona-data");
     // the hook only redirects inside a project root (a `.git`)
-    Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&dir)
-        .status()
-        .unwrap();
-    Command::new(bin)
-        .arg("index")
-        .env("CONA_DATA_DIR", &data)
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    let hook = |cmd: &str| -> String {
-        let payload = serde_json::json!({"session_id": "t", "cwd": dir, "tool_name": "Bash",
-            "tool_input": {"command": cmd}});
-        let mut c = Command::new(bin)
-            .args(["hook", "PreToolUse"])
-            .env("CONA_DATA_DIR", &data)
-            .env("CONA_NO_STATS", "1")
-            .current_dir(&dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        c.stdin
-            .take()
-            .unwrap()
-            .write_all(payload.to_string().as_bytes())
-            .unwrap();
-        String::from_utf8_lossy(&c.wait_with_output().unwrap().stdout).to_string()
-    };
+    git_in(&dir, &["init", "-q"]);
+    run_in(&dir, &["index"]);
+    let hook = |cmd: &str| hook_in(&dir, cmd);
     // the diff does not exist yet (`>` runs after the hook): one file, not a tree
     for cmd in [
         "git diff > d.diff && grep -n locate_fresh d.diff",
@@ -963,6 +926,39 @@ fn temp_project(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
         std::fs::write(p, body).unwrap();
     }
     dir
+}
+
+/// `git <args>` in `dir` under a throwaway identity.
+fn git_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap()
+}
+
+/// The PreToolUse hook's stdout for a shell `command` run in `dir`.
+fn hook_in(dir: &std::path::Path, command: &str) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let payload = serde_json::json!({"session_id": "t", "cwd": dir, "tool_name": "Bash",
+        "tool_input": {"command": command}});
+    let mut c = Command::new(env!("CARGO_BIN_EXE_cona"))
+        .args(["hook", "PreToolUse"])
+        .env("CONA_DATA_DIR", dir.join(".cona-data"))
+        .env("CONA_NO_STATS", "1")
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    c.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    String::from_utf8_lossy(&c.wait_with_output().unwrap().stdout).to_string()
 }
 
 fn run_in(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
@@ -1174,6 +1170,28 @@ fn feedback_slips_are_answered() {
         out.contains("re-indexed") && out.contains("src/new.ts:1"),
         "{out}"
     );
+
+    // refs and find answer a moved file the same way
+    std::fs::remove_file(dir.join("src/new.ts")).unwrap();
+    std::fs::write(
+        dir.join("src/moved.ts"),
+        "export function movedFn() {}\nmovedFn();\n",
+    )
+    .unwrap();
+    let (ok, out) = run_in(&dir, &["refs", "movedFn"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("re-indexed") && out.contains("src/moved.ts"),
+        "{out}"
+    );
+    std::fs::remove_file(dir.join("src/moved.ts")).unwrap();
+    std::fs::write(dir.join("src/again.ts"), "export function againFn() {}\n").unwrap();
+    let (ok, out) = run_in(&dir, &["find", "againFn"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("re-indexed") && out.contains("src/again.ts"),
+        "{out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1229,14 +1247,7 @@ fn shebang_scripts_are_indexed() {
     assert!(ok && out.contains("fresh"), "{out}");
 
     // show --raw / a deleted script still counts as code in `diff`
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
-            .args(args)
-            .current_dir(&dir)
-            .output()
-            .unwrap()
-    };
+    let git = |args: &[&str]| git_in(&dir, args);
     std::fs::write(dir.join(".gitignore"), ".cona-data\n").unwrap();
     git(&["init", "-q"]);
     git(&["add", "-A"]);
@@ -1288,8 +1299,6 @@ fn dead_skips_members_of_anonymous_objects() {
 /// The read hook sees an extension-less script as the code file it is.
 #[test]
 fn hook_redirects_a_large_shebang_script() {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
     let mut body = String::from("#!/usr/bin/env python3\n");
     for i in 0..600 {
         body.push_str(&format!("def f{i}():\n    return {i}\n\n"));
@@ -1306,40 +1315,12 @@ fn hook_redirects_a_large_shebang_script() {
     for args in [
         &["init", "-q"][..],
         &["add", "bin"],
-        &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-qm",
-            "init",
-        ],
+        &["commit", "-qm", "init"],
     ] {
-        Command::new("git")
-            .args(args)
-            .current_dir(&dir)
-            .status()
-            .unwrap();
+        git_in(&dir, args);
     }
     run_in(&dir, &["index"]);
-    let payload = serde_json::json!({"session_id": "t", "cwd": dir, "tool_name": "Bash",
-        "tool_input": {"command": "cat bin/big"}});
-    let mut c = Command::new(env!("CARGO_BIN_EXE_cona"))
-        .args(["hook", "PreToolUse"])
-        .env("CONA_NO_STATS", "1")
-        .env("CONA_DATA_DIR", dir.join(".cona-data"))
-        .current_dir(&dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    c.stdin
-        .take()
-        .unwrap()
-        .write_all(payload.to_string().as_bytes())
-        .unwrap();
-    let out = String::from_utf8_lossy(&c.wait_with_output().unwrap().stdout).to_string();
+    let out = hook_in(&dir, "cat bin/big");
     assert!(out.contains("cona outline bin/big"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }

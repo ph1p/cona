@@ -315,6 +315,21 @@ fn swift_open_variable_keeps_its_type() {
 }
 
 #[test]
+fn ts_object_literal_methods_are_members() {
+    let src = "class C {\n  run() {}\n}\n\
+               const cfg = {\n  boot() {},\n}\n\
+               export default {\n  setup() {},\n}\n";
+    let syms = lang::extract_symbols("typescript", src).unwrap();
+    let find = |q: &str| syms.iter().find(|s| s.qualified == q);
+    assert_eq!(find("C.run").map(|s| s.kind), Some("method"), "{syms:?}");
+    // an object's method is reached through the object: its own kind
+    let boot = find("cfg.boot").expect("cfg.boot");
+    assert_eq!((boot.kind, boot.parent.as_deref()), ("member", Some("cfg")));
+    let setup = find("setup").expect("setup");
+    assert_eq!((setup.kind, setup.parent.as_deref()), ("member", None));
+}
+
+#[test]
 fn ts_function_valued_consts_are_indexed() {
     let src = "export const handler = async (req: Request) => {\n  return null\n}\n\
                const legacy = function () {}\n\

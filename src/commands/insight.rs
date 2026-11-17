@@ -71,7 +71,7 @@ pub fn cmd_entries(
                 mains.push(row);
                 involved.insert(row.path.as_str(), row.size);
             }
-            Some(entries::EntryClass::Api) => {
+            Some(entries::EntryClass::Api | entries::EntryClass::Framework) => {
                 api.push(row);
                 involved.insert(row.path.as_str(), row.size);
             }
@@ -478,11 +478,14 @@ pub fn cmd_check(
     let mut checked = 0usize;
     for path in &files {
         let abs = root.join(path);
-        let Some(language) = lang::detect_file(&abs, path) else {
-            continue; // unknown language — nothing to parse
-        };
+        if !lang::may_be_code(path) {
+            continue;
+        }
         let Ok(src) = std::fs::read_to_string(&abs) else {
             continue;
+        };
+        let Some(language) = lang::detect_src(path, &src) else {
+            continue; // unknown language — nothing to parse
         };
         baseline += db::est_tokens(src.len());
         let errors = lang::syntax_errors(language, &src)?;

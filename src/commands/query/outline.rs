@@ -1,6 +1,6 @@
 //! `outline`: every symbol of one file with line ranges.
 
-use crate::commands::jout;
+use crate::commands::{clip_str, jout};
 use crate::{db, indexer};
 use anyhow::{bail, Result};
 use rusqlite::Connection;
@@ -43,10 +43,7 @@ fn symbolless(root: &Path, conn: &Connection, file: &str) -> Option<(String, i64
         lines.len()
     );
     for (n, l) in edges {
-        out.push_str(&format!(
-            "  {n}: {}\n",
-            l.chars().take(160).collect::<String>()
-        ));
+        out.push_str(&format!("  {n}: {}\n", clip_str(l, 160)));
     }
     Some((out, baseline))
 }
@@ -110,14 +107,12 @@ pub fn cmd_outline(
         // Distinguish the remaining causes — each has a different next step,
         // and a hook-redirected agent must not be stranded by a dead end.
         let indexed = !crate::commands::files_named(conn, file).is_empty();
-        if !indexed && root.join(file).is_file() {
-            // created since the last walk: index it now rather than send the
-            // agent to `cona index` — unless the walk excludes it for good
-            let rel = file.trim_start_matches("./");
-            if let Err(why) = indexer::index_unseen(root, conn, rel) {
-                bail!("'{file}' is not indexed ({why}) — read it directly");
-            }
-            rows = fetch()?;
+        // created since the last walk: index it now rather than send the
+        // agent to `cona index` — unless the walk excludes it for good
+        match crate::commands::index_if_unseen(root, conn, file) {
+            Ok(true) => rows = fetch()?,
+            Ok(false) => {}
+            Err(why) => bail!("'{file}' is not indexed ({why}) — read it directly"),
         }
         if rows.is_empty() {
             if indexed || root.join(file).is_file() {

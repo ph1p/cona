@@ -1,6 +1,8 @@
 //! `refs`: semantic usage sites of a name.
 
-use crate::commands::{jout, render_context_blocks, scan_ref_sites, LIMIT_TRAILER};
+use crate::commands::{
+    jout, render_context_blocks, rewalk_if_vanished, scan_ref_sites, LIMIT_TRAILER, STALE_NOTE,
+};
 use crate::db;
 use crate::entries;
 use anyhow::Result;
@@ -131,6 +133,16 @@ pub fn cmd_refs(
     // the type all miss. "No references" then reads as "dead code" — answer
     // with the method name's sites instead, and say they are name-based.
     if prod.is_empty() && test.is_empty() {
+        // zero sites from an index that lists vanished files is no answer:
+        // the files that replaced them were never scanned
+        if rewalk_if_vanished(root, conn) {
+            let (body, b) = cmd_refs(root, conn, name, limit, path_filter, tests, shape, json)?;
+            return Ok(if json {
+                (body, b)
+            } else {
+                (format!("{STALE_NOTE}{body}"), b)
+            });
+        }
         let tail = db::name_tail(name);
         if tail != name && !tail.is_empty() {
             let (body, b) = cmd_refs(root, conn, tail, limit, path_filter, tests, shape, json)?;

@@ -134,8 +134,7 @@ pub fn cmd_tree_rank(
 
     // One pass: global totals per name plus each defining file's own counts,
     // so fan-in = total − self.
-    let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
-    let all_files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
+    let all_files = crate::commands::indexed_files(conn)?;
     let mut total: HashMap<String, i64> = HashMap::new();
     // js/ts names count only where a file imports them — the same short name
     // (`at`, `step`) is a local in half the files that never import it
@@ -151,20 +150,21 @@ pub fn cmd_tree_rank(
         imports: Option<Option<HashSet<String>>>,
         listed: Option<HashSet<String>>,
     }
-    let scans = crate::commands::par_map(&all_files, 8, |rel| {
+    let scans = crate::commands::par_map(&all_files, 8, |(rel, lng)| {
         let src = std::fs::read_to_string(root.join(rel)).ok()?;
-        let lang = lang::detect_src(rel, &src);
+        let lang = Some(lng.as_str());
         let defines = defining.contains(rel.as_str());
         Some(Scan {
             bytes: src.len(),
             counts: lang::ident_counts(lang, &src, &names),
-            imports: matches!(lang, Some("javascript" | "typescript" | "tsx"))
+            imports: lang
+                .is_some_and(lang::is_js_ts)
                 .then(|| imported_names(&src)),
             listed: (defines && src.contains("export")).then(|| export_list_names(&src)),
         })
     });
     let mut bytes: usize = 0;
-    for (rel, scan) in all_files.iter().zip(scans) {
+    for ((rel, _), scan) in all_files.iter().zip(scans) {
         let Some(Scan {
             bytes: b,
             counts,
@@ -203,7 +203,7 @@ pub fn cmd_tree_rank(
                 || listed.get(&sym.path).is_some_and(|l| l.contains(&sym.name))
         })
         .map(|sym| {
-            if matches!(sym.lang.as_str(), "javascript" | "typescript" | "tsx") {
+            if lang::is_js_ts(&sym.lang) {
                 return (imported_total.get(&sym.name).copied().unwrap_or(0), sym);
             }
             let own = self_counts
@@ -274,7 +274,7 @@ pub fn cmd_tree_rank(
 fn importable(lang: &str, signature: &str) -> bool {
     let sig = signature.trim_start();
     match lang {
-        "javascript" | "typescript" | "tsx" => sig.starts_with("export "),
+        l if lang::is_js_ts(l) => sig.starts_with("export "),
         "rust" => sig.starts_with("pub ") || sig.starts_with("pub("),
         _ => true,
     }

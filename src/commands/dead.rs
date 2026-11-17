@@ -21,6 +21,7 @@ fn candidate_kind(kind: &str) -> bool {
         "fn" | "fn*"
             | "def"
             | "method"
+            | "member"
             | "func"
             | "sub"
             | "class"
@@ -73,24 +74,21 @@ fn format_arg_uses(src: &str, names: &HashSet<&str>, counts: &mut HashMap<String
     }
 }
 
-/// A JS/TS method whose container is not itself a symbol: a member of an
-/// anonymous object literal (`export default { setup() {} }`,
+/// A JS/TS object-literal method (walker kind `member`) with no named
+/// container: a member of an anonymous object (`export default { setup() {} }`,
 /// `defineComponent({ mounted() {} })`). The object is handed away by value
 /// and its members are called through it — no identifier ever names them.
-fn anonymous_member(lang: &str, kind: &str, container_kind: Option<&str>) -> bool {
-    object_method(lang, kind) && container_kind.is_none()
+fn anonymous_member(kind: &str, parent: Option<&str>) -> bool {
+    kind == "member" && parent.is_none()
 }
 
-/// A JS/TS method of a NAMED object literal (`const cfg = { boot() {} }`):
+/// Name of the object holding a `member` (`const cfg = { boot() {} }` → `cfg`):
 /// callers hold the object (`run(cfg)`), so the object's name is a use too.
-/// Class members are called by their own name and stay plain candidates.
-fn object_member(lang: &str, kind: &str, container_kind: Option<&str>) -> bool {
-    object_method(lang, kind)
-        && container_kind.is_some_and(|k| !matches!(k, "class" | "interface" | "enum" | "type"))
-}
-
-fn object_method(lang: &str, kind: &str) -> bool {
-    matches!(lang, "javascript" | "typescript" | "tsx") && kind == "method"
+/// Class methods are kind `method`, called by their own name — plain candidates.
+fn object_member(kind: &str, parent: Option<&str>) -> Option<String> {
+    (kind == "member")
+        .then(|| parent.map(|p| crate::db::name_tail(p).to_string()))
+        .flatten()
 }
 
 struct Cand {
@@ -108,6 +106,25 @@ struct Cand {
 }
 
 pub fn cmd_dead(
+    root: &Path,
+    conn: &Connection,
+    path_filter: Option<&str>,
+    limit: usize,
+    json: bool,
+) -> Result<(String, i64)> {
+    // A vanished file is skipped by the scan, and the uses in whatever
+    // replaced it are never counted — every symbol it called would read dead.
+    // Checked up front: unlike grep/refs, a stale answer here is not empty.
+    let rewalked = crate::commands::rewalk_if_vanished(root, conn);
+    let (out, baseline) = dead_scan(root, conn, path_filter, limit, json)?;
+    Ok(if rewalked && !json {
+        (format!("{}{out}", crate::commands::STALE_NOTE), baseline)
+    } else {
+        (out, baseline)
+    })
+}
+
+fn dead_scan(
     root: &Path,
     conn: &Connection,
     path_filter: Option<&str>,
@@ -162,18 +179,7 @@ pub fn cmd_dead(
         })?
         .flatten()
         .collect();
-    let kinds: HashMap<(&str, &str), &str> = rows
-        .iter()
-        .map(|r| ((r.0.as_str(), r.3.as_str()), r.2.as_str()))
-        .collect();
-    for row in &rows {
-        let (path, lng, kind, qualified, name, parent, start, end, sig) = row.clone();
-        // `a.b.m` → container `a.b`; an unqualified method has none
-        let container = qualified.rsplit_once('.').map(|(c, _)| c.to_string());
-        let container_kind = container
-            .as_deref()
-            .and_then(|c| kinds.get(&(path.as_str(), c)))
-            .copied();
+    for (path, lng, kind, qualified, name, parent, start, end, sig) in rows {
         if !lang::has_callable_symbols(&lng) {
             continue;
         }
@@ -193,25 +199,21 @@ pub fn cmd_dead(
             || entries::is_test_symbol(&qualified)
             || matches!(
                 class,
-                Some(entries::EntryClass::Main | entries::EntryClass::Test)
+                Some(
+                    entries::EntryClass::Main
+                        | entries::EntryClass::Test
+                        | entries::EntryClass::Framework
+                )
             )
             || implicitly_called(&name, &sig)
-            || anonymous_member(&lng, &kind, container_kind)
-            || (sig.trim_start().starts_with("export ") && entries::is_framework_entry_path(&path))
+            || anonymous_member(&kind, parent.as_deref())
             || (parent.is_some() && inside_conforming(&path, start, end))
         {
             continue;
         }
         cands.push(Cand {
             default_export: sig.trim_start().starts_with("export default"),
-            via: object_member(&lng, &kind, container_kind)
-                .then(|| {
-                    container
-                        .as_deref()
-                        .map(crate::db::name_tail)
-                        .map(str::to_string)
-                })
-                .flatten(),
+            via: object_member(&kind, parent.as_deref()),
             api: matches!(class, Some(entries::EntryClass::Api)),
             path,
             kind,
@@ -226,15 +228,14 @@ pub fn cmd_dead(
         .flat_map(|c| std::iter::once(c.name.as_str()).chain(c.via.as_deref()))
         .collect();
 
-    let mut files_stmt = conn.prepare("SELECT path FROM files ORDER BY path")?;
-    let all_files: Vec<String> = files_stmt.query_map([], |r| r.get(0))?.flatten().collect();
+    let all_files = crate::commands::indexed_files(conn)?;
     // uses per name, split by where they sit: production code vs tests
     let mut prod: HashMap<&str, i64> = HashMap::new();
     let mut test: HashMap<&str, i64> = HashMap::new();
     let mut bytes = 0usize;
-    let scans = par_map(&all_files, 8, |rel| {
+    let scans = par_map(&all_files, 8, |(rel, lng)| {
         let src = std::fs::read_to_string(root.join(rel)).ok()?;
-        let lng = lang::detect_src(rel, &src);
+        let lng = Some(lng.as_str());
         let mut counts = lang::ident_counts_members(lng, &src, &names);
         if lng == Some("rust") {
             format_arg_uses(&src, &names, &mut counts);
@@ -249,7 +250,7 @@ pub fn cmd_dead(
     // modules loaded by `lazy(() => import("./X"))`: no identifier names their
     // default export anywhere, so the name scan alone calls it dead
     let mut lazy_modules: HashSet<String> = HashSet::new();
-    for (rel, scan) in all_files.iter().zip(scans) {
+    for ((rel, _), scan) in all_files.iter().zip(scans) {
         let Some((b, counts, lazy)) = scan else {
             continue;
         };
@@ -368,14 +369,16 @@ mod tests {
     #[test]
     fn members_of_anonymous_objects_are_not_candidates() {
         // `export default { setup() {} }` / `methods: { click() {} }`
-        assert!(anonymous_member("typescript", "method", None));
-        assert!(!anonymous_member("typescript", "method", Some("class")));
-        assert!(!anonymous_member("typescript", "fn", None));
-        assert!(!anonymous_member("rust", "method", None));
+        assert!(anonymous_member("member", None));
+        assert!(!anonymous_member("member", Some("cfg")));
+        assert!(!anonymous_member("method", None));
         // a named object's member lives as long as the object is used
-        assert!(object_member("typescript", "method", Some("const")));
-        assert!(!object_member("typescript", "method", Some("class")));
-        assert!(!object_member("typescript", "method", None));
+        assert_eq!(
+            object_member("member", Some("a.cfg")).as_deref(),
+            Some("cfg")
+        );
+        assert_eq!(object_member("method", Some("Klass")), None);
+        assert_eq!(object_member("member", None), None);
     }
 
     #[test]

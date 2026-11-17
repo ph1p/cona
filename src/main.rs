@@ -47,8 +47,11 @@ fn dash_pattern_hint(err: &clap::Error) -> Option<String> {
     if err.kind() != clap::error::ErrorKind::UnknownArgument {
         return None;
     }
-    // grep's short flags: i e n l c, and C A B with a count
-    let known = |c: char| "ienlcwoCAB".contains(c) || c.is_ascii_digit();
+    // grep's short flags, read off the clap surface so a new one cannot be
+    // forgotten here; digits are the count glued to -C/-A/-B
+    let grep = <cli::GrepArgs as clap::Args>::augment_args(clap::Command::new("grep"));
+    let shorts: Vec<char> = grep.get_arguments().filter_map(|a| a.get_short()).collect();
+    let known = |c: char| shorts.contains(&c) || c.is_ascii_digit();
     let token = args[at + 1..]
         .iter()
         .take_while(|a| *a != "--")

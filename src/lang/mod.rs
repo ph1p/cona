@@ -15,6 +15,11 @@ pub struct Sym {
 /// resolution (deps.rs) probes against, so the two can't drift.
 pub const JS_TS_EXTS: [&str; 8] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"];
 
+/// The three language labels the JS/TS grammars index under.
+pub fn is_js_ts(lang: &str) -> bool {
+    matches!(lang, "javascript" | "typescript" | "tsx")
+}
+
 /// Language of an extension-less script, from its `#!` line: `#!/bin/sh`,
 /// `#!/usr/bin/env python3`, `#!/usr/bin/env -S node --flag`. `None` for no
 /// shebang or an interpreter cona has no grammar for.
@@ -47,6 +52,13 @@ pub fn shebang_lang(head: &str) -> Option<&'static str> {
 fn extensionless(path: &str) -> bool {
     let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
     !base.is_empty() && !base.contains('.')
+}
+
+/// Whether a path can be code at all, judged without I/O: a known extension,
+/// or none (a possible `#!` script). The gate before any read that
+/// `detect_src` then settles.
+pub fn may_be_code(path: &str) -> bool {
+    detect_lang(path).is_some() || extensionless(path)
 }
 
 /// `detect_lang`, plus the `#!` line for an extension-less script whose
@@ -404,7 +416,7 @@ pub fn is_type_kind(kind: &str) -> bool {
 }
 
 pub fn is_callable_kind(kind: &str) -> bool {
-    matches!(kind, "fn" | "fn*" | "def" | "method")
+    matches!(kind, "fn" | "fn*" | "def" | "method" | "member")
 }
 
 /// Identifier validity for `rename` targets (conservative ASCII rule shared

@@ -200,9 +200,12 @@ src/lang/        Language detection + tree-sitter symbol extraction: mod.rs
                  is declarative (object/pair/call/arrow/declarator/export/as/
                  satisfies…), so callback bags inside function bodies stay out;
                  function values get kind `prop` (key-dispatched → `dead` skips
-                 them). describe/it/test(+.only/.skip…) blocks with a literal
+                 them). A method written in an object literal (`{ boot() {} }`)
+                 is kind `member`, a class method stays `method` — the walker
+                 knows the parent node, so `dead` need not look the container
+                 up. describe/it/test(+.only/.skip…) blocks with a literal
                  title → kind `test`, qualified `outer.inner`; `find` sorts
-                 them after definitions. EXTRACT_VERSION 5 re-parses old rows.
+                 them after definitions. EXTRACT_VERSION 6 re-parses old rows.
                  Makefile+Dockerfile detected via basename (Dockerfile also
                  Dockerfile.<flavour>/<name>.dockerfile/Containerfile).
                  Vue+Dockerfile grammars vendored (vendor/*, build.rs + cc) —
@@ -371,8 +374,8 @@ src/hook/        PreToolUse + PostToolUse + PreCompact hooks
                  not single-file → Advise (hook:grep-literal) naming a ready-to-
                  paste `cona grep '<pat>'` (+ `--regex` only when the pattern
                  uses regex syntax). An identifier the index holds NO symbol
-                 for (symbol_known) is treated the same way — refs/show cannot
-                 answer it. decide_read never redirects a file with
+                 for (`GrepFacts.symbol_known`, folded into `names_symbol()`)
+                 is treated the same way — refs/show cannot answer it. decide_read never redirects a file with
                  uncommitted changes (`dirty` — the agent is mid-edit and
                  needs the bytes) and redirects a non-callable file (prose,
                  config, search-only language) only past
