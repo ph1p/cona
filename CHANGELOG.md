@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/ph1p/cona/compare/v0.1.10...v0.1.11) - 2026-11-17
+
+### Added
+
+- act on usage feedback (shebang scripts, dead, grep, MCP)
+
+### Other
+
+- simplify follow-ups (member kind, stale-index retry)
+
 ## [0.1.10](https://github.com/ph1p/cona/compare/v0.1.9...v0.1.10) - 2026-11-09
 
 ### Fixed
