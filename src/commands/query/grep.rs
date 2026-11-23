@@ -582,7 +582,7 @@ impl Matcher {
                 // Either reading may be the one meant (`\(` is a regex escape
                 // AND Swift interpolation), so match both rather than guess.
                 let both = format!("(?:{})|{literal}", pattern.replace("\\|", "|"));
-                if let Ok(m) = Self::new(&both, ignore_case, true) {
+                if let Ok(m) = Self::compile(&both, ignore_case) {
                     return Ok(m);
                 }
             }
@@ -591,7 +591,10 @@ impl Matcher {
             } else {
                 literal
             };
-            return Self::new(&alt, ignore_case, true);
+            // Compiled directly, never through `new` again: an escaped branch
+            // holds `\|` itself (`regex::escape("||")`), which a second pass
+            // would split into an empty branch that matches every line.
+            return Self::compile(&alt, ignore_case);
         }
         if !regex {
             let needle = if ignore_case {
@@ -604,6 +607,10 @@ impl Matcher {
                 ignore_case,
             });
         }
+        Self::compile(pattern, ignore_case)
+    }
+
+    fn compile(pattern: &str, ignore_case: bool) -> Result<Self> {
         regex::RegexBuilder::new(pattern)
             .case_insensitive(ignore_case)
             .build()
@@ -631,11 +638,7 @@ impl Matcher {
             ),
         };
         let b = |on: bool| if on { "\\b" } else { "" };
-        Self::new(
-            &format!("{}(?:{src}){}", b(lead), b(trail)),
-            ignore_case,
-            true,
-        )
+        Self::compile(&format!("{}(?:{src}){}", b(lead), b(trail)), ignore_case)
     }
 
     /// Every match on `line`, for `-o`.
@@ -862,6 +865,21 @@ pub(crate) fn grep_prefilter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn literal_pipes_inside_an_alternation_stay_literal() {
+        let m = Matcher::new("o.traefik || o.adopted\\|zzz", false, false).unwrap();
+        assert!(m.is_match("const x = o.traefik || o.adopted;"));
+        assert!(m.is_match("zzz"));
+        assert!(!m.is_match("export function hero() {}"));
+    }
+
+    #[test]
+    fn word_match_keeps_a_literal_pipe_literal() {
+        let m = Matcher::build("a|b", false, false, true).unwrap();
+        assert!(m.is_match("x a|b y"));
+        assert!(!m.is_match("unrelated line"));
+    }
 
     #[test]
     fn literal_is_the_default_reading() {

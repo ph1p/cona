@@ -479,6 +479,12 @@ fn line_ranges_grep_counts_and_honest_misses() {
     assert_eq!(out.lines().count(), 1, "{out}");
     let (out, _) = run(&["grep", "beta", "--path", "sub", "--strict-path"]);
     assert_eq!(out, "no matches for 'beta' under 'sub'\n");
+    // several scopes: a miss names its scope, never re-lists a sibling's hits
+    let (out, _) = run(&["grep", "beta", "--path", "sub", "--path", "a.rs"]);
+    assert!(
+        out.starts_with("no matches for 'beta' under 'sub'\n") && !out.contains("elsewhere"),
+        "{out}"
+    );
     // a scope that names nothing is an error, not a quiet repo-wide search
     let (out, ok) = run(&["grep", "beta", "--path", "nope/x.rs"]);
     assert!(

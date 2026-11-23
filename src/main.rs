@@ -389,7 +389,10 @@ fn run() -> Result<()> {
                 only_matching: *only_matching,
                 full_lines: *full_lines,
                 no_tests: *no_tests,
-                strict_path: *strict_path,
+                // Several scopes: a miss in one is a single line. Its
+                // "elsewhere" search would list the hits of the sibling scopes,
+                // printed again right beside it.
+                strict_path: *strict_path || scopes.len() > 1,
             };
             queried(&root, t0, "grep", pattern, |conn| {
                 let mut out = String::new();
