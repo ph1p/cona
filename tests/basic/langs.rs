@@ -1,7 +1,6 @@
 //! Per-language symbol extraction + identifier semantics.
 
-use cona::{db, lang};
-use std::path::Path;
+use cona::lang;
 
 #[test]
 fn rust_symbols_qualified_and_generics_stripped() {
@@ -594,11 +593,15 @@ fn dockerfile_symbols() {
 
 #[test]
 fn parse_only_langs_parse_without_symbols() {
-    // nix/svelte/vue/r/graphql are parsed for refs/grep but extract no symbols.
+    // nix/svelte/astro/vue/r/graphql are parsed for refs/grep but extract no symbols.
     // (xml yields element symbols: `xml_elements_named_by_identifying_child`.)
     for (lang, src) in [
         ("nix", "{ pkgs }: { hello = pkgs.hello; }\n"),
         ("svelte", "<script>let x = 0;</script>\n<b>{x}</b>\n"),
+        (
+            "astro",
+            "---\nconst a = 1;\n---\n<div data-scramble>{a}</div>\n",
+        ),
         (
             "vue",
             "<script setup>\nfunction greet() {}\n</script>\n<template><b>{{ greet() }}</b></template>\n",
@@ -606,13 +609,16 @@ fn parse_only_langs_parse_without_symbols() {
         ("r", "add <- function(a) a\n"),
         ("graphql", "type Query { hello: String }\n"),
     ] {
-        // must not error (parser wired), symbol list may be empty
+        // parser wired (no error) and no classify arms (no symbols) — the
+        // premise of the `has_callable_symbols` deny-list entry
         let syms = lang::extract_symbols(lang, src).unwrap();
-        assert!(syms.is_empty() || !syms.is_empty(), "{lang}");
+        assert!(syms.is_empty(), "{lang}: {syms:?}");
+        assert!(!lang::has_callable_symbols(lang), "{lang}");
     }
     assert_eq!(lang::detect_lang("f.nix"), Some("nix"));
     assert_eq!(lang::detect_lang("C.svelte"), Some("svelte"));
     assert_eq!(lang::detect_lang("App.vue"), Some("vue"));
+    assert_eq!(lang::detect_lang("Layout.astro"), Some("astro"));
     assert_eq!(lang::detect_lang("s.R"), Some("r"));
     assert_eq!(lang::detect_lang("d.xml"), Some("xml"));
     assert_eq!(lang::detect_lang("s.graphql"), Some("graphql"));
@@ -626,31 +632,6 @@ fn syntax_errors_detected_and_clean_code_passes() {
     assert!(!lang::syntax_errors("python", "def broken(:\n  ((\n")
         .unwrap()
         .is_empty());
-}
-
-#[test]
-fn excluded_dirs_and_home_guard() {
-    use cona::indexer::is_excluded_dir;
-    assert!(is_excluded_dir("node_modules"));
-    assert!(is_excluded_dir("target"));
-    assert!(is_excluded_dir(".venv"));
-    assert!(!is_excluded_dir("src"));
-    assert!(!is_excluded_dir("lib"));
-
-    assert!(db::is_home_or_fs_root(Path::new("/")));
-    assert!(!db::is_home_or_fs_root(Path::new("/tmp/some/project")));
-}
-
-#[test]
-fn project_hash_is_deterministic_and_distinct() {
-    let a1 = db::project_hash(Path::new("/tmp/project-a"));
-    let a2 = db::project_hash(Path::new("/tmp/project-a"));
-    let b = db::project_hash(Path::new("/tmp/project-b"));
-    assert_eq!(a1, a2);
-    assert_ne!(a1, b);
-    assert_eq!(a1.len(), 16);
-    // pinned value: FNV-1a must never change, or existing DBs are orphaned
-    assert_eq!(db::project_hash(Path::new("/x")), "07d64e07b49caeb2");
 }
 
 #[test]

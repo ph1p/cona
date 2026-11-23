@@ -6,7 +6,7 @@ Token-efficient code-navigation CLI for AI agents. Rust + tree-sitter + SQLite.
 
 ```sh
 cargo build --release        # → target/release/cona
-cargo test                   # 412 tests (AR=/usr/bin/ar if Homebrew binutils' GNU ar is on PATH — it breaks the build.rs archives): unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
+cargo test                   # 390 tests (AR=/usr/bin/ar if Homebrew binutils' GNU ar is on PATH — it breaks the build.rs archives): unit (db, deps, diffmap, editing, entries, fuzzy, gitmap, graph, hook, install, lang, mcp, resolve, ui) + integration (tests/basic/, incl. MCP handshake)
 cd src/resolve-helper && cargo build --release   # → cona-resolve-helper (separate crate, own tree-sitter 0.24 runtime)
 ```
 
@@ -49,7 +49,7 @@ src/commands/    cmd_* impls: mod.rs (shared helpers + `defaults` = THE limits +
                  dead.rs (name-based dead-code candidates)
 src/lang/        Language detection + tree-sitter symbol extraction. 30+ langs
                  with symbols, incl. markup (XML/HTML elements named
-                 `tag#identity`); refs/grep-only for JSON/Svelte/Vue/SCSS/…
+                 `tag#identity`); refs/grep-only for JSON/Svelte/Astro/Vue/SCSS/…
                  An extension-less script takes its language from the `#!`
                  line (`shebang_lang`): callers use `detect_src` (source in
                  hand, pure) or `detect_file` (reads 128 bytes, extension-less

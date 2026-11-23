@@ -635,6 +635,16 @@ mod tests {
     }
 
     #[test]
+    fn dependency_and_build_dirs_are_excluded() {
+        for d in ["node_modules", "target", ".venv"] {
+            assert!(is_excluded_dir(d), "{d}");
+        }
+        for d in ["src", "lib"] {
+            assert!(!is_excluded_dir(d), "{d}");
+        }
+    }
+
+    #[test]
     fn lock_files_are_excluded_but_their_manifests_are_not() {
         for f in [
             "pnpm-lock.yaml",

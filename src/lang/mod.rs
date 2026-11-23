@@ -130,6 +130,9 @@ pub fn detect_lang(path: &str) -> Option<&'static str> {
         // parsed with the CSS grammar (error-tolerant): search only, no symbols
         "scss" | "sass" | "less" => Some("scss"),
         "vue" => Some("vue"),
+        // parsed with the HTML grammar (error-tolerant; the `---` frontmatter is
+        // text to it): search only, no symbols
+        "astro" => Some("astro"),
         "pl" | "pm" => Some("perl"),
         "r" | "R" => Some("r"),
         "jl" => Some("julia"),
@@ -162,7 +165,7 @@ pub fn has_callable_symbols(lang: &str) -> bool {
         "markdown" | "json" | "yaml" | "toml" | "css" | "graphql"
             // parse-only code languages: refs/grep work, but NO classify arms,
             // so `show <Symbol>` advice is a dead end
-            | "nix" | "svelte" | "vue" | "r" | "scss"
+            | "nix" | "svelte" | "vue" | "r" | "scss" | "astro"
     )
 }
 
@@ -191,7 +194,7 @@ pub fn language_for(lang: &str) -> Option<Language> {
         "json" => Some(tree_sitter_json::LANGUAGE.into()),
         "yaml" => Some(tree_sitter_yaml::LANGUAGE.into()),
         "toml" => Some(tree_sitter_toml_ng::LANGUAGE.into()),
-        "html" => Some(tree_sitter_html::LANGUAGE.into()),
+        "html" | "astro" => Some(tree_sitter_html::LANGUAGE.into()),
         "markdown" => Some(tree_sitter_md::LANGUAGE.into()),
         "zig" => Some(tree_sitter_zig::LANGUAGE.into()),
         "nix" => Some(tree_sitter_nix::LANGUAGE.into()),

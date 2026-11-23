@@ -355,3 +355,19 @@ fn hot_targets_need_two_days_and_an_answer() {
     let rows = hot_targets(&g, Some("/p"), 0, 10).unwrap();
     assert_eq!(rows, [("Hub".to_string(), 2)]);
 }
+
+#[test]
+fn project_hash_is_deterministic_and_distinct() {
+    let a = project_hash(Path::new("/tmp/project-a"));
+    assert_eq!(a, project_hash(Path::new("/tmp/project-a")));
+    assert_ne!(a, project_hash(Path::new("/tmp/project-b")));
+    assert_eq!(a.len(), 16);
+    // pinned value: FNV-1a must never change, or existing DBs are orphaned
+    assert_eq!(project_hash(Path::new("/x")), "07d64e07b49caeb2");
+}
+
+#[test]
+fn home_guard_refuses_fs_root_only() {
+    assert!(is_home_or_fs_root(Path::new("/")));
+    assert!(!is_home_or_fs_root(Path::new("/tmp/some/project")));
+}

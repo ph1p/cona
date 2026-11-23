@@ -18,253 +18,45 @@ fn facts() -> ReadFacts {
     }
 }
 
+/// Every read-decision rule as one row: (why, facts, expected). Base `facts()`
+/// is an 800-line indexed callable file, threshold 300, advise floor 120.
 #[test]
-fn never_redirects_a_file_with_uncommitted_changes() {
-    assert_eq!(
-        decide_read(&ReadFacts {
-            dirty: true,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn prose_redirects_only_when_huge() {
-    let prose = ReadFacts {
-        callable: false,
-        ..facts()
-    };
-    assert_eq!(decide_read(&prose), Decision::Allow);
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 300 * NON_CALLABLE_REDIRECT_FACTOR + 1,
-            ..prose
-        }),
-        Decision::Redirect
-    );
-}
-
-#[test]
-fn redirects_full_read_of_large_indexed_code_file() {
-    assert_eq!(decide_read(&facts()), Decision::Redirect);
-}
-
-#[test]
-fn allows_partial_read() {
-    assert_eq!(
-        decide_read(&ReadFacts {
-            partial: true,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn allows_small_file() {
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 42,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn allows_non_code_file() {
-    assert_eq!(
-        decide_read(&ReadFacts {
-            is_code: false,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn nudges_large_unindexed_code_file_in_repo() {
-    assert_eq!(
-        decide_read(&ReadFacts {
-            indexed: false,
-            ..facts()
-        }),
-        Decision::Nudge
-    );
-}
-
-#[test]
-fn allows_large_unindexed_file_outside_any_repo() {
-    assert_eq!(
-        decide_read(&ReadFacts {
-            indexed: false,
-            in_repo: false,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn never_redirects_exactly_at_threshold() {
-    // Exactly at max_lines must not block; with the advise tier on it lands in
-    // the advisory band (300 >= 120), still allowed.
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 300,
-            ..facts()
-        }),
-        Decision::Advise
-    );
-    // With the advise tier off it is a plain Allow.
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 300,
-            advise_min_lines: 0,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn advises_midsize_indexed_file() {
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 216,
-            ..facts()
-        }),
-        Decision::Advise
-    );
-}
-
-#[test]
-fn advises_exactly_at_advise_floor() {
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 120,
-            ..facts()
-        }),
-        Decision::Advise
-    );
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 119,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn advise_tier_disabled_at_zero() {
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 216,
-            advise_min_lines: 0,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn advises_reread_of_any_size() {
-    // Size-blind: the bytes are already in context.
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 12,
-            reread: true,
-            ..facts()
-        }),
-        Decision::Advise
-    );
-}
-
-#[test]
-fn reread_still_redirects_when_large() {
-    // Redirect outranks the advisory tier — the cheaper path is actionable.
-    assert_eq!(
-        decide_read(&ReadFacts {
-            reread: true,
-            ..facts()
-        }),
-        Decision::Redirect
-    );
-}
-
-#[test]
-fn advisory_tiers_need_an_index() {
-    // Nothing to point at in an unindexed project: stay silent.
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 216,
-            indexed: false,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 12,
-            reread: true,
-            indexed: false,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn partial_reread_is_untouched() {
-    // An explicit offset/limit is surgical — never second-guessed, even on repeat.
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 216,
-            partial: true,
-            reread: true,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn no_advice_for_prose_or_data_files() {
-    // "read one function instead" is meaningless for a README or a config.
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 216,
-            callable: false,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-    assert_eq!(
-        decide_read(&ReadFacts {
-            lines: 12,
-            callable: false,
-            reread: true,
-            ..facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn huge_prose_file_still_redirects() {
-    // Advisory is gated on `callable`, size-based Redirect is not: outline/show
-    // are still the cheap way into a 5k-line changelog. An ordinary README
-    // (`prose_redirects_only_when_huge`) is read whole on purpose.
-    assert_eq!(
-        decide_read(&ReadFacts {
-            callable: false,
-            lines: 5000,
-            ..facts()
-        }),
-        Decision::Redirect
-    );
+#[rustfmt::skip]
+fn decide_read_table() {
+    let f = facts;
+    let big_prose = 300 * NON_CALLABLE_REDIRECT_FACTOR;
+    let cases: Vec<(&str, ReadFacts, Decision)> = vec![
+        ("large indexed code file", f(), Decision::Redirect),
+        ("explicit offset/limit is surgical", ReadFacts { partial: true, ..f() }, Decision::Allow),
+        ("non-code file", ReadFacts { is_code: false, ..f() }, Decision::Allow),
+        ("small file", ReadFacts { lines: 42, ..f() }, Decision::Allow),
+        ("uncommitted changes never redirect", ReadFacts { dirty: true, ..f() }, Decision::Allow),
+        ("unindexed repo nudges", ReadFacts { indexed: false, ..f() }, Decision::Nudge),
+        ("outside any repo", ReadFacts { indexed: false, in_repo: false, ..f() }, Decision::Allow),
+        // threshold edges: exactly max_lines never blocks (lands in the advise band)
+        ("exactly at threshold", ReadFacts { lines: 300, ..f() }, Decision::Advise),
+        ("at threshold, advise off", ReadFacts { lines: 300, advise_min_lines: 0, ..f() }, Decision::Allow),
+        ("mid-size advises", ReadFacts { lines: 216, ..f() }, Decision::Advise),
+        ("exactly at advise floor", ReadFacts { lines: 120, ..f() }, Decision::Advise),
+        ("just under advise floor", ReadFacts { lines: 119, ..f() }, Decision::Allow),
+        ("advise tier off at 0", ReadFacts { lines: 216, advise_min_lines: 0, ..f() }, Decision::Allow),
+        // re-reads: size-blind hint (bytes already in context), redirect still outranks
+        ("re-read of a small file", ReadFacts { lines: 12, reread: true, ..f() }, Decision::Advise),
+        ("re-read of a large file", ReadFacts { reread: true, ..f() }, Decision::Redirect),
+        ("partial re-read untouched", ReadFacts { lines: 216, partial: true, reread: true, ..f() }, Decision::Allow),
+        // advisory tiers need an index to point at
+        ("mid-size, unindexed", ReadFacts { lines: 216, indexed: false, ..f() }, Decision::Allow),
+        ("re-read, unindexed", ReadFacts { lines: 12, reread: true, indexed: false, ..f() }, Decision::Allow),
+        // prose/data: no "read one function" advice; whole reads allowed until huge
+        ("mid-size prose", ReadFacts { lines: 216, callable: false, ..f() }, Decision::Allow),
+        ("prose re-read", ReadFacts { lines: 12, callable: false, reread: true, ..f() }, Decision::Allow),
+        ("large prose read whole", ReadFacts { callable: false, ..f() }, Decision::Allow),
+        ("prose exactly at factor", ReadFacts { callable: false, lines: big_prose, ..f() }, Decision::Allow),
+        ("prose past factor redirects", ReadFacts { callable: false, lines: big_prose + 1, ..f() }, Decision::Redirect),
+    ];
+    for (why, facts, want) in cases {
+        assert_eq!(decide_read(&facts), want, "{why}: {facts:?}");
+    }
 }
 
 #[test]
@@ -304,6 +96,7 @@ fn non_callable_languages_are_reachable() {
         ("a.svelte", "svelte"),
         ("a.vue", "vue"),
         ("a.scss", "scss"),
+        ("a.astro", "astro"),
         ("a.r", "r"),
     ] {
         assert_eq!(lang::detect_lang(path), Some(lang), "{path}");
@@ -352,126 +145,33 @@ fn grep_facts() -> GrepFacts {
     }
 }
 
+/// Every grep-decision rule as one row. Base `grep_facts()` is a broad
+/// identifier grep for a known symbol in an indexed repo.
 #[test]
-fn identifier_without_a_symbol_is_text() {
-    // `grep TODO`: identifier-shaped, but the index defines no such symbol
-    let word = GrepFacts {
-        symbol_known: false,
-        ..grep_facts()
-    };
-    assert_eq!(decide_grep(&word), Decision::Advise);
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            single_file: true,
-            ..word.clone()
-        }),
-        Decision::Allow
-    );
-    // no index to ask: the identifier shape alone decides
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            indexed_project: false,
-            ..word
-        }),
-        Decision::Nudge
-    );
-}
-
-#[test]
-fn redirects_broad_identifier_grep_in_indexed_project() {
-    assert_eq!(decide_grep(&grep_facts()), Decision::Redirect);
-}
-
-#[test]
-fn advises_soft_grep_in_indexed_project() {
-    // Bounded output softens the redirect to a hint — the search runs.
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            soft: true,
-            ..grep_facts()
-        }),
-        Decision::Advise
-    );
-    // Outside an indexed project, soft changes nothing.
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            soft: true,
-            indexed_project: false,
-            ..grep_facts()
-        }),
-        Decision::Nudge
-    );
-}
-
-#[test]
-fn advises_single_file_grep_but_never_blocks() {
-    // `grep -n foo one.rs` is `cona show foo` the long way: never blocked,
-    // but worth a hint.
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            single_file: true,
-            ..grep_facts()
-        }),
-        Decision::Advise
-    );
-}
-
-#[test]
-fn single_file_grep_in_unindexed_repo_stays_silent() {
-    // Too narrow to pitch a whole-project index; a broad search still Nudges.
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            single_file: true,
-            indexed_project: false,
-            ..grep_facts()
-        }),
-        Decision::Allow
-    );
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            indexed_project: false,
-            ..grep_facts()
-        }),
-        Decision::Nudge
-    );
-}
-
-#[test]
-fn allows_surgical_grep() {
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            surgical: true,
-            ..grep_facts()
-        }),
-        Decision::Allow
-    );
-}
-
-#[test]
-fn literal_patterns_advise_but_never_block() {
-    // A class name or regex has no symbol for `refs`, but `cona grep` still
-    // searches it code-only: a hint in an indexed project, nothing more.
-    let literal = GrepFacts {
-        identifier: false,
-        ..grep_facts()
-    };
-    assert_eq!(decide_grep(&literal), Decision::Advise);
-    // Single file, unindexed repo, or surgical → silent.
-    for f in [
-        GrepFacts {
-            single_file: true,
-            ..literal
-        },
-        GrepFacts {
-            indexed_project: false,
-            ..literal
-        },
-        GrepFacts {
-            surgical: true,
-            ..literal
-        },
-    ] {
-        assert_eq!(decide_grep(&f), Decision::Allow, "{f:?}");
+#[rustfmt::skip]
+fn decide_grep_table() {
+    let g = grep_facts;
+    let word = GrepFacts { symbol_known: false, ..g() }; // `grep TODO`: identifier-shaped, no symbol
+    let literal = GrepFacts { identifier: false, ..g() }; // class name / regex
+    let cases: Vec<(&str, GrepFacts, Decision)> = vec![
+        ("broad identifier grep", g(), Decision::Redirect),
+        ("surgical grep", GrepFacts { surgical: true, ..g() }, Decision::Allow),
+        ("bounded output softens to a hint", GrepFacts { soft: true, ..g() }, Decision::Advise),
+        ("single file: `cona show` the long way", GrepFacts { single_file: true, ..g() }, Decision::Advise),
+        ("unindexed repo nudges", GrepFacts { indexed_project: false, ..g() }, Decision::Nudge),
+        ("soft changes nothing unindexed", GrepFacts { soft: true, indexed_project: false, ..g() }, Decision::Nudge),
+        ("single file, unindexed: too narrow to pitch", GrepFacts { single_file: true, indexed_project: false, ..g() }, Decision::Allow),
+        ("outside any repo", GrepFacts { indexed_project: false, in_repo: false, ..g() }, Decision::Allow),
+        ("word without a symbol is text", word.clone(), Decision::Advise),
+        ("word, single file", GrepFacts { single_file: true, ..word.clone() }, Decision::Allow),
+        ("word, unindexed: shape alone decides", GrepFacts { indexed_project: false, ..word }, Decision::Nudge),
+        ("literal advises, never blocks", literal.clone(), Decision::Advise),
+        ("literal, single file", GrepFacts { single_file: true, ..literal.clone() }, Decision::Allow),
+        ("literal, unindexed", GrepFacts { indexed_project: false, ..literal.clone() }, Decision::Allow),
+        ("literal, surgical", GrepFacts { surgical: true, ..literal }, Decision::Allow),
+    ];
+    for (why, facts, want) in cases {
+        assert_eq!(decide_grep(&facts), want, "{why}: {facts:?}");
     }
 }
 
@@ -490,29 +190,6 @@ fn literal_advice_is_ready_to_paste() {
         "{regex}"
     );
     assert!(literal_advice("it's").contains(r"'it'\''s'"));
-}
-
-#[test]
-fn nudges_broad_grep_in_unindexed_repo() {
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            indexed_project: false,
-            ..grep_facts()
-        }),
-        Decision::Nudge
-    );
-}
-
-#[test]
-fn allows_broad_grep_outside_any_repo() {
-    assert_eq!(
-        decide_grep(&GrepFacts {
-            indexed_project: false,
-            in_repo: false,
-            ..grep_facts()
-        }),
-        Decision::Allow
-    );
 }
 
 // ---- shell-command normalization (Codex: `tool_name = "Bash"`) ----

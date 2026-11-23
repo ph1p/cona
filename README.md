@@ -273,7 +273,7 @@ C#, Ruby, PHP, Kotlin, Swift, Scala, Elixir, Dart, Lua, Bash, CSS, TOML, YAML,
 Markdown, Zig, Haskell, OCaml, Julia, PowerShell, Objective-C, Protobuf, SQL,
 Perl, HCL/Terraform, Makefile, Dockerfile, XML, HTML.
 
-**Search only:** JSON, Nix, Svelte, Vue, R, GraphQL, SCSS/Sass/Less.
+**Search only:** JSON, Nix, Svelte, Astro, Vue, R, GraphQL, SCSS/Sass/Less.
 
 Scripts without an extension (`bin/deploy`, `scripts/release`) are indexed by
 their `#!` line — sh/bash/zsh, Python, Node/Bun/Deno, Ruby, Perl, Lua, PHP.
