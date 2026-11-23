@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/ph1p/cona/compare/v0.1.12...v0.1.13) - 2026-11-23
+
+### Added
+
+- *(lang)* index .astro files for search
+
+### Fixed
+
+- *(grep)* literal pipes in alternations, quiet multi-scope misses
+
 ## [0.1.12](https://github.com/ph1p/cona/compare/v0.1.11...v0.1.12) - 2026-11-17
 
 ### Other
